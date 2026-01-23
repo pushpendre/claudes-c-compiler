@@ -1,0 +1,13 @@
+Fix floating-point codegen on x86-64
+
+Float constants are not being emitted properly - they are replaced with
+xorq %rax, %rax (zero). Float values need to:
+
+1. Float/double constants emitted into .rodata with labels
+2. Loaded via movss/movsd from .rodata into XMM registers
+3. Float store/load uses movsd/movss instead of movq
+4. Float function arguments passed via xmm0-xmm7 (SysV ABI)
+5. %al set to number of FP args for variadic function calls
+6. Float return values in xmm0
+
+This affects thousands of tests that use any floating-point operations.
