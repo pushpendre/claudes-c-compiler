@@ -211,6 +211,7 @@ fn get_inst_dest(inst: &Instruction) -> Option<Value> {
         Instruction::UnaryOp { dest, .. } => Some(*dest),
         Instruction::Cmp { dest, .. } => Some(*dest),
         Instruction::Call { dest, .. } => *dest,
+        Instruction::CallIndirect { dest, .. } => *dest,
         Instruction::GetElementPtr { dest, .. } => Some(*dest),
         Instruction::Cast { dest, .. } => Some(*dest),
         Instruction::Copy { dest, .. } => Some(*dest),

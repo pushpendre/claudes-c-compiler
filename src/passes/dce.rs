@@ -111,6 +111,12 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
                 collect_operand_uses(arg, used);
             }
         }
+        Instruction::CallIndirect { func_ptr, args, .. } => {
+            collect_operand_uses(func_ptr, used);
+            for arg in args {
+                collect_operand_uses(arg, used);
+            }
+        }
         Instruction::GetElementPtr { base, offset, .. } => {
             used.insert(base.0);
             collect_operand_uses(offset, used);
@@ -151,7 +157,8 @@ fn collect_operand_uses(op: &Operand, used: &mut HashSet<u32>) {
 fn has_side_effects(inst: &Instruction) -> bool {
     matches!(inst,
         Instruction::Store { .. } |
-        Instruction::Call { .. }
+        Instruction::Call { .. } |
+        Instruction::CallIndirect { .. }
     )
 }
 
@@ -164,6 +171,7 @@ fn get_dest(inst: &Instruction) -> Option<Value> {
         Instruction::UnaryOp { dest, .. } => Some(*dest),
         Instruction::Cmp { dest, .. } => Some(*dest),
         Instruction::Call { dest, .. } => *dest,
+        Instruction::CallIndirect { dest, .. } => *dest,
         Instruction::GetElementPtr { dest, .. } => Some(*dest),
         Instruction::Cast { dest, .. } => Some(*dest),
         Instruction::Copy { dest, .. } => Some(*dest),
