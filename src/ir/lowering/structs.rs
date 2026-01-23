@@ -222,16 +222,55 @@ impl Lowerer {
                 }
             }
             _ => {
-                let val = self.lower_expr(expr);
-                match val {
-                    Operand::Value(v) => v,
-                    Operand::Const(_) => {
-                        let tmp = self.fresh_value();
-                        self.emit(Instruction::Copy { dest: tmp, src: val });
-                        tmp
+                // For expressions that might produce packed struct data (e.g. ternary
+                // with struct-returning function calls), detect and spill to an alloca.
+                if self.expr_produces_packed_struct_data(expr) {
+                    let struct_size = self.get_struct_size_for_expr(expr);
+                    let val = self.lower_expr(expr);
+                    let alloca = self.fresh_value();
+                    let alloc_size = if struct_size > 0 { struct_size } else { 8 };
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64 });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
+                    alloca
+                } else {
+                    let val = self.lower_expr(expr);
+                    match val {
+                        Operand::Value(v) => v,
+                        Operand::Const(_) => {
+                            let tmp = self.fresh_value();
+                            self.emit(Instruction::Copy { dest: tmp, src: val });
+                            tmp
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// Check if an expression produces packed struct data (non-address value)
+    /// rather than a pointer to struct data. This happens for small structs
+    /// (<= 8 bytes) returned from non-sret function calls, either directly
+    /// or through ternary/comma expressions.
+    pub(super) fn expr_produces_packed_struct_data(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionCall(func_expr, _, _) => {
+                // Already handled above in get_struct_base_addr, but include for completeness
+                if let Expr::Identifier(name, _) = func_expr.as_ref() {
+                    !self.func_meta.sret_functions.contains_key(name)
+                } else {
+                    // Indirect call - assume non-sret for small structs
+                    true
+                }
+            }
+            Expr::Conditional(_, then_expr, else_expr, _) => {
+                // If either branch produces packed struct data, the ternary does too
+                self.expr_produces_packed_struct_data(then_expr)
+                    || self.expr_produces_packed_struct_data(else_expr)
+            }
+            Expr::Comma(_, last, _) => {
+                self.expr_produces_packed_struct_data(last)
+            }
+            _ => false,
         }
     }
 

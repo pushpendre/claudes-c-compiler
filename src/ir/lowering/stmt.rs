@@ -428,10 +428,10 @@ impl Lowerer {
                             }
                         } else if is_struct {
                             // Struct copy-initialization: struct Point b = a;
-                            // For function calls returning small structs (<= 8 bytes),
-                            // the return value IS the struct data in rax (not an address).
-                            // Store it directly instead of using memcpy.
-                            if matches!(expr, Expr::FunctionCall(_, _, _)) && actual_alloc_size <= 8 {
+                            // For expressions producing packed struct data (small struct
+                            // function call returns, ternaries over them, etc.), the value
+                            // IS the struct data, not an address. Store directly.
+                            if self.expr_produces_packed_struct_data(expr) && actual_alloc_size <= 8 {
                                 let val = self.lower_expr(expr);
                                 self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                             } else {

@@ -796,10 +796,10 @@ impl Lowerer {
     fn lower_struct_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Operand {
         let struct_size = self.get_struct_size_for_expr(lhs);
 
-        // For function calls returning small structs (<= 8 bytes),
-        // the return value IS the struct data in rax, not an address.
-        // Store it directly instead of memcpy.
-        if matches!(rhs, Expr::FunctionCall(_, _, _)) && struct_size <= 8 {
+        // For expressions producing packed struct data (small struct function
+        // call returns, ternaries over them, etc.), the value IS the struct
+        // data, not an address. Store it directly instead of memcpy.
+        if self.expr_produces_packed_struct_data(rhs) && struct_size <= 8 {
             let rhs_val = self.lower_expr(rhs);
             if let Some(lv) = self.lower_lvalue(lhs) {
                 let dest_addr = self.lvalue_addr(&lv);
