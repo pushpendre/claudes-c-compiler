@@ -534,6 +534,83 @@ impl Parser {
         }
     }
 
+    /// Extract a name from arbitrarily nested parentheses: (name), ((name)), (((name))), etc.
+    /// Also handles pointer prefix: (*(name)), (*((name))), etc.
+    /// Current position should be at the opening '('.
+    /// Consumes the parenthesized group and returns the name if found.
+    fn extract_paren_name(&mut self) -> Option<String> {
+        if !matches!(self.peek(), TokenKind::LParen) {
+            // Not parenthesized - check for direct identifier
+            if let TokenKind::Identifier(n) = self.peek().clone() {
+                self.advance();
+                return Some(n);
+            }
+            return None;
+        }
+        self.advance(); // consume '('
+        // Skip '*' for pointer inside parens
+        if matches!(self.peek(), TokenKind::Star) {
+            self.advance();
+            self.skip_cv_qualifiers();
+        }
+        // Recursively extract name from nested parens or get identifier
+        let name = if matches!(self.peek(), TokenKind::LParen) {
+            self.extract_paren_name()
+        } else if let TokenKind::Identifier(n) = self.peek().clone() {
+            self.advance();
+            Some(n)
+        } else {
+            None
+        };
+        self.consume_if(&TokenKind::RParen);
+        name
+    }
+
+    /// Try to parse a parenthesized abstract declarator that contains pointer(s).
+    /// Handles patterns like: (*), ((*)), (*(*(*))), (**)
+    /// Returns the total pointer depth if successful, None if not recognized.
+    /// Consumes the tokens if successful.
+    fn try_parse_paren_abstract_declarator(&mut self) -> Option<u32> {
+        if !matches!(self.peek(), TokenKind::LParen) {
+            return None;
+        }
+        let save = self.pos;
+        self.advance(); // consume '('
+
+        let mut total_ptrs = 0u32;
+
+        // Count leading stars: (*...) or scan for nested
+        while self.consume_if(&TokenKind::Star) {
+            total_ptrs += 1;
+            self.skip_cv_qualifiers();
+        }
+
+        // Check for nested parenthesized abstract declarator: (* (...))
+        if matches!(self.peek(), TokenKind::LParen) {
+            if let Some(inner_ptrs) = self.try_parse_paren_abstract_declarator() {
+                total_ptrs += inner_ptrs;
+            } else {
+                // Not a valid nested pattern
+                self.pos = save;
+                return None;
+            }
+        }
+
+        // Expect closing paren
+        if self.consume_if(&TokenKind::RParen) {
+            if total_ptrs > 0 {
+                Some(total_ptrs)
+            } else {
+                // Empty parens () with no pointers - not an abstract declarator
+                self.pos = save;
+                None
+            }
+        } else {
+            self.pos = save;
+            None
+        }
+    }
+
     #[allow(unused_assignments)]
     fn parse_type_specifier(&mut self) -> Option<TypeSpecifier> {
         self.skip_gcc_extensions();
@@ -956,7 +1033,7 @@ impl Parser {
                     fields.push(StructFieldDecl { type_spec, name: None, bit_width: None });
                 } else {
                     loop {
-                        // Check for function pointer field: type (*name)(params)
+                        // Check for function pointer field or parenthesized name
                         if matches!(self.peek(), TokenKind::LParen) {
                             let save = self.pos;
                             self.advance(); // consume '('
@@ -980,8 +1057,60 @@ impl Parser {
                                     break;
                                 }
                                 continue;
+                            } else if let TokenKind::Identifier(_) = self.peek() {
+                                // Parenthesized field name: int (name) or int (name):N
+                                let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+                                    self.advance();
+                                    Some(n)
+                                } else {
+                                    None
+                                };
+                                self.expect(&TokenKind::RParen);
+                                let field_type = type_spec.clone();
+                                // Parse array dimensions after parenthesized name
+                                let mut ft = field_type;
+                                let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
+                                while matches!(self.peek(), TokenKind::LBracket) {
+                                    self.advance();
+                                    let size = if matches!(self.peek(), TokenKind::RBracket) {
+                                        None
+                                    } else {
+                                        Some(Box::new(self.parse_expr()))
+                                    };
+                                    self.expect(&TokenKind::RBracket);
+                                    array_dims.push(size);
+                                }
+                                for dim in array_dims.into_iter().rev() {
+                                    ft = TypeSpecifier::Array(Box::new(ft), dim);
+                                }
+                                // Bit field
+                                let bit_width = if self.consume_if(&TokenKind::Colon) {
+                                    Some(Box::new(self.parse_expr()))
+                                } else {
+                                    None
+                                };
+                                fields.push(StructFieldDecl { type_spec: ft, name, bit_width });
+                                if !self.consume_if(&TokenKind::Comma) {
+                                    break;
+                                }
+                                continue;
+                            } else if matches!(self.peek(), TokenKind::LParen) {
+                                // Nested parenthesized name: ((name))
+                                let name = self.extract_paren_name();
+                                self.expect(&TokenKind::RParen);
+                                let field_type = type_spec.clone();
+                                let bit_width = if self.consume_if(&TokenKind::Colon) {
+                                    Some(Box::new(self.parse_expr()))
+                                } else {
+                                    None
+                                };
+                                fields.push(StructFieldDecl { type_spec: field_type, name, bit_width });
+                                if !self.consume_if(&TokenKind::Comma) {
+                                    break;
+                                }
+                                continue;
                             } else {
-                                self.pos = save; // restore, not a function pointer
+                                self.pos = save; // restore, not a recognized pattern
                             }
                         }
                         // Parse pointer declarators: wrap type_spec for each *
@@ -1076,102 +1205,43 @@ impl Parser {
             self.skip_gcc_extensions();
         }
 
-        // Parse name or parenthesized declarator
-        let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+        // Parse the direct-declarator part (name, parenthesized declarator, or abstract)
+        //
+        // C grammar:
+        //   direct-declarator:
+        //     identifier
+        //     '(' declarator ')'            <-- recursive!
+        //     direct-declarator '[' ... ']'
+        //     direct-declarator '(' ... ')'
+        //
+        // When we see '(', we must disambiguate:
+        //   - Parenthesized declarator: starts with '*', '^', '(', or non-type identifier
+        //   - Parameter list (abstract declarator suffix): starts with type keyword/typedef, ')', '...'
+        let (name, inner_derived) = if let TokenKind::Identifier(n) = self.peek().clone() {
             self.advance();
-            Some(n)
-        } else if matches!(self.peek(), TokenKind::LParen) {
-            // Could be:
-            // 1. Function pointer: (*name)(params)
-            // 2. Parenthesized declarator: (name)
-            // 3. Function params: (int x, int y) - for abstract declarators
-            // Use lookahead to disambiguate
+            (Some(n), Vec::new())
+        } else if matches!(self.peek(), TokenKind::LParen) && self.is_paren_declarator() {
+            // Parenthesized declarator: ( declarator )
+            // Recursively parse the inner declarator
             let save = self.pos;
             self.advance(); // consume '('
 
-            if matches!(self.peek(), TokenKind::Star) || matches!(self.peek(), TokenKind::Caret) {
-                // Function pointer declarator: (*name) or (^name)
-                self.advance(); // consume '*' or '^'
-                self.skip_cv_qualifiers();
-                let inner_name = if let TokenKind::Identifier(n) = self.peek().clone() {
-                    self.advance();
-                    Some(n)
-                } else {
-                    None
-                };
-                // Parse array brackets inside: (*name[n]) for array of function pointers
-                let mut inner_array_dims: Vec<Option<Box<Expr>>> = Vec::new();
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance(); // consume '['
-                    let size = if matches!(self.peek(), TokenKind::RBracket) {
-                        None
-                    } else {
-                        Some(Box::new(self.parse_expr()))
-                    };
-                    self.expect(&TokenKind::RBracket);
-                    inner_array_dims.push(size);
-                }
-                self.expect(&TokenKind::RParen);
-                // Parse the function parameter list or array that follows
-                if matches!(self.peek(), TokenKind::LParen) {
-                    // Function pointer (possibly array): (*name[N])(params)
-                    // Emit Array dims first, then Pointer, then FunctionPointer
-                    for dim in inner_array_dims {
-                        derived.push(DerivedDeclarator::Array(dim));
-                    }
-                    derived.push(DerivedDeclarator::Pointer);
-                    let (params, variadic) = self.parse_param_list();
-                    derived.push(DerivedDeclarator::FunctionPointer(params, variadic));
-                } else if matches!(self.peek(), TokenKind::LBracket) {
-                    // Pointer to array: (*name)[N]
-                    // Array dims come BEFORE Pointer so apply_derived_declarators
-                    // builds Pointer(Array(base, N)) correctly.
-                    while matches!(self.peek(), TokenKind::LBracket) {
-                        self.advance();
-                        let size = if matches!(self.peek(), TokenKind::RBracket) {
-                            None
-                        } else {
-                            Some(Box::new(self.parse_expr()))
-                        };
-                        self.expect(&TokenKind::RBracket);
-                        derived.push(DerivedDeclarator::Array(size));
-                    }
-                    derived.push(DerivedDeclarator::Pointer);
-                } else {
-                    // Just (*name) - plain pointer
-                    derived.push(DerivedDeclarator::Pointer);
-                }
-                self.skip_gcc_extensions();
-                return (inner_name, derived);
-            } else if let TokenKind::Identifier(_) = self.peek() {
-                // Parenthesized name: (name)
-                // But only if the next token after the identifier is ')'
-                let save2 = self.pos;
-                if let TokenKind::Identifier(n) = self.peek().clone() {
-                    self.advance();
-                    if matches!(self.peek(), TokenKind::RParen) {
-                        self.advance(); // consume ')'
-                        // Continue to parse array/function suffixes below
-                        Some(n)
-                    } else {
-                        // Not a parenthesized name; restore and treat as no name
-                        self.pos = save;
-                        None
-                    }
-                } else {
-                    self.pos = save2;
-                    None
-                }
-            } else {
-                // Not a declarator pattern we recognize; restore
+            let (inner_name, inner_derived) = self.parse_declarator();
+            if !self.consume_if(&TokenKind::RParen) {
+                // If we didn't find a closing paren, this wasn't a parenthesized declarator.
+                // Restore position and treat as abstract (no name).
                 self.pos = save;
-                None
+                (None, Vec::new())
+            } else {
+                (inner_name, inner_derived)
             }
         } else {
-            None
+            (None, Vec::new())
         };
 
-        // Parse array dimensions and function params
+        // Parse outer suffixes: array dimensions and function params
+        // These apply OUTSIDE the parenthesized declarator
+        let mut outer_suffixes = Vec::new();
         loop {
             match self.peek() {
                 TokenKind::LBracket => {
@@ -1184,20 +1254,171 @@ impl Parser {
                         Some(Box::new(self.parse_expr()))
                     };
                     self.expect(&TokenKind::RBracket);
-                    derived.push(DerivedDeclarator::Array(size));
+                    outer_suffixes.push(DerivedDeclarator::Array(size));
                 }
                 TokenKind::LParen => {
                     let (params, variadic) = self.parse_param_list();
-                    derived.push(DerivedDeclarator::Function(params, variadic));
+                    outer_suffixes.push(DerivedDeclarator::Function(params, variadic));
                 }
                 _ => break,
             }
         }
 
+        // Combine: the inner derived modifiers (from inside parens) come first,
+        // then the outer suffixes. This is because in C, the inner modifiers bind
+        // more tightly to the name.
+        //
+        // Example: int (*fp)(int)
+        //   - derived (before paren): []
+        //   - inner_derived: [Pointer] (from the * inside parens)
+        //   - outer_suffixes: [Function([int])] (from the (int) after the paren group)
+        //   - Result: [Pointer, Function([int])]
+        //   - Combined with base type int: fp is Pointer(Function(int)->int)
+        //
+        // For function pointers, we need to convert Function to FunctionPointer
+        // when the inner derived contains a Pointer as its last element.
+        let combined = self.combine_declarator_parts(derived, inner_derived, outer_suffixes);
+
         // Skip trailing attributes
         self.skip_gcc_extensions();
 
-        (name, derived)
+        (name, combined)
+    }
+
+    /// Determine if a '(' token at the current position starts a parenthesized declarator
+    /// (as opposed to a function parameter list for an abstract declarator).
+    ///
+    /// Heuristic: after '(' we check what follows:
+    /// - '*', '^': definitely a pointer declarator like (*fp)
+    /// - '(': nested parenthesized declarator like ((x))
+    /// - identifier that is NOT a typedef: likely a parenthesized name like (name)
+    /// - type keyword, typedef name, ')', '...': likely a parameter list
+    fn is_paren_declarator(&self) -> bool {
+        if self.pos + 1 >= self.tokens.len() {
+            return false;
+        }
+        match &self.tokens[self.pos + 1].kind {
+            // Definitely a parenthesized declarator
+            TokenKind::Star | TokenKind::Caret => true,
+            // Nested parenthesized declarator
+            TokenKind::LParen => true,
+            // GCC attribute inside declarator
+            TokenKind::Attribute | TokenKind::Extension => true,
+            // Identifier: check if it's a typedef name (= param list) or regular name (= declarator)
+            TokenKind::Identifier(name) => {
+                // If it's a known typedef, it starts a parameter list
+                if self.typedefs.contains(name) && !self.shadowed_typedefs.contains(name) {
+                    false
+                } else {
+                    // Non-typedef identifier => parenthesized declarator name
+                    true
+                }
+            }
+            // Empty parens () or '...' or type keywords => parameter list
+            TokenKind::RParen | TokenKind::Ellipsis => false,
+            // Type specifier keywords => parameter list
+            TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int |
+            TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed |
+            TokenKind::Unsigned | TokenKind::Struct | TokenKind::Union | TokenKind::Enum |
+            TokenKind::Const | TokenKind::Volatile | TokenKind::Static | TokenKind::Extern |
+            TokenKind::Register | TokenKind::Typedef | TokenKind::Inline | TokenKind::Bool |
+            TokenKind::Typeof | TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
+            TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas |
+            TokenKind::Builtin => false,
+            // Anything else: assume not a declarator
+            _ => false,
+        }
+    }
+
+    /// Combine the parts of a declarator parsed recursively.
+    ///
+    /// C declarators follow the "inside-out" rule:
+    /// - `outer_pointers`: pointer modifiers parsed before the parenthesized group
+    /// - `inner_derived`: modifiers from inside the parenthesized group (from recursive parse_declarator)
+    /// - `outer_suffixes`: array/function suffixes parsed after the parenthesized group
+    ///
+    /// The flat DerivedDeclarator list is processed left-to-right, where each entry
+    /// wraps the accumulated type. The correct order for the inside-out rule is:
+    ///   outer_pointers ++ outer_suffixes ++ inner_derived
+    ///
+    /// This ensures outer suffixes modify the base type first, then inner modifiers
+    /// wrap the result (binding more tightly to the name).
+    ///
+    /// Special case: for function pointers ((*name)(params)), we convert to the
+    /// existing [Pointer, FunctionPointer] convention used by the rest of the codebase.
+    fn combine_declarator_parts(
+        &self,
+        mut outer_pointers: Vec<DerivedDeclarator>,
+        inner_derived: Vec<DerivedDeclarator>,
+        outer_suffixes: Vec<DerivedDeclarator>,
+    ) -> Vec<DerivedDeclarator> {
+        if inner_derived.is_empty() && outer_suffixes.is_empty() {
+            // Simple case: no parenthesized declarator, just pointers
+            return outer_pointers;
+        }
+
+        if inner_derived.is_empty() {
+            // No inner declarator (e.g., just extra parens like `int (x)` → treat as plain)
+            outer_pointers.extend(outer_suffixes);
+            return outer_pointers;
+        }
+
+        // Check if we have a simple function pointer pattern:
+        // inner_derived is only Pointer(s) and optional Array(s), outer_suffixes starts with Function.
+        // Convert to the [Array..., Pointer, FunctionPointer] convention.
+        let inner_only_ptr_and_array = inner_derived.iter().all(|d|
+            matches!(d, DerivedDeclarator::Pointer | DerivedDeclarator::Array(_)));
+        let inner_has_pointer = inner_derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+        let outer_starts_with_function = matches!(outer_suffixes.first(), Some(DerivedDeclarator::Function(_, _)));
+
+        if inner_only_ptr_and_array && inner_has_pointer && outer_starts_with_function
+            && outer_suffixes.len() == 1
+        {
+            // Simple function pointer: (*name)(params) or (*name[N])(params)
+            let mut result = outer_pointers;
+            // Emit inner arrays first (for array of function pointers)
+            for d in &inner_derived {
+                if matches!(d, DerivedDeclarator::Array(_)) {
+                    result.push(d.clone());
+                }
+            }
+            // Emit pointer(s)
+            for d in &inner_derived {
+                if matches!(d, DerivedDeclarator::Pointer) {
+                    result.push(DerivedDeclarator::Pointer);
+                }
+            }
+            // Convert Function to FunctionPointer
+            if let Some(DerivedDeclarator::Function(params, variadic)) = outer_suffixes.into_iter().next() {
+                result.push(DerivedDeclarator::FunctionPointer(params, variadic));
+            }
+            return result;
+        }
+
+        // Check if we have simple pointer-to-array: (*name)[N]
+        // inner_derived is only Pointer(s), outer_suffixes is only Array(s)
+        let outer_only_arrays = outer_suffixes.iter().all(|d| matches!(d, DerivedDeclarator::Array(_)));
+        if inner_only_ptr_and_array && inner_has_pointer && outer_only_arrays
+            && !inner_derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)))
+        {
+            // Pointer to array: (*name)[N]
+            // Convention: Array dims first, then Pointer
+            let mut result = outer_pointers;
+            result.extend(outer_suffixes);
+            for d in inner_derived {
+                if matches!(d, DerivedDeclarator::Pointer) {
+                    result.push(d);
+                }
+            }
+            return result;
+        }
+
+        // General case: outer_pointers ++ outer_suffixes ++ inner_derived
+        // This implements the inside-out rule: outer suffixes modify the base type,
+        // then inner modifiers wrap the result (closer to the name = applied later).
+        outer_pointers.extend(outer_suffixes);
+        outer_pointers.extend(inner_derived);
+        outer_pointers
     }
 
     fn parse_param_list(&mut self) -> (Vec<ParamDecl>, bool) {
@@ -1344,16 +1565,26 @@ impl Parser {
             let save = self.pos;
             self.advance(); // consume '('
 
-            if self.consume_if(&TokenKind::Star) {
-                // (*name) pattern: could be function pointer (*name)(params)
+            if matches!(self.peek(), TokenKind::Star) {
+                // (*name), (**name), etc. pattern: could be function pointer (*name)(params)
                 // or pointer-to-array (*name)[N]
-                self.skip_cv_qualifiers();
+                // Count all pointer levels inside the parens
+                let mut inner_ptr_depth = 0u32;
+                while self.consume_if(&TokenKind::Star) {
+                    inner_ptr_depth += 1;
+                    self.skip_cv_qualifiers();
+                }
                 let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                     self.advance();
                     Some(n)
+                } else if matches!(self.peek(), TokenKind::LParen) {
+                    // Nested parenthesized name: (*(name)) or (*((name)))
+                    self.extract_paren_name()
                 } else {
                     None
                 };
+                // Add extra pointer levels (first * is handled below via is_func_ptr or pointer_depth)
+                pointer_depth += inner_ptr_depth.saturating_sub(1);
                 // Skip array dimensions inside parens (e.g., (*name[N]) for array of func ptrs)
                 self.skip_array_dimensions();
                 self.expect(&TokenKind::RParen);
@@ -1402,6 +1633,19 @@ impl Parser {
                 } else {
                     None
                 };
+                // Handle additional nested parens: ((name))
+                // Consume all closing parens that match the opening ones
+                self.expect(&TokenKind::RParen);
+                // Might be followed by array dimensions or param list
+                self.skip_array_dimensions();
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.skip_balanced_parens();
+                }
+                name
+            } else if matches!(self.peek(), TokenKind::LParen) {
+                // Nested parenthesized declarator: ((name)) or ((*name))
+                // Recursively extract the name from nested parens
+                let name = self.extract_paren_name();
                 self.expect(&TokenKind::RParen);
                 // Might be followed by array dimensions or param list
                 self.skip_array_dimensions();
@@ -2113,31 +2357,56 @@ impl Parser {
             self.advance();
             if self.is_type_specifier() {
                 if let Some(type_spec) = self.parse_type_specifier() {
-                    // Parse pointer declarators in abstract declarator
+                    // Parse abstract declarator after the type specifier.
+                    // This handles:
+                    //   - Simple pointers: (int *)
+                    //   - Parenthesized pointers: (int (*)), (int ((*)))
+                    //   - Function pointers: (int (*)(int))
+                    //   - Pointer to pointer: (int **), (int (*(*)))
+                    //   - Arrays: (int [3])
                     let mut result_type = type_spec;
+                    // Parse leading pointer(s)
                     while self.consume_if(&TokenKind::Star) {
                         result_type = TypeSpecifier::Pointer(Box::new(result_type));
                         self.skip_cv_qualifiers();
                     }
-                    // Handle function pointer casts: (int (*)(int, int))
-                    // If we see '(' after the stars, this might be a function pointer
+                    // Handle parenthesized abstract declarators: (type (**)), (type (*)(params))
+                    // Patterns: (*), ((*)), (*(*(*))), (*)[N], (*)(params)
                     if matches!(self.peek(), TokenKind::LParen) {
                         let save2 = self.pos;
-                        self.advance(); // skip '('
-                        if self.consume_if(&TokenKind::Star) {
-                            // This is a function pointer cast like (int (*)(args))
-                            // Skip rest of declarator: optional name, then ')'
-                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                                self.advance();
-                            }
-                            self.consume_if(&TokenKind::RParen);
-                            // Skip parameter list if present
+                        // Try to parse a parenthesized abstract declarator
+                        if let Some(ptr_depth) = self.try_parse_paren_abstract_declarator() {
+                            // Check what follows the parenthesized group
                             if matches!(self.peek(), TokenKind::LParen) {
+                                // Function pointer cast: (*)(params) or (**)(params)
                                 self.skip_balanced_parens();
+                                // All pointer levels contribute
+                                for _ in 0..ptr_depth {
+                                    result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                }
+                            } else if matches!(self.peek(), TokenKind::LBracket) {
+                                // Pointer to array: (*)[N]
+                                while matches!(self.peek(), TokenKind::LBracket) {
+                                    self.advance();
+                                    let size = if matches!(self.peek(), TokenKind::RBracket) {
+                                        None
+                                    } else {
+                                        Some(Box::new(self.parse_expr()))
+                                    };
+                                    self.expect(&TokenKind::RBracket);
+                                    result_type = TypeSpecifier::Array(Box::new(result_type), size);
+                                }
+                                for _ in 0..ptr_depth {
+                                    result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                }
+                            } else {
+                                // Just parenthesized pointers
+                                for _ in 0..ptr_depth {
+                                    result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                }
                             }
-                            // The result type is a function pointer (Ptr)
-                            result_type = TypeSpecifier::Pointer(Box::new(result_type));
                         } else {
+                            // Not a parenthesized abstract declarator
                             self.pos = save2;
                         }
                     }
@@ -2251,6 +2520,45 @@ impl Parser {
                                 result_type = TypeSpecifier::Pointer(Box::new(result_type));
                                 self.skip_cv_qualifiers();
                             }
+                            // Handle parenthesized abstract declarators: sizeof(int(*)[N])
+                            if matches!(self.peek(), TokenKind::LParen) {
+                                let save_sz = self.pos;
+                                if let Some(ptr_depth) = self.try_parse_paren_abstract_declarator() {
+                                    // Check what follows
+                                    if matches!(self.peek(), TokenKind::LBracket) {
+                                        // Pointer to array: sizeof(int(*)[N])
+                                        while matches!(self.peek(), TokenKind::LBracket) {
+                                            self.advance();
+                                            let size_expr = if !matches!(self.peek(), TokenKind::RBracket) {
+                                                Some(Box::new(self.parse_assignment_expr()))
+                                            } else {
+                                                None
+                                            };
+                                            self.consume_if(&TokenKind::RBracket);
+                                            result_type = TypeSpecifier::Array(Box::new(result_type), size_expr);
+                                        }
+                                        for _ in 0..ptr_depth {
+                                            result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                        }
+                                    } else if matches!(self.peek(), TokenKind::LParen) {
+                                        // Function pointer: sizeof(int(*)(int))
+                                        self.skip_balanced_parens();
+                                        for _ in 0..ptr_depth {
+                                            result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                        }
+                                    } else {
+                                        // Just parenthesized pointer: sizeof(int(*))
+                                        for _ in 0..ptr_depth {
+                                            result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                                        }
+                                    }
+                                } else {
+                                    self.pos = save_sz;
+                                    // Not a paren abstract declarator - might be function pointer
+                                    // sizeof(void (*)(int)) - old handling
+                                    self.skip_balanced_parens();
+                                }
+                            }
                             // Parse array dimensions: sizeof(int[10])
                             while matches!(self.peek(), TokenKind::LBracket) {
                                 self.advance();
@@ -2262,10 +2570,6 @@ impl Parser {
                                 };
                                 self.consume_if(&TokenKind::RBracket);
                                 result_type = TypeSpecifier::Array(Box::new(result_type), size_expr);
-                            }
-                            // Handle function pointer in sizeof: sizeof(void (*)(int))
-                            if matches!(self.peek(), TokenKind::LParen) {
-                                self.skip_balanced_parens();
                             }
                             if matches!(self.peek(), TokenKind::RParen) {
                                 self.expect(&TokenKind::RParen);
