@@ -1,0 +1,20 @@
+Task: Refactor IR lowering spaghetti code
+
+The ir/lowering/expr.rs file contains a single 822-line lower_expr() function
+that is the worst code quality issue in the project. Similarly, lower_local_decl()
+in stmt.rs is 387 lines of deeply nested code.
+
+Plan:
+1. Break lower_expr() into focused helper functions:
+   - lower_pointer_binop() - pointer arithmetic with scaling
+   - lower_binop() - binary operation dispatch
+   - lower_function_call() - function call dispatch (187 lines alone)
+   - lower_compound_literal() - compound literal init
+   - lower_cast_expr() - cast expression handling
+   - lower_address_of() - address-of operator
+   - lower_member_access() - struct member access
+2. Break lower_local_decl() into helpers for initializer handling
+3. Add subdirectory READMEs documenting the lowering architecture
+4. Remove dead code and simplify where possible
+
+Status: IN PROGRESS
