@@ -974,10 +974,17 @@ impl Lowerer {
                 var_ty
             };
 
+            // For structs with FAMs, the init byte array may be larger than layout.size.
+            // Use the actual init data size if it exceeds the computed alloc size.
+            let final_size = match &init {
+                GlobalInit::Array(vals) if is_struct && vals.len() > actual_alloc_size => vals.len(),
+                _ => actual_alloc_size,
+            };
+
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),
                 ty: global_ty,
-                size: actual_alloc_size,
+                size: final_size,
                 align,
                 init,
                 is_static,
@@ -1429,13 +1436,40 @@ impl Lowerer {
             return self.lower_struct_global_init_compound(items, layout);
         }
 
-        let total_size = layout.size;
+        // Compute total size including flexible array member data if present
+        let total_size = layout.size + self.compute_fam_extra_size(items, layout);
         let mut bytes = vec![0u8; total_size];
         self.fill_struct_global_bytes(items, layout, &mut bytes, 0);
 
         // Emit as array of I8 (byte) constants
         let values: Vec<IrConst> = bytes.iter().map(|&b| IrConst::I8(b as i8)).collect();
         GlobalInit::Array(values)
+    }
+
+    /// Compute extra bytes needed for a flexible array member (FAM) at the end of a struct.
+    /// Returns 0 if there is no FAM or no initializer data for it.
+    fn compute_fam_extra_size(&self, items: &[InitializerItem], layout: &StructLayout) -> usize {
+        if let Some(last_field) = layout.fields.last() {
+            if let CType::Array(ref elem_ty, None) = last_field.ty {
+                let elem_size = elem_ty.size();
+                let last_field_idx = layout.fields.len() - 1;
+                let mut current_field_idx = 0usize;
+                for (item_idx, item) in items.iter().enumerate() {
+                    let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
+                    if field_idx == last_field_idx {
+                        let num_elems = match &item.init {
+                            Initializer::List(sub_items) => sub_items.len(),
+                            Initializer::Expr(_) => items.len() - item_idx,
+                        };
+                        return num_elems * elem_size;
+                    }
+                    if field_idx < layout.fields.len() {
+                        current_field_idx = field_idx + 1;
+                    }
+                }
+            }
+        }
+        0
     }
 
     /// Check if a struct initializer list contains any fields that require address relocations.
@@ -1802,6 +1836,65 @@ impl Lowerer {
                                 item_idx += consumed.max(1);
                             }
                             // Don't increment item_idx here; it was already advanced in the loop
+                            current_field_idx = field_idx + 1;
+                            continue;
+                        }
+                    }
+                }
+                CType::Array(elem_ty, None) => {
+                    // Flexible array member (FAM): int values[];
+                    // The byte buffer was already enlarged to accommodate FAM data.
+                    let elem_size = elem_ty.size();
+                    let elem_ir_ty = IrType::from_ctype(elem_ty);
+                    match &item.init {
+                        Initializer::List(sub_items) => {
+                            for (ai, sub_item) in sub_items.iter().enumerate() {
+                                let elem_offset = field_offset + ai * elem_size;
+                                if let Initializer::Expr(expr) = &sub_item.init {
+                                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                    if elem_offset + elem_size <= bytes.len() {
+                                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                    }
+                                } else if let Initializer::List(inner) = &sub_item.init {
+                                    // Brace-wrapped scalar: {5}
+                                    if let Some(first) = inner.first() {
+                                        if let Initializer::Expr(expr) = &first.init {
+                                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                            if elem_offset + elem_size <= bytes.len() {
+                                                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            item_idx += 1;
+                        }
+                        Initializer::Expr(expr) => {
+                            // Flat init: fill FAM elements from consecutive items
+                            let mut ai = 0usize;
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let elem_offset = field_offset + ai * elem_size;
+                            if elem_offset + elem_size <= bytes.len() {
+                                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                            }
+                            ai += 1;
+                            item_idx += 1;
+                            // Continue consuming items without designators
+                            while item_idx < items.len() {
+                                let next_item = &items[item_idx];
+                                if !next_item.designators.is_empty() { break; }
+                                if let Initializer::Expr(e) = &next_item.init {
+                                    let val = self.eval_const_expr(e).unwrap_or(IrConst::I64(0));
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    if elem_offset + elem_size <= bytes.len() {
+                                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                    }
+                                    ai += 1;
+                                    item_idx += 1;
+                                } else {
+                                    break;
+                                }
+                            }
                             current_field_idx = field_idx + 1;
                             continue;
                         }
