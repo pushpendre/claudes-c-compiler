@@ -1348,6 +1348,7 @@ impl Lowerer {
                 }
             }
             Expr::UnaryOp(_, inner, _) => self.infer_expr_type(inner),
+            Expr::Sizeof(_, _) => IrType::U64,  // sizeof returns size_t (unsigned long)
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if let Some(&ret_ty) = self.function_return_types.get(name.as_str()) {

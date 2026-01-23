@@ -264,7 +264,15 @@ impl X86Codegen {
                     IrType::U32 => self.state.emit("    movl %eax, %eax"),
                     _ => {}
                 }
+            } else if to_ty == IrType::U32 {
+                // Sign-extend to 32-bit (which clears upper 32 bits on x86-64)
+                match from_ty {
+                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                    _ => {}
+                }
             } else {
+                // Sign-extend to 64-bit
                 match from_ty {
                     IrType::I8 => self.state.emit("    movsbq %al, %rax"),
                     IrType::I16 => self.state.emit("    movswq %ax, %rax"),

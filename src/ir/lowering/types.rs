@@ -704,6 +704,7 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => return self.get_expr_type(rhs),
             Expr::PostfixOp(_, inner, _) => return self.get_expr_type(inner),
             Expr::AddressOf(_, _) => return IrType::Ptr,
+            Expr::Sizeof(_, _) => return IrType::U64,  // sizeof returns size_t (unsigned long)
             Expr::FunctionCall(func, _, _) => {
                 // Look up the return type of the called function
                 if let Expr::Identifier(name, _) = func.as_ref() {
@@ -1770,8 +1771,12 @@ impl Lowerer {
                     _ => None,
                 }
             }
-            Expr::FunctionCall(_, _, _) => {
-                // TODO: could look up function return type
+            Expr::FunctionCall(func, _, _) => {
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if let Some(ctype) = self.function_return_ctypes.get(name) {
+                        return Some(ctype.clone());
+                    }
+                }
                 None
             }
             _ => None,

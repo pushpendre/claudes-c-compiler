@@ -288,6 +288,12 @@ impl Preprocessor {
         self.define_simple_macro("__asm", "asm");
         self.define_simple_macro("__typeof__", "typeof");
 
+        // MSVC-compatible integer type specifiers
+        self.define_simple_macro("__int8", "char");
+        self.define_simple_macro("__int16", "short");
+        self.define_simple_macro("__int32", "int");
+        self.define_simple_macro("__int64", "long long");
+
         // ELF ABI: no prefix for user labels on Linux
         self.define_simple_macro("__USER_LABEL_PREFIX__", "");
 

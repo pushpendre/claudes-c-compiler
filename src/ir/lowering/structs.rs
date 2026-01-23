@@ -296,6 +296,14 @@ impl Lowerer {
                 // array[i] where array is of struct type
                 self.get_layout_for_expr(base)
             }
+            Expr::CompoundLiteral(type_spec, _, _) => {
+                self.get_struct_layout_for_type(type_spec)
+            }
+            Expr::Cast(type_spec, inner, _) => {
+                // Cast to struct type, or cast wrapping a compound literal
+                self.get_struct_layout_for_type(type_spec)
+                    .or_else(|| self.get_layout_for_expr(inner))
+            }
             _ => None,
         }
     }

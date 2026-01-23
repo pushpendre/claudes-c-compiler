@@ -214,7 +214,16 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
         }
         GlobalInit::Array(values) => {
             for val in values {
-                emit_const_data(out, val, g.ty, ptr_dir);
+                // Use the constant's own type for byte-serialized struct/array data
+                let elem_ty = match val {
+                    IrConst::I8(_) => IrType::I8,
+                    IrConst::I16(_) => IrType::I16,
+                    IrConst::I32(_) => IrType::I32,
+                    IrConst::F32(_) => IrType::F32,
+                    IrConst::F64(_) => IrType::F64,
+                    _ => g.ty,
+                };
+                emit_const_data(out, val, elem_ty, ptr_dir);
             }
         }
         GlobalInit::String(s) => {

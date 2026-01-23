@@ -123,6 +123,8 @@ pub struct Lowerer {
     /// Mapping from bare static local variable names to their mangled global names.
     /// e.g., "x" -> "main.x.0" for `static int x;` inside `main()`.
     pub(super) static_local_names: HashMap<String, String>,
+    /// Function name -> return CType mapping (for pointer-returning functions).
+    pub(super) function_return_ctypes: HashMap<String, CType>,
 }
 
 impl Lowerer {
@@ -160,6 +162,7 @@ impl Lowerer {
             function_ptr_return_types: HashMap::new(),
             function_ptr_param_types: HashMap::new(),
             static_local_names: HashMap::new(),
+            function_return_ctypes: HashMap::new(),
         }
     }
 
@@ -205,6 +208,11 @@ impl Lowerer {
                 self.known_functions.insert(func.name.clone());
                 let ret_ty = self.type_spec_to_ir(&func.return_type);
                 self.function_return_types.insert(func.name.clone(), ret_ty);
+                // Track CType for pointer-returning functions
+                if ret_ty == IrType::Ptr {
+                    let ret_ctype = self.type_spec_to_ctype(&func.return_type);
+                    self.function_return_ctypes.insert(func.name.clone(), ret_ctype);
+                }
                 // Collect parameter types (skip variadic portion)
                 let param_tys: Vec<IrType> = func.params.iter().map(|p| {
                     self.type_spec_to_ir(&p.type_spec)
@@ -240,6 +248,20 @@ impl Lowerer {
                             ret_ty = IrType::Ptr;
                         }
                         self.function_return_types.insert(declarator.name.clone(), ret_ty);
+                        // Track CType for pointer-returning functions
+                        if ret_ty == IrType::Ptr {
+                            let base_ctype = self.type_spec_to_ctype(&decl.type_spec);
+                            let ret_ctype = if ptr_count > 0 {
+                                let mut ct = base_ctype;
+                                for _ in 0..ptr_count {
+                                    ct = CType::Pointer(Box::new(ct));
+                                }
+                                ct
+                            } else {
+                                base_ctype
+                            };
+                            self.function_return_ctypes.insert(declarator.name.clone(), ret_ctype);
+                        }
                         let param_tys: Vec<IrType> = params.iter().map(|p| {
                             self.type_spec_to_ir(&p.type_spec)
                         }).collect();
@@ -1840,10 +1862,16 @@ impl Lowerer {
                 self.expr_is_pointer(then_expr) || self.expr_is_pointer(else_expr)
             }
             Expr::Comma(_, rhs, _) => self.expr_is_pointer(rhs),
-            Expr::FunctionCall(_, _, _) => {
+            Expr::FunctionCall(func, _, _) => {
                 // Check CType for function call return
                 if let Some(ctype) = self.get_expr_ctype(expr) {
                     return matches!(ctype, CType::Pointer(_));
+                }
+                // Fallback: check IrType return type
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if let Some(&ret_ty) = self.function_return_types.get(name.as_str()) {
+                        return ret_ty == IrType::Ptr;
+                    }
                 }
                 false
             }
