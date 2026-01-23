@@ -1,0 +1,14 @@
+Fix goto label collisions across functions
+
+The compiler generates `.Luser_{label_name}` for user-defined goto labels,
+but this is not function-scoped. When multiple functions use the same label
+name (e.g., `lab:`), the assembler reports "symbol is already defined".
+
+This causes ~31 assembly failures in the test suite.
+
+Fix:
+1. In IR lowering, prepend function name or unique counter to user labels
+   so that goto labels become `.Luser_{func}_{label}` or similar
+2. This ensures labels are unique across the entire compilation unit
+
+Additionally fixing: global struct initializer codegen
