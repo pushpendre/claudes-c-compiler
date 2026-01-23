@@ -1,6 +1,6 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{IrType, CType};
 use super::lowering::{Lowerer, LValue};
 
 impl Lowerer {
@@ -199,6 +199,57 @@ impl Lowerer {
                 // Otherwise it's a pointer - evaluate and use as address
                 self.lower_expr(base)
             }
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                // Check if the field is an array type - arrays decay to pointers,
+                // so we return the field address (not load the value).
+                let field_is_array = self.resolve_member_field_ctype(base_expr, field_name)
+                    .map(|ct| matches!(ct, CType::Array(_, _)))
+                    .unwrap_or(false);
+                if field_is_array {
+                    // Return address of the array field (array decays to pointer)
+                    let (field_offset, _) = self.resolve_member_access(base_expr, field_name);
+                    let base_addr = self.get_struct_base_addr(base_expr);
+                    let field_addr = self.fresh_value();
+                    self.emit(Instruction::GetElementPtr {
+                        dest: field_addr,
+                        base: base_addr,
+                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                        ty: IrType::Ptr,
+                    });
+                    return Operand::Value(field_addr);
+                }
+                // Not an array field - load the pointer value
+                self.lower_expr(base)
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                // Check if the field is an array type - arrays decay to pointers
+                let field_is_array = self.resolve_pointer_member_field_ctype(base_expr, field_name)
+                    .map(|ct| matches!(ct, CType::Array(_, _)))
+                    .unwrap_or(false);
+                if field_is_array {
+                    // Return address of the array field (array decays to pointer)
+                    let ptr_val = self.lower_expr(base_expr);
+                    let base_addr = match ptr_val {
+                        Operand::Value(v) => v,
+                        Operand::Const(_) => {
+                            let tmp = self.fresh_value();
+                            self.emit(Instruction::Copy { dest: tmp, src: ptr_val });
+                            tmp
+                        }
+                    };
+                    let (field_offset, _) = self.resolve_pointer_member_access(base_expr, field_name);
+                    let field_addr = self.fresh_value();
+                    self.emit(Instruction::GetElementPtr {
+                        dest: field_addr,
+                        base: base_addr,
+                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                        ty: IrType::Ptr,
+                    });
+                    return Operand::Value(field_addr);
+                }
+                // Not an array field - load the pointer value
+                self.lower_expr(base)
+            }
             _ => {
                 self.lower_expr(base)
             }
@@ -209,6 +260,11 @@ impl Lowerer {
     /// For a[i] where a is int[2][3], returns 12 (3*4 = stride of first dimension).
     /// For a[i][j] where a is int[2][3], returns 4 (element size).
     pub(super) fn get_array_elem_size_for_subscript(&self, base: &Expr) -> usize {
+        // Handle struct/union member access: s.field[i] or p->field[i]
+        if let Some(elem_size) = self.get_member_array_elem_size(base) {
+            return elem_size;
+        }
+
         // Find the root array name and count subscript depth
         let root_name = self.get_array_root_name_from_base(base);
         let depth = self.count_subscript_depth(base);
@@ -242,6 +298,31 @@ impl Lowerer {
 
         // Fallback to old behavior
         self.get_array_elem_size(base)
+    }
+
+    /// Get the element size for a struct/union member that is an array.
+    /// For s.field where field is `char[8]`, returns 1 (sizeof(char)).
+    /// For s.arr where arr is `int[10]`, returns 4 (sizeof(int)).
+    fn get_member_array_elem_size(&self, base: &Expr) -> Option<usize> {
+        match base {
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
+                    if let CType::Array(elem_ty, _) = &ctype {
+                        return Some(elem_ty.size());
+                    }
+                }
+                None
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                    if let CType::Array(elem_ty, _) = &ctype {
+                        return Some(elem_ty.size());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Get the element size for array subscript (legacy, for 1D arrays).

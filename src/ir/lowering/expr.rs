@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins::{self, BuiltinKind};
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -759,6 +759,14 @@ impl Lowerer {
                     offset: Operand::Const(IrConst::I64(field_offset as i64)),
                     ty: field_ty,
                 });
+                // If the field is an array type, return the address (array decays to pointer).
+                // Don't load the value - the address IS the pointer.
+                let field_is_array = self.resolve_member_field_ctype(base_expr, field_name)
+                    .map(|ct| matches!(ct, CType::Array(_, _)))
+                    .unwrap_or(false);
+                if field_is_array {
+                    return Operand::Value(field_addr);
+                }
                 let dest = self.fresh_value();
                 self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
                 Operand::Value(dest)
@@ -782,6 +790,13 @@ impl Lowerer {
                     offset: Operand::Const(IrConst::I64(field_offset as i64)),
                     ty: field_ty,
                 });
+                // If the field is an array type, return the address (array decays to pointer).
+                let field_is_array = self.resolve_pointer_member_field_ctype(base_expr, field_name)
+                    .map(|ct| matches!(ct, CType::Array(_, _)))
+                    .unwrap_or(false);
+                if field_is_array {
+                    return Operand::Value(field_addr);
+                }
                 let dest = self.fresh_value();
                 self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
                 Operand::Value(dest)

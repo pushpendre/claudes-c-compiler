@@ -839,8 +839,17 @@ impl Parser {
                         } else {
                             None
                         };
-                        // Skip array brackets
-                        self.skip_array_dimensions();
+                        // Parse array dimensions and wrap the type
+                        while matches!(self.peek(), TokenKind::LBracket) {
+                            self.advance(); // consume '['
+                            let size = if matches!(self.peek(), TokenKind::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr()))
+                            };
+                            self.expect(&TokenKind::RBracket);
+                            field_type = TypeSpecifier::Array(Box::new(field_type), size);
+                        }
                         // Bit field
                         let bit_width = if self.consume_if(&TokenKind::Colon) {
                             Some(Box::new(self.parse_expr()))

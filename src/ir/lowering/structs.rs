@@ -264,6 +264,27 @@ impl Lowerer {
         }
     }
 
+    /// Resolve member access to get the CType of the field (not just the IrType).
+    /// This is needed to check if a field is an array type (for array decay behavior).
+    pub(super) fn resolve_member_field_ctype(&self, base_expr: &Expr, field_name: &str) -> Option<CType> {
+        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+            if let Some((_offset, ctype)) = layout.field_offset(field_name) {
+                return Some(ctype.clone());
+            }
+        }
+        None
+    }
+
+    /// Resolve pointer member access to get the CType of the field.
+    pub(super) fn resolve_pointer_member_field_ctype(&self, base_expr: &Expr, field_name: &str) -> Option<CType> {
+        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+            if let Some((_offset, ctype)) = layout.field_offset(field_name) {
+                return Some(ctype.clone());
+            }
+        }
+        None
+    }
+
     /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
     /// Handles self-referential structs by looking up the cache when fields are empty.
     fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<StructLayout> {

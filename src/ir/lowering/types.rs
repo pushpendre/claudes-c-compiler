@@ -454,6 +454,24 @@ impl Lowerer {
                         }
                     }
                 }
+                // For struct/union member array access: s.arr[i] or p->arr[i]
+                match base.as_ref() {
+                    Expr::MemberAccess(base_expr, field_name, _) => {
+                        if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
+                            if let CType::Array(elem_ty, _) = &ctype {
+                                return IrType::from_ctype(elem_ty);
+                            }
+                        }
+                    }
+                    Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                        if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                            if let CType::Array(elem_ty, _) = &ctype {
+                                return IrType::from_ctype(elem_ty);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 // For complex base expressions, try to resolve pointee type
                 if let Some(pt) = self.get_pointee_type_of_expr(base) {
                     return pt;
