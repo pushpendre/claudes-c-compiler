@@ -4,7 +4,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional with SSA.** ~73% of x86-64 tests passing.
+**Basic compilation pipeline functional with SSA.** ~80% of tests passing across all three backends.
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
@@ -16,9 +16,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~73.0% passing (2183/2991)
-- AArch64: ~77.8% passing (2231/2869)
-- RISC-V 64: ~76.8% passing (2196/2861)
+- x86-64: ~80.2% passing (2400/2991)
+- AArch64: ~81.4% passing (2335/2869)
+- RISC-V 64: ~80.1% passing (2293/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -56,6 +56,12 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **RISC-V bit manipulation ops**: Implemented software fallbacks for CLZ, CTZ, BSWAP,
+  and POPCOUNT on RISC-V (previously returned 0). Also fixed x86 to use correct
+  32-bit instruction variants (bsrl, bswapl, etc.) for 32-bit types.
+- **RISC-V inline asm constraints**: Added support for "A" (address for AMO/LR/SC),
+  "f" (FP register), "I"/"i" (immediate), "J"/"rJ" (zero register), and %z modifier.
+  Fixes ~22 RISC-V inline assembly test cases.
 - **Function typedef declarations**: Fixed declarations using typedef'd function types
   (e.g., `typedef int func_t(int); func_t add;`) being emitted as BSS variables instead of
   being recognized as function forward declarations. Fixes duplicate symbol errors in mbedtls.
