@@ -914,7 +914,15 @@ impl Lowerer {
 
     fn lower_compound_literal(&mut self, type_spec: &TypeSpecifier, init: &Initializer) -> Operand {
         let ty = self.type_spec_to_ir(type_spec);
-        let size = self.sizeof_type(type_spec);
+        // For incomplete array types (e.g., (int[]){1,2,3}), compute size from the
+        // initializer list length since sizeof_type doesn't know the element count.
+        let size = match (self.resolve_type_spec(type_spec), init) {
+            (TypeSpecifier::Array(ref elem, None), Initializer::List(items)) => {
+                let elem_size = self.sizeof_type(elem);
+                elem_size * items.len()
+            }
+            _ => self.sizeof_type(type_spec),
+        };
         let alloca = self.fresh_value();
         self.emit(Instruction::Alloca { dest: alloca, size, ty });
 
