@@ -1,5 +1,5 @@
 Task: Fix flexible array member (FAM) initialization in global structs
-Status: IN PROGRESS
+Status: DONE
 
 Problem:
 When a struct with a flexible array member (e.g., `struct one { int a; int values[]; }`)
@@ -16,3 +16,5 @@ Fix:
 2. Enlarged byte buffer in `lower_struct_global_init` to include FAM data
 3. Added `CType::Array(elem_ty, None)` match arm in `fill_struct_global_bytes` to write FAM elements
 4. Updated `IrGlobal::size` to use actual init data size when it exceeds layout.size (for FAM)
+
+Tested: Verified on all 3 backends (x86-64, AArch64, RISC-V) with both positional and designated initializers.
