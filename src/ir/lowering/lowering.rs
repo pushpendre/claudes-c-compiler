@@ -753,8 +753,12 @@ impl Lowerer {
                 // Designated initializer: find field by name
                 layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
             } else {
-                // Positional: use current field index
-                current_field_idx
+                // Positional: skip unnamed fields (anonymous bitfields)
+                let mut idx = current_field_idx;
+                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
+                    idx += 1;
+                }
+                idx
             };
 
             if field_idx >= layout.fields.len() {

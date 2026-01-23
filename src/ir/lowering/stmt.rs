@@ -281,7 +281,12 @@ impl Lowerer {
                                     let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
                                         layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
                                     } else {
-                                        current_field_idx
+                                        // Skip unnamed fields (anonymous bitfields) for positional init
+                                        let mut idx = current_field_idx;
+                                        while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
+                                            idx += 1;
+                                        }
+                                        idx
                                     };
 
                                     if field_idx >= layout.fields.len() { break; }
