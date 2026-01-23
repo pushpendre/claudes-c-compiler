@@ -937,13 +937,21 @@ impl Lowerer {
                 // Try to evaluate as a constant
                 if let Some(val) = self.eval_const_expr(expr) {
                     // Convert integer constants to float if target type is float/double
-                    let val = val.coerce_to(base_ty);
+                    // Use the expression's type for signedness (e.g., unsigned long long -> float)
+                    let src_ty = self.get_expr_type(expr);
+                    let val = self.coerce_const_to_type_with_src(val, base_ty, src_ty);
                     // If target is long double, promote F64 to LongDouble for proper encoding
                     let val = if is_long_double_target {
                         match val {
                             IrConst::F64(v) => IrConst::LongDouble(v),
                             IrConst::F32(v) => IrConst::LongDouble(v as f64),
-                            IrConst::I64(v) => IrConst::LongDouble(v as f64),
+                            IrConst::I64(v) => {
+                                if src_ty.is_unsigned() {
+                                    IrConst::LongDouble((v as u64) as f64)
+                                } else {
+                                    IrConst::LongDouble(v as f64)
+                                }
+                            }
                             IrConst::I32(v) => IrConst::LongDouble(v as f64),
                             other => other, // LongDouble already, or other type
                         }
@@ -988,7 +996,10 @@ impl Lowerer {
             Initializer::List(items) => {
                 // Handle brace-wrapped string literal for char arrays:
                 // char c[] = {"hello"} or static char c[] = {"hello"}
-                if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
+                // But NOT for pointer arrays like char *arr[] = {"hello"} where
+                // elem_size > base_ty.size() (elem is pointer, base is char).
+                let is_char_not_ptr_array = elem_size <= base_ty.size().max(1);
+                if is_array && is_char_not_ptr_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
                     if items.len() == 1 && items[0].designators.is_empty() {
                         if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
                             return GlobalInit::String(s.clone());
@@ -999,11 +1010,18 @@ impl Lowerer {
                 if is_array && elem_size > 0 {
                     // For struct arrays, elem_size is the actual struct size (from sizeof_type),
                     // whereas base_ty.size() may return Ptr size (8). Use elem_size for structs.
-                    let num_elems = if struct_layout.is_some() {
+                    // For long double arrays, elem_size=16 but base_ty=F64 (size=8), so use elem_size.
+                    // For pointer arrays (e.g., char *arr[N]), elem_size=8 (pointer) but
+                    // base_ty=I8 (char), so use elem_size when it's larger than base_ty.size().
+                    let num_elems = if struct_layout.is_some() || is_long_double_target {
                         total_size / elem_size.max(1)
                     } else {
                         let base_type_size = base_ty.size().max(1);
-                        total_size / base_type_size
+                        if elem_size > base_type_size {
+                            total_size / elem_size
+                        } else {
+                            total_size / base_type_size
+                        }
                     };
 
                     // Array of structs: emit as byte array using struct layout.
@@ -1080,44 +1098,33 @@ impl Lowerer {
                     // Distinguish from char *arr[] by checking array_dim_strides.len() > 1.
                     let is_multidim_char_array = matches!(base_ty, IrType::I8 | IrType::U8)
                         && array_dim_strides.len() > 1;
+                    // Also check for pointer arrays (elem_size > base_ty.size())
+                    // which indicates char *arr[] or similar pointer-to-char arrays.
+                    let is_ptr_array = elem_size > base_ty.size().max(1);
                     let has_addr_exprs = items.iter().any(|item| {
+                        // Check direct Expr items for address expressions (original check)
                         if let Initializer::Expr(expr) = &item.init {
                             if matches!(expr, Expr::StringLiteral(_, _)) {
-                                !is_multidim_char_array
-                            } else {
-                                matches!(expr, Expr::LabelAddr(_, _))
-                                    || (self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some())
+                                return !is_multidim_char_array;
                             }
-                        } else {
-                            false
+                            if matches!(expr, Expr::LabelAddr(_, _)) {
+                                return true;
+                            }
+                            if self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some() {
+                                return true;
+                            }
                         }
-                    });
+                        // Also recurse into nested lists for string literals (double-brace init)
+                        Self::init_contains_addr_expr(item, is_multidim_char_array)
+                    }) || (is_ptr_array && !is_multidim_char_array && items.iter().any(|item| {
+                        Self::init_contains_string_literal(item)
+                    }));
 
                     if has_addr_exprs {
                         // Use Compound initializer for arrays containing address expressions
                         let mut elements = Vec::with_capacity(num_elems);
                         for item in items {
-                            if let Initializer::Expr(expr) = &item.init {
-                                if let Expr::StringLiteral(s, _) = expr {
-                                    // String literal: create .rodata entry and use its label
-                                    let label = format!(".Lstr{}", self.next_string);
-                                    self.next_string += 1;
-                                    self.module.string_literals.push((label.clone(), s.clone()));
-                                    elements.push(GlobalInit::GlobalAddr(label));
-                                } else if let Expr::LabelAddr(label_name, _) = expr {
-                                    // GCC &&label extension: emit label address as GlobalAddr
-                                    let scoped_label = self.get_or_create_user_label(label_name);
-                                    elements.push(GlobalInit::GlobalAddr(scoped_label));
-                                } else if let Some(val) = self.eval_const_expr(expr) {
-                                    elements.push(GlobalInit::Scalar(val));
-                                } else if let Some(addr) = self.eval_global_addr_expr(expr) {
-                                    elements.push(addr);
-                                } else {
-                                    elements.push(GlobalInit::Zero);
-                                }
-                            } else {
-                                elements.push(GlobalInit::Zero);
-                            }
+                            self.collect_compound_init_element(&item.init, &mut elements);
                         }
                         // Zero-fill remaining
                         while elements.len() < num_elems {
@@ -1126,19 +1133,37 @@ impl Lowerer {
                         return GlobalInit::Compound(elements);
                     }
 
-                    let mut values = vec![self.zero_const(base_ty); num_elems];
+                    let zero_val = if is_long_double_target {
+                        IrConst::LongDouble(0.0)
+                    } else {
+                        self.zero_const(base_ty)
+                    };
+                    let mut values = vec![zero_val; num_elems];
                     // For multi-dim arrays, flatten nested init lists
                     if array_dim_strides.len() > 1 {
                         // For multi-dim arrays, num_elems is outer dimension count,
                         // but we need total scalar elements for the flattened init
                         let innermost_stride = array_dim_strides.last().copied().unwrap_or(1).max(1);
-                        let total_scalar_elems = total_size / innermost_stride;
-                        let mut values_flat = vec![self.zero_const(base_ty); total_scalar_elems];
+                        let total_scalar_elems = if is_long_double_target {
+                            total_size / 16
+                        } else {
+                            total_size / innermost_stride
+                        };
+                        let ld_zero = if is_long_double_target {
+                            IrConst::LongDouble(0.0)
+                        } else {
+                            self.zero_const(base_ty)
+                        };
+                        let mut values_flat = vec![ld_zero; total_scalar_elems];
                         let mut flat = Vec::with_capacity(total_scalar_elems);
                         self.flatten_global_array_init(items, array_dim_strides, base_ty, &mut flat);
                         for (i, v) in flat.into_iter().enumerate() {
                             if i < total_scalar_elems {
-                                values_flat[i] = v;
+                                values_flat[i] = if is_long_double_target {
+                                    Self::promote_to_long_double(v)
+                                } else {
+                                    v
+                                };
                             }
                         }
                         return GlobalInit::Array(values_flat);
@@ -1156,7 +1181,8 @@ impl Lowerer {
                                 let val = match &item.init {
                                     Initializer::Expr(expr) => {
                                         let raw = self.eval_const_expr(expr).unwrap_or(self.zero_const(base_ty));
-                                        raw.coerce_to(base_ty)
+                                        let expr_ty = self.get_expr_type(expr);
+                                        self.coerce_const_to_type_with_src(raw, base_ty, expr_ty)
                                     }
                                     Initializer::List(sub_items) => {
                                         // Nested list - flatten
@@ -1168,7 +1194,11 @@ impl Lowerer {
                                         raw.coerce_to(base_ty)
                                     }
                                 };
-                                values[current_idx] = val;
+                                values[current_idx] = if is_long_double_target {
+                                    Self::promote_to_long_double(val)
+                                } else {
+                                    val
+                                };
                             }
                             current_idx += 1;
                         }
@@ -1186,7 +1216,8 @@ impl Lowerer {
                 if !is_array && items.len() >= 1 {
                     if let Initializer::Expr(expr) = &items[0].init {
                         if let Some(val) = self.eval_const_expr(expr) {
-                            return GlobalInit::Scalar(val.coerce_to(base_ty));
+                            let expr_ty = self.get_expr_type(expr);
+                            return GlobalInit::Scalar(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));
                         }
                         // Try address expression
                         if let Some(addr_init) = self.eval_global_addr_expr(expr) {
@@ -1262,6 +1293,19 @@ impl Lowerer {
         });
 
         GlobalInit::GlobalAddr(label)
+    }
+
+    /// Promote an IrConst value to LongDouble (16 bytes) for long double array elements.
+    fn promote_to_long_double(val: IrConst) -> IrConst {
+        match val {
+            IrConst::F64(v) => IrConst::LongDouble(v),
+            IrConst::F32(v) => IrConst::LongDouble(v as f64),
+            IrConst::I64(v) => IrConst::LongDouble(v as f64),
+            IrConst::I32(v) => IrConst::LongDouble(v as f64),
+            IrConst::I16(v) => IrConst::LongDouble(v as f64),
+            IrConst::I8(v) => IrConst::LongDouble(v as f64),
+            other => other, // LongDouble already or Zero
+        }
     }
 
     /// Lower a struct initializer list to a GlobalInit::Array of field values.
@@ -1930,7 +1974,8 @@ impl Lowerer {
                         if byte_offset >= field_size { break; }
                         if let Initializer::Expr(ref e) = ni.init {
                             if let Some(val) = self.eval_const_expr(e) {
-                                let val = val.coerce_to(elem_ir_ty);
+                                let e_ty = self.get_expr_type(e);
+                                let val = self.coerce_const_to_type_with_src(val, elem_ir_ty, e_ty);
                                 self.write_const_to_bytes(&mut bytes, byte_offset, &val, elem_ir_ty);
                             }
                         }
@@ -3010,10 +3055,78 @@ impl Lowerer {
                         }
                     } else if let Some(val) = self.eval_const_expr(expr) {
                         // Bare scalar: fills one base element, no sub-array padding
-                        values.push(val.coerce_to(base_ty));
+                        let expr_ty = self.get_expr_type(expr);
+                        values.push(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));
                     } else {
                         values.push(self.zero_const(base_ty));
                     }
+                }
+            }
+        }
+    }
+
+    /// Check if an initializer item contains an address expression or string literal,
+    /// recursing into nested Initializer::List items (for double-brace init like {{"str"}}).
+    fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_array: bool) -> bool {
+        match &item.init {
+            Initializer::Expr(expr) => {
+                if matches!(expr, Expr::StringLiteral(_, _)) {
+                    !is_multidim_char_array
+                } else {
+                    // Cannot call self methods in a static context, so conservatively
+                    // return false for non-string expressions; the caller handles
+                    // address expressions via eval_global_addr_expr separately.
+                    false
+                }
+            }
+            Initializer::List(sub_items) => {
+                sub_items.iter().any(|sub| Self::init_contains_addr_expr(sub, is_multidim_char_array))
+            }
+        }
+    }
+
+    /// Check if an initializer item contains a string literal anywhere (including nested lists).
+    fn init_contains_string_literal(item: &InitializerItem) -> bool {
+        match &item.init {
+            Initializer::Expr(expr) => matches!(expr, Expr::StringLiteral(_, _)),
+            Initializer::List(sub_items) => {
+                sub_items.iter().any(|sub| Self::init_contains_string_literal(sub))
+            }
+        }
+    }
+
+    /// Collect a single compound initializer element, handling nested lists (double-brace init).
+    /// For `{{"str"}}`, unwraps the nested list to find the string literal.
+    /// For `{"str"}`, directly handles the string literal expression.
+    fn collect_compound_init_element(&mut self, init: &Initializer, elements: &mut Vec<GlobalInit>) {
+        match init {
+            Initializer::Expr(expr) => {
+                if let Expr::StringLiteral(s, _) = expr {
+                    // String literal: create .rodata entry and use its label
+                    let label = format!(".Lstr{}", self.next_string);
+                    self.next_string += 1;
+                    self.module.string_literals.push((label.clone(), s.clone()));
+                    elements.push(GlobalInit::GlobalAddr(label));
+                } else if let Expr::LabelAddr(label_name, _) = expr {
+                    // GCC &&label extension: emit label address as GlobalAddr
+                    let scoped_label = self.get_or_create_user_label(label_name);
+                    elements.push(GlobalInit::GlobalAddr(scoped_label));
+                } else if let Some(val) = self.eval_const_expr(expr) {
+                    elements.push(GlobalInit::Scalar(val));
+                } else if let Some(addr) = self.eval_global_addr_expr(expr) {
+                    elements.push(addr);
+                } else {
+                    elements.push(GlobalInit::Zero);
+                }
+            }
+            Initializer::List(sub_items) => {
+                // Double-brace init like {{"str"}} or {{expr}}:
+                // Unwrap the nested list and process the first element as the value
+                // for this array slot.
+                if sub_items.len() >= 1 {
+                    self.collect_compound_init_element(&sub_items[0].init, elements);
+                } else {
+                    elements.push(GlobalInit::Zero);
                 }
             }
         }
@@ -3024,7 +3137,8 @@ impl Lowerer {
         match init {
             Initializer::Expr(expr) => {
                 if let Some(val) = self.eval_const_expr(expr) {
-                    values.push(val.coerce_to(base_ty));
+                    let expr_ty = self.get_expr_type(expr);
+                    values.push(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));
                 } else {
                     values.push(self.zero_const(base_ty));
                 }

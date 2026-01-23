@@ -408,7 +408,7 @@ fn define_type_traits_macros(macros: &mut MacroTable) {
     def(macros, "__STDC_UTF_32__", "1");
     def(macros, "__STDC_NO_ATOMICS__", "1");
     def(macros, "__STDC_NO_COMPLEX__", "1");
-    def(macros, "__STDC_NO_THREADS__", "1");
+    // __STDC_NO_THREADS__ is NOT defined because we link against glibc which provides <threads.h>
     def(macros, "__STDC_NO_VLA__", "1");
 
     // EXIT_SUCCESS and EXIT_FAILURE from <stdlib.h>

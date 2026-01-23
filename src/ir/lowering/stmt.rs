@@ -80,24 +80,31 @@ impl Lowerer {
                 // Also remove from static_local_names so that the extern name
                 // resolves to the true global, not a same-named static local
                 self.static_local_names.remove(&declarator.name);
-                if !self.globals.contains_key(&declarator.name) {
-                    let ty = self.type_spec_to_ir(&decl.type_spec);
-                    let is_pointer = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
-                    let var_ty = if is_pointer { IrType::Ptr } else { ty };
-                    let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-                    let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-                    self.globals.insert(declarator.name.clone(), GlobalInfo {
-                        ty: var_ty,
-                        elem_size: 0,
-                        is_array: false,
-                        pointee_type,
-                        struct_layout: None,
-                        is_struct: false,
-                        array_dim_strides: vec![],
-                        c_type,
-                    });
+                // Check if this is a function declaration (extern int f(int))
+                // before treating it as a variable
+                let is_func_decl = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)));
+                if is_func_decl {
+                    // Fall through to the function declaration handler below
+                } else {
+                    if !self.globals.contains_key(&declarator.name) {
+                        let ty = self.type_spec_to_ir(&decl.type_spec);
+                        let is_pointer = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+                        let var_ty = if is_pointer { IrType::Ptr } else { ty };
+                        let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+                        let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
+                        self.globals.insert(declarator.name.clone(), GlobalInfo {
+                            ty: var_ty,
+                            elem_size: 0,
+                            is_array: false,
+                            pointee_type,
+                            struct_layout: None,
+                            is_struct: false,
+                            array_dim_strides: vec![],
+                            c_type,
+                        });
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // Handle block-scope function declarations: int f(int);
@@ -430,7 +437,10 @@ impl Lowerer {
                             if array_dim_strides.len() > 1 {
                                 // Multi-dimensional array init: zero first, then fill
                                 self.zero_init_alloca(alloca, alloc_size);
-                                self.lower_array_init_list(items, alloca, elem_ir_ty, &array_dim_strides);
+                                // For pointer arrays (elem_size=8 but elem_ir_ty=I8),
+                                // use I64 as the element type for stores.
+                                let md_elem_ty = if is_array_of_pointers { IrType::I64 } else { elem_ir_ty };
+                                self.lower_array_init_list(items, alloca, md_elem_ty, &array_dim_strides);
                             } else if let Some(ref s_layout) = elem_struct_layout {
                                 // Array of structs: init each element using struct layout
                                 self.zero_init_alloca(alloca, alloc_size);
@@ -513,7 +523,15 @@ impl Lowerer {
                                     }
 
                                     // Handle each item, with special case for string literals in char arrays
-                                    if let Initializer::Expr(e) = &item.init {
+                                    // For double-brace init like {{expr}}, unwrap the nested list
+                                    let init_expr = match &item.init {
+                                        Initializer::Expr(e) => Some(e),
+                                        Initializer::List(sub_items) => {
+                                            // Double-brace: unwrap nested list to get the first expression
+                                            Self::unwrap_nested_init_expr(sub_items)
+                                        }
+                                    };
+                                    if let Some(e) = init_expr {
                                         if !is_array_of_pointers && (elem_ir_ty == IrType::I8 || elem_ir_ty == IrType::U8) {
                                             if let Expr::StringLiteral(s, _) = e {
                                                 self.emit_string_to_alloca(alloca, s, current_idx * elem_size);
@@ -659,6 +677,19 @@ impl Lowerer {
         }
     }
 
+    /// Unwrap nested `Initializer::List` items to find the innermost expression.
+    /// Used for double-brace init like `{{expr}}` to extract the `expr`.
+    fn unwrap_nested_init_expr(items: &[InitializerItem]) -> Option<&Expr> {
+        if let Some(first) = items.first() {
+            match &first.init {
+                Initializer::Expr(e) => Some(e),
+                Initializer::List(sub_items) => Self::unwrap_nested_init_expr(sub_items),
+            }
+        } else {
+            None
+        }
+    }
+
     /// Lower a multi-dimensional array initializer list.
     /// Handles nested braces like `{{1,2,3},{4,5,6}}` for `int a[2][3]`.
     pub(super) fn lower_array_init_list(
@@ -721,7 +752,17 @@ impl Lowerer {
                     if base_ty == IrType::I8 || base_ty == IrType::U8 {
                         if let Expr::StringLiteral(s, _) = e {
                             self.emit_string_to_alloca(alloca, s, *flat_index * elem_size);
-                            *flat_index += sub_elem_count;
+                            // String literal fills the innermost char sub-array.
+                            // For multi-dim arrays like char[2][3][1][1][3], a string fills
+                            // the innermost [1][1][3] sub-array (3 chars), not the full
+                            // first-dim sub-array [3][1][1][3] (9 chars).
+                            // Use strides[len-2] if available (second-to-last stride = innermost sub-array size).
+                            let string_stride = if array_dim_strides.len() >= 2 {
+                                array_dim_strides[array_dim_strides.len() - 2]
+                            } else {
+                                sub_elem_count
+                            };
+                            *flat_index += string_stride;
                             continue;
                         }
                     }

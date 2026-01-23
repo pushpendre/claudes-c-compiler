@@ -475,8 +475,8 @@ impl IrConst {
         }
     }
 
-    /// Coerce this constant to match a target IrType.
-    pub fn coerce_to(&self, target_ty: IrType) -> IrConst {
+    /// Coerce this constant to match a target IrType, with optional source type for signedness.
+    pub fn coerce_to_with_src(&self, target_ty: IrType, src_ty: Option<IrType>) -> IrConst {
         // Check if already the right type
         match (self, target_ty) {
             (IrConst::I8(_), IrType::I8 | IrType::U8) => return self.clone(),
@@ -491,6 +491,18 @@ impl IrConst {
         }
         // Convert integer types
         if let Some(int_val) = self.to_i64() {
+            // For int-to-float conversions, check source signedness
+            if target_ty.is_float() {
+                let is_unsigned = src_ty.map_or(false, |t| t.is_unsigned());
+                if is_unsigned {
+                    let uint_val = int_val as u64;
+                    return match target_ty {
+                        IrType::F32 => IrConst::F32(uint_val as f32),
+                        IrType::F64 => IrConst::F64(uint_val as f64),
+                        _ => IrConst::I64(int_val),
+                    };
+                }
+            }
             return IrConst::from_i64(int_val, target_ty);
         }
         // Convert float types
@@ -521,6 +533,11 @@ impl IrConst {
             (IrConst::I8(v), IrType::F128) => IrConst::LongDouble(*v as f64),
             _ => self.clone(),
         }
+    }
+
+    /// Coerce this constant to match a target IrType (assumes signed source for int-to-float).
+    pub fn coerce_to(&self, target_ty: IrType) -> IrConst {
+        self.coerce_to_with_src(target_ty, None)
     }
 
     /// Get the zero constant for a given IR type.

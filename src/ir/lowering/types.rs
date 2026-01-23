@@ -652,6 +652,16 @@ impl Lowerer {
         c.to_i64()
     }
 
+    /// Coerce an IrConst to match a target IrType. Delegates to IrConst::coerce_to().
+    pub(super) fn coerce_const_to_type(&self, val: IrConst, target_ty: IrType) -> IrConst {
+        val.coerce_to(target_ty)
+    }
+
+    /// Coerce a constant to the target type, using the source expression's type for signedness.
+    pub(super) fn coerce_const_to_type_with_src(&self, val: IrConst, target_ty: IrType, src_ty: IrType) -> IrConst {
+        val.coerce_to_with_src(target_ty, Some(src_ty))
+    }
+
     /// Check if a TypeSpecifier resolves to long double.
     pub(super) fn is_type_spec_long_double(&self, ts: &TypeSpecifier) -> bool {
         match ts {
@@ -1752,7 +1762,21 @@ impl Lowerer {
                 }).collect();
                 let total_elems: usize = array_dims.iter().map(|d| d.unwrap_or(256)).product();
                 let total_size = total_elems * 8; // each element is a pointer
-                return (total_size, 8, true, false, vec![]);
+                // Compute strides for multi-dimensional pointer arrays.
+                // For char *c[2][1][1][1][3], strides are computed from right to left:
+                // strides[last] = 8 (pointer size), strides[i] = dims[i+1..].product() * 8
+                let resolved_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256)).collect();
+                let strides = if resolved_dims.len() > 1 {
+                    let mut s = Vec::with_capacity(resolved_dims.len());
+                    for i in 0..resolved_dims.len() {
+                        let stride: usize = resolved_dims[i+1..].iter().product::<usize>() * 8;
+                        s.push(stride);
+                    }
+                    s
+                } else {
+                    vec![8]  // 1D pointer array: stride is just pointer size
+                };
+                return (total_size, 8, true, false, strides);
             }
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
             // Compute strides from the Array dims in the derived list

@@ -1604,8 +1604,16 @@ impl Lowerer {
         self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
 
         // Compute the common type of both branches (C "usual arithmetic conversions")
-        let then_ty = self.get_expr_type(then_expr);
-        let else_ty = self.get_expr_type(else_expr);
+        let mut then_ty = self.get_expr_type(then_expr);
+        let mut else_ty = self.get_expr_type(else_expr);
+        // If either branch is a pointer or array (decays to pointer), treat as I64 (pointer)
+        // to avoid truncating 64-bit pointers when the element type is smaller.
+        if self.expr_is_pointer(then_expr) {
+            then_ty = IrType::I64;
+        }
+        if self.expr_is_pointer(else_expr) {
+            else_ty = IrType::I64;
+        }
         let common_ty = Self::common_type(then_ty, else_ty);
 
         let then_label = self.fresh_label("ternary_then");
@@ -1966,9 +1974,11 @@ impl Lowerer {
     fn lower_deref(&mut self, inner: &Expr) -> Operand {
         // Dereferencing a pointer-to-array yields the array itself, which decays
         // to a pointer to its first element (same address). No load needed.
+        // Dereferencing a pointer-to-struct/union yields the struct address
+        // (aggregate values are represented by their addresses in the IR).
         if let Some(ctype) = self.get_expr_ctype(inner) {
             if let CType::Pointer(ref pointee) = ctype {
-                if matches!(pointee.as_ref(), CType::Array(_, _)) {
+                if matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_)) {
                     return self.lower_expr(inner);
                 }
                 // Dereferencing a pointer-to-struct/union yields the struct/union

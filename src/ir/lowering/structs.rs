@@ -307,7 +307,9 @@ impl Lowerer {
                 // Check static locals first
                 if let Some(mangled) = self.static_local_names.get(name) {
                     if let Some(ginfo) = self.globals.get(mangled) {
-                        return ginfo.struct_layout.clone();
+                        if ginfo.struct_layout.is_some() {
+                            return ginfo.struct_layout.clone();
+                        }
                     }
                 }
                 // Check if this variable has struct layout info (pointer to struct)
@@ -331,6 +333,13 @@ impl Lowerer {
                         if let Some(layout) = self.resolve_struct_from_pointer_ctype(ct) {
                             return Some(layout);
                         }
+                    }
+                }
+                // Fallback: resolve struct layout from the variable's CType
+                // (handles forward-declared struct pointers where layout was None at decl time)
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    if let CType::Pointer(pointee) = &ctype {
+                        return self.struct_layout_from_ctype(pointee);
                     }
                 }
                 None

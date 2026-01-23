@@ -991,87 +991,9 @@ impl ArchCodegen for ArmCodegen {
         }
         stack_arg_space = (stack_arg_space + 15) & !15; // Final 16-byte alignment
 
-        // Phase 1a: Load GP register args into temp registers (x9-x16).
-        // FP args are handled separately since they use a different register bank.
-        let mut gp_tmp_idx = 0usize;
-        for (i, arg) in args.iter().enumerate() {
-            if arg_classes[i] != 'i' { continue; }
-            if gp_tmp_idx >= 8 { break; }
-            self.operand_to_x0(arg);
-            self.state.emit(&format!("    mov {}, x0", ARM_TMP_REGS[gp_tmp_idx]));
-            gp_tmp_idx += 1;
-        }
-
-        // Phase 1b: Load FP register args directly into d0-d7 (or s0-s7, q0-q7 for F128).
-        // FP regs don't conflict with GP temp regs, so this is safe.
-        // Process non-F128 float args first, then F128 args.
-        // F128 variables need __extenddftf2 which clobbers q0, so we process them last
-        // in reverse order to avoid clobbering previously set Q registers.
-        let mut fp_reg_idx = 0usize;
-
-        // First pass: assign FP register indices to all 'f' and 'q' args
-        let mut fp_reg_assignments: Vec<(usize, usize)> = Vec::new(); // (arg_index, fp_reg_index)
-        for (i, _arg) in args.iter().enumerate() {
-            if arg_classes[i] != 'f' && arg_classes[i] != 'q' { continue; }
-            if fp_reg_idx >= 8 { break; }
-            fp_reg_assignments.push((i, fp_reg_idx));
-            fp_reg_idx += 1;
-        }
-
-        // Second pass: load non-F128 FP args first (they don't clobber Q registers)
-        for &(arg_i, reg_i) in &fp_reg_assignments {
-            if arg_classes[arg_i] == 'q' { continue; } // skip F128 for now
-            let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
-            self.operand_to_x0(&args[arg_i]);
-            if arg_ty == Some(IrType::F32) {
-                self.state.emit(&format!("    fmov s{}, w0", reg_i));
-            } else {
-                self.state.emit(&format!("    fmov d{}, x0", reg_i));
-            }
-        }
-
-        // Third pass: load F128 args into Q registers.
-        // Process in reverse order so __extenddftf2 result (q0) doesn't clobber
-        // previously loaded Q registers. For constants, we can load directly.
-        // For variables, __extenddftf2 returns in q0, then we move to target qN.
-        for &(arg_i, reg_i) in fp_reg_assignments.iter().rev() {
-            if arg_classes[arg_i] != 'q' { continue; } // only F128
-            match &args[arg_i] {
-                Operand::Const(c) => {
-                    let f64_val = match c {
-                        IrConst::LongDouble(v) => *v,
-                        IrConst::F64(v) => *v,
-                        _ => c.to_f64().unwrap_or(0.0),
-                    };
-                    let bytes = crate::ir::ir::f64_to_f128_bytes(f64_val);
-                    let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                    let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-                    // Load f128 constant into qN via x0/x1 and temp stack space
-                    self.emit_load_imm64("x0", lo as i64);
-                    self.emit_load_imm64("x1", hi as i64);
-                    self.state.emit("    stp x0, x1, [sp, #-16]!");
-                    self.state.emit(&format!("    ldr q{}, [sp]", reg_i));
-                    self.state.emit("    add sp, sp, #16");
-                }
-                Operand::Value(_v) => {
-                    // Variable: load f64 bit pattern, convert to f128 via __extenddftf2
-                    self.operand_to_x0(&args[arg_i]);
-                    self.state.emit("    fmov d0, x0");
-                    // Save GP temp regs (x9-x10) that may be clobbered
-                    self.state.emit("    stp x9, x10, [sp, #-16]!");
-                    self.state.emit("    bl __extenddftf2");
-                    self.state.emit("    ldp x9, x10, [sp], #16");
-                    // __extenddftf2 returns f128 in q0
-                    if reg_i != 0 {
-                        // Move q0 to target qN using NEON move
-                        self.state.emit(&format!("    mov v{}.16b, v0.16b", reg_i));
-                    }
-                    // If reg_i == 0, result is already in q0
-                }
-            }
-        }
-
-        // For stack args: load them all before adjusting SP, save to stack
+        // Phase 1: Handle stack args FIRST (before GP temp regs are populated),
+        // because loading stack args uses x16 as a scratch register for large
+        // offsets, which would clobber x16 if GP args were already in x9-x16.
         if stack_arg_space > 0 {
             // Pre-decrement SP and store stack args
             self.emit_sub_sp(stack_arg_space as i64);
@@ -1134,7 +1056,134 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Phase 2: Move GP args from temp regs to actual arg registers (x0-x7).
+        // Phase 2a: Load GP register args into temp registers (x9-x16).
+        // This must happen AFTER stack args are stored, since operand_to_x0
+        // may use x16 as a scratch register for large SP offsets.
+        let mut gp_tmp_idx = 0usize;
+        for (i, arg) in args.iter().enumerate() {
+            if arg_classes[i] != 'i' { continue; }
+            if gp_tmp_idx >= 8 { break; }
+            // If SP was adjusted for stack args, adjust alloca/value offsets
+            if stack_arg_space > 0 {
+                match arg {
+                    Operand::Value(v) => {
+                        if let Some(slot) = self.state.get_slot(v.0) {
+                            let adjusted = slot.0 + stack_arg_space as i64;
+                            if self.state.is_alloca(v.0) {
+                                self.emit_add_sp_offset("x0", adjusted);
+                            } else {
+                                self.emit_load_from_sp("x0", adjusted, "ldr");
+                            }
+                        } else {
+                            self.state.emit("    mov x0, #0");
+                        }
+                    }
+                    Operand::Const(_) => {
+                        self.operand_to_x0(arg);
+                    }
+                }
+            } else {
+                self.operand_to_x0(arg);
+            }
+            self.state.emit(&format!("    mov {}, x0", ARM_TMP_REGS[gp_tmp_idx]));
+            gp_tmp_idx += 1;
+        }
+
+        // Phase 2b: Load FP register args directly into d0-d7 (or s0-s7, q0-q7 for F128).
+        // FP regs don't conflict with GP temp regs, so this is safe.
+        // Process non-F128 float args first, then F128 args.
+        // F128 variables need __extenddftf2 which clobbers q0, so we process them last
+        // in reverse order to avoid clobbering previously set Q registers.
+        let mut fp_reg_idx = 0usize;
+
+        // First pass: assign FP register indices to all 'f' and 'q' args
+        let mut fp_reg_assignments: Vec<(usize, usize)> = Vec::new(); // (arg_index, fp_reg_index)
+        for (i, _arg) in args.iter().enumerate() {
+            if arg_classes[i] != 'f' && arg_classes[i] != 'q' { continue; }
+            if fp_reg_idx >= 8 { break; }
+            fp_reg_assignments.push((i, fp_reg_idx));
+            fp_reg_idx += 1;
+        }
+
+        // Second pass: load non-F128 FP args first (they don't clobber Q registers)
+        for &(arg_i, reg_i) in &fp_reg_assignments {
+            if arg_classes[arg_i] == 'q' { continue; } // skip F128 for now
+            let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
+            if stack_arg_space > 0 {
+                match &args[arg_i] {
+                    Operand::Value(v) => {
+                        if let Some(slot) = self.state.get_slot(v.0) {
+                            let adjusted = slot.0 + stack_arg_space as i64;
+                            self.emit_load_from_sp("x0", adjusted, "ldr");
+                        } else {
+                            self.state.emit("    mov x0, #0");
+                        }
+                    }
+                    Operand::Const(_) => {
+                        self.operand_to_x0(&args[arg_i]);
+                    }
+                }
+            } else {
+                self.operand_to_x0(&args[arg_i]);
+            }
+            if arg_ty == Some(IrType::F32) {
+                self.state.emit(&format!("    fmov s{}, w0", reg_i));
+            } else {
+                self.state.emit(&format!("    fmov d{}, x0", reg_i));
+            }
+        }
+
+        // Third pass: load F128 args into Q registers.
+        // Process in reverse order so __extenddftf2 result (q0) doesn't clobber
+        // previously loaded Q registers. For constants, we can load directly.
+        // For variables, __extenddftf2 returns in q0, then we move to target qN.
+        for &(arg_i, reg_i) in fp_reg_assignments.iter().rev() {
+            if arg_classes[arg_i] != 'q' { continue; } // only F128
+            match &args[arg_i] {
+                Operand::Const(c) => {
+                    let f64_val = match c {
+                        IrConst::LongDouble(v) => *v,
+                        IrConst::F64(v) => *v,
+                        _ => c.to_f64().unwrap_or(0.0),
+                    };
+                    let bytes = crate::ir::ir::f64_to_f128_bytes(f64_val);
+                    let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+                    let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+                    // Load f128 constant into qN via x0/x1 and temp stack space
+                    self.emit_load_imm64("x0", lo as i64);
+                    self.emit_load_imm64("x1", hi as i64);
+                    self.state.emit("    stp x0, x1, [sp, #-16]!");
+                    self.state.emit(&format!("    ldr q{}, [sp]", reg_i));
+                    self.state.emit("    add sp, sp, #16");
+                }
+                Operand::Value(v) => {
+                    // Variable: load f64 bit pattern, convert to f128 via __extenddftf2
+                    if stack_arg_space > 0 {
+                        if let Some(slot) = self.state.get_slot(v.0) {
+                            let adjusted = slot.0 + stack_arg_space as i64;
+                            self.emit_load_from_sp("x0", adjusted, "ldr");
+                        } else {
+                            self.state.emit("    mov x0, #0");
+                        }
+                    } else {
+                        self.operand_to_x0(&args[arg_i]);
+                    }
+                    self.state.emit("    fmov d0, x0");
+                    // Save GP temp regs (x9-x10) that may be clobbered
+                    self.state.emit("    stp x9, x10, [sp, #-16]!");
+                    self.state.emit("    bl __extenddftf2");
+                    self.state.emit("    ldp x9, x10, [sp], #16");
+                    // __extenddftf2 returns f128 in q0
+                    if reg_i != 0 {
+                        // Move q0 to target qN using NEON move
+                        self.state.emit(&format!("    mov v{}.16b, v0.16b", reg_i));
+                    }
+                    // If reg_i == 0, result is already in q0
+                }
+            }
+        }
+
+        // Phase 3: Move GP args from temp regs to actual arg registers (x0-x7).
         let mut int_reg_idx = 0usize;
         gp_tmp_idx = 0;
         for (i, _arg) in args.iter().enumerate() {
@@ -1146,7 +1195,7 @@ impl ArchCodegen for ArmCodegen {
             }
             gp_tmp_idx += 1;
         }
-        // FP args already in d0-d7 from Phase 1b.
+        // FP args already in d0-d7/q0-q7 from Phase 2b.
 
         if let Some(name) = direct_name {
             self.state.emit(&format!("    bl {}", name));
