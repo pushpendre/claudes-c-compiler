@@ -717,11 +717,11 @@ impl Lowerer {
         let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => IrType::Void,
+            TypeSpecifier::Bool => IrType::U8, // _Bool is 1 byte, unsigned
             TypeSpecifier::Char => IrType::I8,
             TypeSpecifier::UnsignedChar => IrType::U8,
             TypeSpecifier::Short => IrType::I16,
             TypeSpecifier::UnsignedShort => IrType::U16,
-            TypeSpecifier::Bool => IrType::U8,
             TypeSpecifier::Int => IrType::I32,
             TypeSpecifier::UnsignedInt => IrType::U32,
             TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
@@ -742,9 +742,9 @@ impl Lowerer {
         let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => 0,
+            TypeSpecifier::Bool => 1, // _Bool is 1 byte
             TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
             TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
-            TypeSpecifier::Bool => 1,
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt => 4,
             TypeSpecifier::Long | TypeSpecifier::UnsignedLong
             | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
@@ -841,6 +841,14 @@ impl Lowerer {
 
             // Dereference: element type size
             Expr::Deref(inner, _) => {
+                // Use CType-based resolution first
+                if let Some(inner_ctype) = self.get_expr_ctype(inner) {
+                    match &inner_ctype {
+                        CType::Pointer(pointee) => return pointee.size(),
+                        CType::Array(elem, _) => return elem.size(),
+                        _ => {}
+                    }
+                }
                 if let Expr::Identifier(name, _) = inner.as_ref() {
                     if let Some(info) = self.locals.get(name) {
                         if info.elem_size > 0 {
@@ -857,7 +865,23 @@ impl Lowerer {
             }
 
             // Array subscript: element type size
-            Expr::ArraySubscript(base, _, _) => {
+            Expr::ArraySubscript(base, index, _) => {
+                // Use CType-based resolution first (handles string literals, typed pointers)
+                if let Some(base_ctype) = self.get_expr_ctype(base) {
+                    match &base_ctype {
+                        CType::Array(elem, _) => return elem.size(),
+                        CType::Pointer(pointee) => return pointee.size(),
+                        _ => {}
+                    }
+                }
+                // Also check reverse subscript (index[base])
+                if let Some(idx_ctype) = self.get_expr_ctype(index) {
+                    match &idx_ctype {
+                        CType::Array(elem, _) => return elem.size(),
+                        CType::Pointer(pointee) => return pointee.size(),
+                        _ => {}
+                    }
+                }
                 if let Expr::Identifier(name, _) = base.as_ref() {
                     if let Some(info) = self.locals.get(name) {
                         if info.elem_size > 0 {
@@ -1105,8 +1129,8 @@ impl Lowerer {
             TypeSpecifier::UnsignedChar => CType::UChar,
             TypeSpecifier::Short => CType::Short,
             TypeSpecifier::UnsignedShort => CType::UShort,
+            TypeSpecifier::Bool => CType::UChar, // _Bool is stored as unsigned byte
             TypeSpecifier::Int | TypeSpecifier::Signed => CType::Int,
-            TypeSpecifier::Bool => CType::UChar,
             TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => CType::UInt,
             TypeSpecifier::Long => CType::Long,
             TypeSpecifier::UnsignedLong => CType::ULong,
@@ -1286,6 +1310,10 @@ impl Lowerer {
             }
             Expr::Conditional(_, then_expr, _, _) => self.get_expr_ctype(then_expr),
             Expr::Comma(_, last, _) => self.get_expr_ctype(last),
+            Expr::StringLiteral(_, _) => {
+                // String literals have type char[] which decays to char*
+                Some(CType::Pointer(Box::new(CType::Char)))
+            }
             _ => None,
         }
     }

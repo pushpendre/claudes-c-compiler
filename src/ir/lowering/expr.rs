@@ -1334,25 +1334,6 @@ impl Lowerer {
         src
     }
 
-    /// Check if an lvalue expression refers to a _Bool variable.
-    fn is_bool_lvalue(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
-                    return info.is_bool;
-                }
-                false
-            }
-            Expr::Deref(inner, _) => {
-                // *p where p points to _Bool - check via pointer dereference
-                // For now, we don't track this
-                let _ = inner;
-                false
-            }
-            _ => false,
-        }
-    }
-
     /// Normalize a value for _Bool storage: emit (val != 0) to clamp to 0 or 1.
     pub(super) fn emit_bool_normalize(&mut self, val: Operand) -> Operand {
         let dest = self.fresh_value();

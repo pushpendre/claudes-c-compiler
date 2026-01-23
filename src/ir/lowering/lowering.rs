@@ -1309,6 +1309,21 @@ impl Lowerer {
         }
     }
 
+    /// Check if an lvalue expression targets a _Bool variable (requires normalization).
+    pub(super) fn is_bool_lvalue(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name) {
+                    return info.is_bool;
+                }
+                false
+            }
+            // TODO: Handle _Bool pointer dereferences (*pval = x) and _Bool array subscripts
+            // This requires a CType::Bool variant to distinguish from unsigned char
+            _ => false,
+        }
+    }
+
     /// Check if an expression has pointer type (for pointer arithmetic).
     pub(super) fn expr_is_pointer(&self, expr: &Expr) -> bool {
         match expr {
@@ -1386,6 +1401,14 @@ impl Lowerer {
 
     /// Get the element size for a pointer expression (for scaling in pointer arithmetic).
     pub(super) fn get_pointer_elem_size_from_expr(&self, expr: &Expr) -> usize {
+        // Try CType-based resolution first for accurate type information
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            match &ctype {
+                CType::Pointer(pointee) => return pointee.size().max(1),
+                CType::Array(elem, _) => return elem.size().max(1),
+                _ => {}
+            }
+        }
         match expr {
             Expr::Identifier(_, _) => {
                 self.get_pointer_elem_size(expr)

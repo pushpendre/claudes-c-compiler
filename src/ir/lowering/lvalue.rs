@@ -260,6 +260,11 @@ impl Lowerer {
     /// For a[i] where a is int[2][3], returns 12 (3*4 = stride of first dimension).
     /// For a[i][j] where a is int[2][3], returns 4 (element size).
     pub(super) fn get_array_elem_size_for_subscript(&self, base: &Expr) -> usize {
+        // String literals have char elements (size 1)
+        if matches!(base, Expr::StringLiteral(_, _)) {
+            return 1;
+        }
+
         // Handle struct/union member access: s.field[i] or p->field[i]
         if let Some(elem_size) = self.get_member_array_elem_size(base) {
             return elem_size;
@@ -332,6 +337,10 @@ impl Lowerer {
 
     /// Get the element size for array subscript (legacy, for 1D arrays).
     pub(super) fn get_array_elem_size(&self, base: &Expr) -> usize {
+        // String literals have char elements (size 1)
+        if matches!(base, Expr::StringLiteral(_, _)) {
+            return 1;
+        }
         if let Expr::Identifier(name, _) = base {
             if let Some(info) = self.locals.get(name) {
                 if info.elem_size > 0 {

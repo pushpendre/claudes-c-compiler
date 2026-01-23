@@ -80,6 +80,10 @@ impl Lowerer {
 
             let base_ty = self.type_spec_to_ir(&decl.type_spec);
             let (mut alloc_size, elem_size, is_array, is_pointer, mut array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
+            // _Bool type check: only for direct scalar variables, not pointers or arrays
+            let has_derived_ptr = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+            let is_bool_type = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool)
+                && !has_derived_ptr && !is_array;
             // For array-of-pointers (int *arr[N]), the element type is Ptr, not the base type.
             // Detect: Pointer before Array in derived declarators.
             let is_array_of_pointers = is_array && {
