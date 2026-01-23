@@ -1,0 +1,18 @@
+Task: Fix integer promotion for unary operators (-, ~, +)
+
+Problem: Unary negation (-), bitwise complement (~), and unary plus (+) on types
+narrower than int (char, unsigned char, short, unsigned short) do not apply C's
+integer promotion rules. The result type should be at least int (I32), but
+currently the result type inherits the sub-int operand type.
+
+Example:
+  unsigned char uc = 1;
+  int neg = -uc;  // Should be -1, but compiler produces 255
+
+The fix needs to:
+1. Update infer_expr_type for UnaryOp to apply integer_promote
+2. Update maybe_narrow in lower_unary_op to narrow to the promoted type (I32 minimum)
+3. Update get_expr_type in types.rs for unary ops to return promoted type
+
+This affects multiple test failures related to char/short arithmetic, comparisons,
+and pointer arithmetic with char indices.
