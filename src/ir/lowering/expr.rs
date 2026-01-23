@@ -1574,8 +1574,36 @@ impl Lowerer {
 
         let mut arg_types = Vec::with_capacity(args.len());
         let arg_vals: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
-            let val = self.lower_expr(a);
+            let mut val = self.lower_expr(a);
             let arg_ty = self.get_expr_type(a);
+
+            // When a struct-returning function call's result is passed directly as
+            // an argument to another function, the caller passes the raw packed data
+            // (in rax) but the callee expects a pointer to the struct data.
+            // Spill non-sret struct return values to a temporary alloca.
+            if let Expr::FunctionCall(func_expr, _, _) = a {
+                let is_struct_ret = matches!(
+                    self.get_expr_ctype(a),
+                    Some(CType::Struct(_)) | Some(CType::Union(_))
+                );
+                if is_struct_ret {
+                    let is_sret = if let Expr::Identifier(name, _) = func_expr.as_ref() {
+                        self.func_meta.sret_functions.contains_key(name)
+                    } else {
+                        false
+                    };
+                    if !is_sret {
+                        // Non-sret: return value is packed struct data, not a pointer.
+                        // Store it to a temporary alloca so we can pass the address.
+                        let struct_size = self.get_struct_size_for_expr(a);
+                        let alloc_size = if struct_size > 0 { struct_size } else { 8 };
+                        let alloca = self.fresh_value();
+                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64 });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
+                        val = Operand::Value(alloca);
+                    }
+                }
+            }
 
             // Check if this parameter is _Bool and needs normalization to 0/1
             let is_bool_param = param_bool_flags.as_ref()
