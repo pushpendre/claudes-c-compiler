@@ -217,10 +217,20 @@ impl Lowerer {
                     IrType::Void => 1,
                 };
 
+                // For struct initializers emitted as byte arrays, set element type to I8
+                // so the backend emits .byte directives for each element.
+                let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
+                    IrType::I8
+                } else if is_struct && matches!(&init, GlobalInit::Array(_)) {
+                    IrType::I8
+                } else {
+                    var_ty
+                };
+
                 // Add as a global variable (with static linkage = not exported)
                 self.module.globals.push(IrGlobal {
                     name: static_name.clone(),
-                    ty: var_ty,
+                    ty: global_ty,
                     size: actual_alloc_size,
                     align,
                     init,

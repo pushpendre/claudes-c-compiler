@@ -1395,22 +1395,42 @@ impl Lowerer {
     fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
         // Coerce integer constants to float if writing to a float field
         let val = &self.coerce_const_to_type(val.clone(), ty);
-        let int_val = match val {
-            IrConst::I8(v) => *v as i64,
-            IrConst::I16(v) => *v as i64,
-            IrConst::I32(v) => *v as i64,
-            IrConst::I64(v) => *v,
-            IrConst::Zero => 0,
-            IrConst::F32(v) => *v as i64,
-            IrConst::F64(v) => *v as i64,
-        };
-
-        // Write integer value in little-endian at the appropriate size
-        let le_bytes = int_val.to_le_bytes();
-        let size = ty.size();
-        for i in 0..size {
-            if offset + i < bytes.len() {
-                bytes[offset + i] = le_bytes[i];
+        match val {
+            IrConst::F32(v) => {
+                // Write float as IEEE 754 bit pattern (4 bytes, little-endian)
+                let bits = v.to_bits().to_le_bytes();
+                for i in 0..4 {
+                    if offset + i < bytes.len() {
+                        bytes[offset + i] = bits[i];
+                    }
+                }
+            }
+            IrConst::F64(v) => {
+                // Write double as IEEE 754 bit pattern (8 bytes, little-endian)
+                let bits = v.to_bits().to_le_bytes();
+                for i in 0..8 {
+                    if offset + i < bytes.len() {
+                        bytes[offset + i] = bits[i];
+                    }
+                }
+            }
+            _ => {
+                let int_val = match val {
+                    IrConst::I8(v) => *v as i64,
+                    IrConst::I16(v) => *v as i64,
+                    IrConst::I32(v) => *v as i64,
+                    IrConst::I64(v) => *v,
+                    IrConst::Zero => 0,
+                    _ => 0,
+                };
+                // Write integer value in little-endian at the appropriate size
+                let le_bytes = int_val.to_le_bytes();
+                let size = ty.size();
+                for i in 0..size {
+                    if offset + i < bytes.len() {
+                        bytes[offset + i] = le_bytes[i];
+                    }
+                }
             }
         }
     }
