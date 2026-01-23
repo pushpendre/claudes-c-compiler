@@ -10,6 +10,8 @@ pub struct X86Codegen {
     current_return_type: IrType,
     /// For variadic functions: number of named integer/pointer parameters
     num_named_int_params: usize,
+    /// For variadic functions: number of named floating-point parameters
+    num_named_fp_params: usize,
     /// For variadic functions: stack offset of the register save area (negative from rbp)
     reg_save_area_offset: i64,
     /// Whether the current function is variadic
@@ -22,6 +24,7 @@ impl X86Codegen {
             state: CodegenState::new(),
             current_return_type: IrType::I64,
             num_named_int_params: 0,
+            num_named_fp_params: 0,
             reg_save_area_offset: 0,
             is_variadic: false,
         }
@@ -366,6 +369,9 @@ impl ArchCodegen for X86Codegen {
         self.is_variadic = func.is_variadic;
         self.num_named_int_params = func.params.iter()
             .filter(|p| !p.ty.is_float())
+            .count();
+        self.num_named_fp_params = func.params.iter()
+            .filter(|p| p.ty.is_float())
             .count();
 
         let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size| {
@@ -1117,12 +1123,15 @@ impl ArchCodegen for X86Codegen {
         // Cap at 48 (6 registers * 8 bytes) since only 6 GP regs are saved
         let gp_offset = self.num_named_int_params.min(6) * 8;
         self.state.emit(&format!("    movl ${}, (%rax)", gp_offset));
-        // fp_offset = 48 (start of XMM save area in register save area)
-        self.state.emit("    movl $48, 4(%rax)");
+        // fp_offset = 48 + min(num_named_fp_params, 8) * 16 (skip named FP params in XMM save area)
+        // Each XMM register occupies 16 bytes in the register save area
+        let fp_offset = 48 + self.num_named_fp_params.min(8) * 16;
+        self.state.emit(&format!("    movl ${}, 4(%rax)", fp_offset));
         // overflow_arg_area = rbp + 16 + num_stack_named_params * 8
-        // Stack-passed named params are those beyond the 6 register params
-        let num_stack_named = if self.num_named_int_params > 6 { self.num_named_int_params - 6 } else { 0 };
-        let overflow_offset = 16 + num_stack_named * 8;
+        // Stack-passed named params are those beyond the 6 GP register params and 8 FP register params
+        let num_stack_int = if self.num_named_int_params > 6 { self.num_named_int_params - 6 } else { 0 };
+        let num_stack_fp = if self.num_named_fp_params > 8 { self.num_named_fp_params - 8 } else { 0 };
+        let overflow_offset = 16 + (num_stack_int + num_stack_fp) * 8;
         self.state.emit(&format!("    leaq {}(%rbp), %rcx", overflow_offset));
         self.state.emit("    movq %rcx, 8(%rax)");
         // reg_save_area = address of the saved registers in the prologue
