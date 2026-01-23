@@ -1189,6 +1189,16 @@ impl Lowerer {
     }
 
     fn lower_deref(&mut self, inner: &Expr) -> Operand {
+        // Dereferencing a pointer-to-array yields the array itself, which decays
+        // to a pointer to its first element (same address). No load needed.
+        if let Some(ctype) = self.get_expr_ctype(inner) {
+            if let CType::Pointer(ref pointee) = ctype {
+                if matches!(pointee.as_ref(), CType::Array(_, _)) {
+                    return self.lower_expr(inner);
+                }
+            }
+        }
+
         let ptr = self.lower_expr(inner);
         let dest = self.fresh_value();
         let deref_ty = self.get_pointee_type_of_expr(inner).unwrap_or(IrType::I64);
