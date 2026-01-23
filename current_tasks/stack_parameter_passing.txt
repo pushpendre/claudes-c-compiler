@@ -1,0 +1,15 @@
+Implement stack-passed parameter support for all three backends.
+
+Currently, functions with >6 parameters on x86-64 (or >8 on ARM/RISC-V)
+don't correctly access stack-passed parameters. The callee needs to
+load these from [rbp+16], [rbp+24], etc. (x86-64) and the caller needs
+to push them onto the stack before the call.
+
+This affects test cases like:
+- wacc_chapter_9_valid_stack_arguments_lots_of_arguments
+
+Fix:
+1. x86 codegen: handle loading params 7+ from stack in function prologues
+2. ARM codegen: handle loading params 9+ from stack
+3. RISC-V codegen: handle loading params 9+ from stack
+4. Ensure caller pushes excess args onto stack before call (already partly done)
