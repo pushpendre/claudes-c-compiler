@@ -352,7 +352,9 @@ impl Lowerer {
             Expr::FloatLiteralF32(_, _) => return IrType::F32,
             Expr::StringLiteral(_, _) => return IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => return self.type_spec_to_ir(target_type),
-            Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _)
+            | Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _)
+            | Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 return self.get_expr_type(inner);
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {

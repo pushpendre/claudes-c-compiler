@@ -309,27 +309,43 @@ impl ArmCodegen {
 
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
+            let is_unsigned_dest = to_ty.is_unsigned() || to_ty == IrType::Ptr;
             if from_ty == IrType::F32 {
                 // F32 bits in w0 -> convert to int
                 self.state.emit("    fmov s0, w0");
-                self.state.emit("    fcvtzs x0, s0");
+                if is_unsigned_dest {
+                    self.state.emit("    fcvtzu x0, s0");
+                } else {
+                    self.state.emit("    fcvtzs x0, s0");
+                }
             } else {
                 // F64 bits in x0 -> convert to int
                 self.state.emit("    fmov d0, x0");
-                self.state.emit("    fcvtzs x0, d0");
+                if is_unsigned_dest {
+                    self.state.emit("    fcvtzu x0, d0");
+                } else {
+                    self.state.emit("    fcvtzs x0, d0");
+                }
             }
             return;
         }
 
         // Int-to-float cast
         if !from_ty.is_float() && to_ty.is_float() {
+            let is_unsigned_src = from_ty.is_unsigned();
             if to_ty == IrType::F32 {
-                // int -> F32
-                self.state.emit("    scvtf s0, x0");
+                if is_unsigned_src {
+                    self.state.emit("    ucvtf s0, x0");
+                } else {
+                    self.state.emit("    scvtf s0, x0");
+                }
                 self.state.emit("    fmov w0, s0");
             } else {
-                // int -> F64
-                self.state.emit("    scvtf d0, x0");
+                if is_unsigned_src {
+                    self.state.emit("    ucvtf d0, x0");
+                } else {
+                    self.state.emit("    scvtf d0, x0");
+                }
                 self.state.emit("    fmov x0, d0");
             }
             return;

@@ -196,16 +196,34 @@ impl Lowerer {
         let lhs_expr_ty = self.get_expr_type(lhs);
         let rhs_expr_ty = self.get_expr_type(rhs);
 
+        // For shift operators (<<, >>), the C standard specifies:
+        // - Both operands undergo integer promotion independently
+        // - The result type is the promoted type of the LEFT operand
+        // - The right operand's type does NOT affect the result type
+        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+
         let (op_ty, is_unsigned, common_ty) = if lhs_expr_ty.is_float() || rhs_expr_ty.is_float() {
             let ft = if lhs_expr_ty == IrType::F64 || rhs_expr_ty == IrType::F64 { IrType::F64 } else { IrType::F32 };
             (ft, false, ft)
+        } else if is_shift {
+            // For shifts: result type is the promoted left operand type
+            let promoted_lhs = Self::integer_promote(lhs_ty);
+            (IrType::I64, promoted_lhs.is_unsigned(), promoted_lhs)
         } else {
             let ct = Self::common_type(lhs_ty, rhs_ty);
             (IrType::I64, ct.is_unsigned(), ct)
         };
 
-        let lhs_val = self.lower_expr_with_type(lhs, op_ty);
-        let rhs_val = self.lower_expr_with_type(rhs, op_ty);
+        // For shifts, promote operands independently (not to common type)
+        let (lhs_val, rhs_val) = if is_shift {
+            let lhs_val = self.lower_expr_with_type(lhs, IrType::I64);
+            let rhs_val = self.lower_expr_with_type(rhs, IrType::I64);
+            (lhs_val, rhs_val)
+        } else {
+            let lhs_val = self.lower_expr_with_type(lhs, op_ty);
+            let rhs_val = self.lower_expr_with_type(rhs, op_ty);
+            (lhs_val, rhs_val)
+        };
         let dest = self.fresh_value();
 
         // Emit comparison or arithmetic instruction
@@ -222,6 +240,15 @@ impl Lowerer {
 
         // For 32-bit types, insert truncation to ensure correct wraparound
         self.maybe_narrow_binop_result(dest, op, common_ty)
+    }
+
+    /// Integer promotion: types narrower than int are promoted to int.
+    /// Types that are int or wider are unchanged.
+    fn integer_promote(ty: IrType) -> IrType {
+        match ty {
+            IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
+            _ => ty, // I32, U32, I64, U64 etc. stay the same
+        }
     }
 
     /// Convert a comparison BinOp to the corresponding IrCmpOp.
@@ -954,12 +981,12 @@ impl Lowerer {
         let ty = self.get_expr_type(inner);
         if let Some(lv) = self.lower_lvalue(inner) {
             let loaded_val = self.load_lvalue_as_value(&lv, ty);
-            let step = self.inc_dec_step(ty, inner);
+            let (step, binop_ty) = self.inc_dec_step_and_type(ty, inner);
             let result = self.fresh_value();
             let ir_op = if op == UnaryOp::PreInc { IrBinOp::Add } else { IrBinOp::Sub };
             self.emit(Instruction::BinOp {
                 dest: result, op: ir_op,
-                lhs: Operand::Value(loaded_val), rhs: step, ty: IrType::I64,
+                lhs: Operand::Value(loaded_val), rhs: step, ty: binop_ty,
             });
             self.store_lvalue_typed(&lv, Operand::Value(result), ty);
             return Operand::Value(result);
@@ -972,12 +999,12 @@ impl Lowerer {
         if let Some(lv) = self.lower_lvalue(inner) {
             let loaded = self.load_lvalue_typed(&lv, ty);
             let loaded_val = self.operand_to_value(loaded.clone());
-            let step = self.inc_dec_step(ty, inner);
+            let (step, binop_ty) = self.inc_dec_step_and_type(ty, inner);
             let result = self.fresh_value();
             let ir_op = if op == PostfixOp::PostInc { IrBinOp::Add } else { IrBinOp::Sub };
             self.emit(Instruction::BinOp {
                 dest: result, op: ir_op,
-                lhs: Operand::Value(loaded_val), rhs: step, ty: IrType::I64,
+                lhs: Operand::Value(loaded_val), rhs: step, ty: binop_ty,
             });
             self.store_lvalue_typed(&lv, Operand::Value(result), ty);
             return loaded; // Return original value
@@ -985,13 +1012,20 @@ impl Lowerer {
         self.lower_expr(inner)
     }
 
-    /// Get the step value for increment/decrement (1 for scalars, elem_size for pointers).
-    fn inc_dec_step(&self, ty: IrType, expr: &Expr) -> Operand {
+    /// Get the step value and operation type for increment/decrement.
+    /// For pointers: step = elem_size (I64), type = I64
+    /// For floats: step = 1.0, type = F64/F32
+    /// For integers: step = 1 (I64), type = I64
+    fn inc_dec_step_and_type(&self, ty: IrType, expr: &Expr) -> (Operand, IrType) {
         if ty == IrType::Ptr {
             let elem_size = self.get_pointer_elem_size(expr);
-            Operand::Const(IrConst::I64(elem_size as i64))
+            (Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64)
+        } else if ty == IrType::F64 {
+            (Operand::Const(IrConst::F64(1.0)), IrType::F64)
+        } else if ty == IrType::F32 {
+            (Operand::Const(IrConst::F32(1.0)), IrType::F32)
         } else {
-            Operand::Const(IrConst::I64(1))
+            (Operand::Const(IrConst::I64(1)), IrType::I64)
         }
     }
 
@@ -1001,6 +1035,7 @@ impl Lowerer {
 
     pub(super) fn lower_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Operand {
         let ty = self.get_expr_type(lhs);
+        let lhs_ir_ty = self.infer_expr_type(lhs);
         let rhs_ty = self.get_expr_type(rhs);
         // Float promotion if either side is float
         let op_ty = if ty.is_float() || rhs_ty.is_float() {
@@ -1015,13 +1050,25 @@ impl Lowerer {
             // Cast loaded value to op_ty if needed
             let loaded_promoted = if ty != op_ty && op_ty.is_float() && !ty.is_float() {
                 let dest = self.fresh_value();
-                self.emit(Instruction::Cast { dest, src: loaded, from_ty: IrType::I64, to_ty: op_ty });
+                // Use the actual LHS IR type so codegen knows if it's unsigned
+                let cast_from = if lhs_ir_ty.size() <= 4 && lhs_ir_ty.is_unsigned() {
+                    // For small unsigned types, the value is already zero-extended to I64
+                    // but we need to tell codegen it's unsigned for the conversion
+                    IrType::U64
+                } else if lhs_ir_ty == IrType::U64 {
+                    IrType::U64
+                } else {
+                    IrType::I64
+                };
+                self.emit(Instruction::Cast { dest, src: loaded, from_ty: cast_from, to_ty: op_ty });
                 Operand::Value(dest)
             } else {
                 loaded
             };
 
-            let ir_op = Self::compound_assign_to_ir(op);
+            // For compound assignment, use signedness of the LHS type
+            let is_unsigned = lhs_ir_ty.is_unsigned();
+            let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
 
             // Scale RHS for pointer += and -=
             let actual_rhs = if ty == IrType::Ptr && matches!(op, BinOp::Add | BinOp::Sub) {
@@ -1038,9 +1085,42 @@ impl Lowerer {
 
             // Cast result back to lhs type if needed
             let store_val = if op_ty.is_float() && !ty.is_float() {
+                // Float -> int cast for result
+                // Use the actual LHS type so codegen knows if unsigned conversion needed
+                let cast_to = if lhs_ir_ty == IrType::U64 || (lhs_ir_ty.is_unsigned() && lhs_ir_ty.size() <= 4) {
+                    IrType::U64
+                } else {
+                    IrType::I64
+                };
                 let dest = self.fresh_value();
-                self.emit(Instruction::Cast { dest, src: Operand::Value(result), from_ty: op_ty, to_ty: IrType::I64 });
-                Operand::Value(dest)
+                self.emit(Instruction::Cast { dest, src: Operand::Value(result), from_ty: op_ty, to_ty: cast_to });
+                // Also narrow to lhs type if needed (e.g., int += 0.99999 needs I64 -> I32 truncation)
+                if lhs_ir_ty.size() < 8 {
+                    let narrowed = self.fresh_value();
+                    self.emit(Instruction::Cast {
+                        dest: narrowed,
+                        src: Operand::Value(dest),
+                        from_ty: cast_to,
+                        to_ty: lhs_ir_ty,
+                    });
+                    Operand::Value(narrowed)
+                } else {
+                    Operand::Value(dest)
+                }
+            } else if !op_ty.is_float() && (lhs_ir_ty == IrType::I32 || lhs_ir_ty == IrType::U32
+                || lhs_ir_ty == IrType::I16 || lhs_ir_ty == IrType::U16
+                || lhs_ir_ty == IrType::I8 || lhs_ir_ty == IrType::U8) {
+                // Truncate result back to the narrower LHS type
+                // This is needed for cases like `uint ^= long` where the result
+                // must be truncated to uint before being stored and returned
+                let narrowed = self.fresh_value();
+                self.emit(Instruction::Cast {
+                    dest: narrowed,
+                    src: Operand::Value(result),
+                    from_ty: IrType::I64,
+                    to_ty: lhs_ir_ty,
+                });
+                Operand::Value(narrowed)
             } else {
                 Operand::Value(result)
             };
@@ -1050,18 +1130,21 @@ impl Lowerer {
         rhs_val
     }
 
-    fn compound_assign_to_ir(op: &BinOp) -> IrBinOp {
-        match op {
-            BinOp::Add => IrBinOp::Add,
-            BinOp::Sub => IrBinOp::Sub,
-            BinOp::Mul => IrBinOp::Mul,
-            BinOp::Div => IrBinOp::SDiv,
-            BinOp::Mod => IrBinOp::SRem,
-            BinOp::BitAnd => IrBinOp::And,
-            BinOp::BitOr => IrBinOp::Or,
-            BinOp::BitXor => IrBinOp::Xor,
-            BinOp::Shl => IrBinOp::Shl,
-            BinOp::Shr => IrBinOp::AShr,
+    fn compound_assign_to_ir(op: &BinOp, is_unsigned: bool) -> IrBinOp {
+        match (op, is_unsigned) {
+            (BinOp::Add, _) => IrBinOp::Add,
+            (BinOp::Sub, _) => IrBinOp::Sub,
+            (BinOp::Mul, _) => IrBinOp::Mul,
+            (BinOp::Div, false) => IrBinOp::SDiv,
+            (BinOp::Div, true) => IrBinOp::UDiv,
+            (BinOp::Mod, false) => IrBinOp::SRem,
+            (BinOp::Mod, true) => IrBinOp::URem,
+            (BinOp::BitAnd, _) => IrBinOp::And,
+            (BinOp::BitOr, _) => IrBinOp::Or,
+            (BinOp::BitXor, _) => IrBinOp::Xor,
+            (BinOp::Shl, _) => IrBinOp::Shl,
+            (BinOp::Shr, false) => IrBinOp::AShr,
+            (BinOp::Shr, true) => IrBinOp::LShr,
             _ => IrBinOp::Add,
         }
     }
@@ -1140,6 +1223,9 @@ impl Lowerer {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 if op.is_comparison() || matches!(op, BinOp::LogicalAnd | BinOp::LogicalOr) {
                     IrType::I32
+                } else if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    // Shift operators: result type is promoted type of left operand
+                    Self::integer_promote(self.infer_expr_type(lhs))
                 } else {
                     Self::common_type(self.infer_expr_type(lhs), self.infer_expr_type(rhs))
                 }

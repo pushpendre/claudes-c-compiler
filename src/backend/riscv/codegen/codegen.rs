@@ -167,23 +167,41 @@ impl RiscvCodegen {
 
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
+            let is_unsigned_dest = to_ty.is_unsigned() || to_ty == IrType::Ptr;
             if from_ty == IrType::F64 {
                 self.state.emit("    fmv.d.x ft0, t0");
-                self.state.emit("    fcvt.l.d t0, ft0, rtz");
+                if is_unsigned_dest {
+                    self.state.emit("    fcvt.lu.d t0, ft0, rtz");
+                } else {
+                    self.state.emit("    fcvt.l.d t0, ft0, rtz");
+                }
             } else {
                 self.state.emit("    fmv.w.x ft0, t0");
-                self.state.emit("    fcvt.l.s t0, ft0, rtz");
+                if is_unsigned_dest {
+                    self.state.emit("    fcvt.lu.s t0, ft0, rtz");
+                } else {
+                    self.state.emit("    fcvt.l.s t0, ft0, rtz");
+                }
             }
             return;
         }
 
         // Int-to-float cast
         if !from_ty.is_float() && to_ty.is_float() {
+            let is_unsigned_src = from_ty.is_unsigned();
             if to_ty == IrType::F64 {
-                self.state.emit("    fcvt.d.l ft0, t0");
+                if is_unsigned_src {
+                    self.state.emit("    fcvt.d.lu ft0, t0");
+                } else {
+                    self.state.emit("    fcvt.d.l ft0, t0");
+                }
                 self.state.emit("    fmv.x.d t0, ft0");
             } else {
-                self.state.emit("    fcvt.s.l ft0, t0");
+                if is_unsigned_src {
+                    self.state.emit("    fcvt.s.lu ft0, t0");
+                } else {
+                    self.state.emit("    fcvt.s.l ft0, t0");
+                }
                 self.state.emit("    fmv.x.w t0, ft0");
             }
             return;
