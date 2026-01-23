@@ -1,0 +1,12 @@
+Implement static local variable support
+
+Static local variables are declared inside functions but have static storage
+duration (persist across function calls, initialized once).
+
+Implementation:
+1. Add is_static field to Declaration in ast.rs
+2. Track 'static' storage class specifier in parser
+3. In lowering, emit static locals as global variables with mangled names
+   (e.g., func.varname or __static_func_varname) to ensure uniqueness
+4. Static locals should be zero-initialized if no explicit initializer
+5. Update all three backends to handle static local globals correctly
