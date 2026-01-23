@@ -1,0 +1,9 @@
+Fix two critical codegen bugs:
+
+1. DCE pass incorrectly removes Alloca instructions for unused function parameters.
+   This causes find_param_alloca (which uses positional indexing) to map parameters
+   to wrong stack slots, resulting in miscompilation of functions with (void)param casts.
+
+2. get_pointed_struct_layout does not handle Expr::Cast or Expr::AddressOf expressions,
+   causing offsetof() to always return 0 and struct member access through cast/addressof
+   expressions (like (&lj)->b or ((struct S*)0)->field) to use offset 0.
