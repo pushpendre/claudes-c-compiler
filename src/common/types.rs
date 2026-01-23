@@ -198,6 +198,25 @@ impl StructLayout {
         }
     }
 
+    /// Resolve which field index an initializer targets, given either a field designator
+    /// or a positional index that skips unnamed (anonymous) fields.
+    ///
+    /// `designator_name`: If Some, look up the field by name.
+    /// `current_idx`: The current positional index (used when no designator).
+    ///
+    /// Returns the resolved field index, or `None` if no valid field found.
+    pub fn resolve_init_field_idx(&self, designator_name: Option<&str>, current_idx: usize) -> Option<usize> {
+        if let Some(name) = designator_name {
+            self.fields.iter().position(|f| f.name == name)
+        } else {
+            let mut idx = current_idx;
+            while idx < self.fields.len() && self.fields[idx].name.is_empty() {
+                idx += 1;
+            }
+            if idx < self.fields.len() { Some(idx) } else { None }
+        }
+    }
+
     /// Look up a field by name, returning its offset and type.
     /// Recursively searches anonymous struct/union members.
     pub fn field_offset(&self, name: &str) -> Option<(usize, &CType)> {
@@ -372,6 +391,14 @@ impl IrType {
             IrType::F32 => 4,
             IrType::F64 => 8,
             IrType::Void => 0,
+        }
+    }
+
+    /// Alignment in bytes (matches size for all current IR types except Void which is 1).
+    pub fn align(&self) -> usize {
+        match self {
+            IrType::Void => 1,
+            other => other.size().max(1),
         }
     }
 

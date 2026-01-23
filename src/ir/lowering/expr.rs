@@ -1001,18 +1001,14 @@ impl Lowerer {
         let mut current_field_idx = 0usize;
 
         for item in items {
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-            } else {
-                // Skip unnamed fields (anonymous bitfields) for positional init
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
+            let desig_name = match item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
             };
-
-            if field_idx >= layout.fields.len() { break; }
+            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                Some(idx) => idx,
+                None => break,
+            };
             let field = &layout.fields[field_idx].clone();
             let field_ty = self.ir_type_for_elem_size(field.ty.size());
 
@@ -1423,12 +1419,25 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     pub(super) fn lower_pre_inc_dec(&mut self, inner: &Expr, op: UnaryOp) -> Operand {
+        let is_inc = op == UnaryOp::PreInc;
+        self.lower_inc_dec_impl(inner, is_inc, true)
+    }
+
+    pub(super) fn lower_post_inc_dec(&mut self, inner: &Expr, op: PostfixOp) -> Operand {
+        let is_inc = op == PostfixOp::PostInc;
+        self.lower_inc_dec_impl(inner, is_inc, false)
+    }
+
+    /// Shared implementation for pre/post increment/decrement.
+    /// `return_new`: if true, returns the new value (pre-inc/dec); if false, returns original (post-inc/dec).
+    fn lower_inc_dec_impl(&mut self, inner: &Expr, is_inc: bool, return_new: bool) -> Operand {
         let ty = self.get_expr_type(inner);
         if let Some(lv) = self.lower_lvalue(inner) {
-            let loaded_val = self.load_lvalue_as_value(&lv, ty);
+            let loaded = self.load_lvalue_typed(&lv, ty);
+            let loaded_val = self.operand_to_value(loaded.clone());
             let (step, binop_ty) = self.inc_dec_step_and_type(ty, inner);
             let result = self.fresh_value();
-            let ir_op = if op == UnaryOp::PreInc { IrBinOp::Add } else { IrBinOp::Sub };
+            let ir_op = if is_inc { IrBinOp::Add } else { IrBinOp::Sub };
             self.emit(Instruction::BinOp {
                 dest: result, op: ir_op,
                 lhs: Operand::Value(loaded_val), rhs: step, ty: binop_ty,
@@ -1440,31 +1449,7 @@ impl Lowerer {
                 Operand::Value(result)
             };
             self.store_lvalue_typed(&lv, store_op.clone(), ty);
-            return store_op;
-        }
-        self.lower_expr(inner)
-    }
-
-    pub(super) fn lower_post_inc_dec(&mut self, inner: &Expr, op: PostfixOp) -> Operand {
-        let ty = self.get_expr_type(inner);
-        if let Some(lv) = self.lower_lvalue(inner) {
-            let loaded = self.load_lvalue_typed(&lv, ty);
-            let loaded_val = self.operand_to_value(loaded.clone());
-            let (step, binop_ty) = self.inc_dec_step_and_type(ty, inner);
-            let result = self.fresh_value();
-            let ir_op = if op == PostfixOp::PostInc { IrBinOp::Add } else { IrBinOp::Sub };
-            self.emit(Instruction::BinOp {
-                dest: result, op: ir_op,
-                lhs: Operand::Value(loaded_val), rhs: step, ty: binop_ty,
-            });
-            // _Bool lvalues normalize the result to 0 or 1
-            let store_op = if self.is_bool_lvalue(inner) {
-                self.emit_bool_normalize(Operand::Value(result))
-            } else {
-                Operand::Value(result)
-            };
-            self.store_lvalue_typed(&lv, store_op, ty);
-            return loaded; // Return original value (before inc/dec)
+            return if return_new { store_op } else { loaded };
         }
         self.lower_expr(inner)
     }
@@ -1475,7 +1460,7 @@ impl Lowerer {
     /// For integers: step = 1 (I64), type = I64
     fn inc_dec_step_and_type(&self, ty: IrType, expr: &Expr) -> (Operand, IrType) {
         if ty == IrType::Ptr {
-            let elem_size = self.get_pointer_elem_size(expr);
+            let elem_size = self.get_pointer_elem_size_from_expr(expr);
             (Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64)
         } else if ty == IrType::F64 {
             (Operand::Const(IrConst::F64(1.0)), IrType::F64)
@@ -1540,7 +1525,7 @@ impl Lowerer {
 
             // Scale RHS for pointer += and -=
             let actual_rhs = if ty == IrType::Ptr && matches!(op, BinOp::Add | BinOp::Sub) {
-                let elem_size = self.get_pointer_elem_size(lhs);
+                let elem_size = self.get_pointer_elem_size_from_expr(lhs);
                 self.scale_index(rhs_val, elem_size)
             } else {
                 rhs_val
@@ -1609,23 +1594,10 @@ impl Lowerer {
         rhs_val
     }
 
+    /// Map a compound assignment operator to the corresponding IrBinOp.
+    /// Delegates to binop_to_ir for all known operators, defaults to Add for unknown.
     fn compound_assign_to_ir(op: &BinOp, is_unsigned: bool) -> IrBinOp {
-        match (op, is_unsigned) {
-            (BinOp::Add, _) => IrBinOp::Add,
-            (BinOp::Sub, _) => IrBinOp::Sub,
-            (BinOp::Mul, _) => IrBinOp::Mul,
-            (BinOp::Div, false) => IrBinOp::SDiv,
-            (BinOp::Div, true) => IrBinOp::UDiv,
-            (BinOp::Mod, false) => IrBinOp::SRem,
-            (BinOp::Mod, true) => IrBinOp::URem,
-            (BinOp::BitAnd, _) => IrBinOp::And,
-            (BinOp::BitOr, _) => IrBinOp::Or,
-            (BinOp::BitXor, _) => IrBinOp::Xor,
-            (BinOp::Shl, _) => IrBinOp::Shl,
-            (BinOp::Shr, false) => IrBinOp::AShr,
-            (BinOp::Shr, true) => IrBinOp::LShr,
-            _ => IrBinOp::Add,
-        }
+        Self::binop_to_ir(op.clone(), is_unsigned)
     }
 
     // -----------------------------------------------------------------------

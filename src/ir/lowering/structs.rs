@@ -75,13 +75,7 @@ impl Lowerer {
     fn compute_struct_layout(&self, fields: &[StructFieldDecl], is_union: bool) -> StructLayout {
         let struct_fields: Vec<StructField> = fields.iter().map(|f| {
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
-                self.eval_const_expr(bw).and_then(|c| match c {
-                    IrConst::I8(v) => Some(v as u32),
-                    IrConst::I16(v) => Some(v as u32),
-                    IrConst::I32(v) => Some(v as u32),
-                    IrConst::I64(v) => Some(v as u32),
-                    _ => None,
-                })
+                self.eval_const_expr(bw).and_then(|c| c.to_u32())
             });
             StructField {
                 name: f.name.clone().unwrap_or_default(),
@@ -101,53 +95,17 @@ impl Lowerer {
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
         let ts = self.resolve_type_spec(ts);
         match ts {
-            TypeSpecifier::Struct(tag, Some(fields)) => {
-                // Inline struct definition: compute layout directly
-                let struct_fields: Vec<StructField> = fields.iter().map(|f| {
-                    let bit_width = f.bit_width.as_ref().and_then(|bw| {
-                        self.eval_const_expr(bw).and_then(|c| match c {
-                            IrConst::I8(v) => Some(v as u32),
-                            IrConst::I16(v) => Some(v as u32),
-                            IrConst::I32(v) => Some(v as u32),
-                            IrConst::I64(v) => Some(v as u32),
-                            _ => None,
-                        })
-                    });
-                    StructField {
-                        name: f.name.clone().unwrap_or_default(),
-                        ty: self.type_spec_to_ctype(&f.type_spec),
-                        bit_width,
-                    }
-                }).collect();
-                Some(StructLayout::for_struct(&struct_fields))
+            TypeSpecifier::Struct(_, Some(fields)) => {
+                Some(self.compute_struct_layout(&fields, false))
             }
             TypeSpecifier::Struct(Some(tag), None) => {
-                // Reference to previously defined struct
-                let key = format!("struct.{}", tag);
-                self.struct_layouts.get(&key).cloned()
+                self.struct_layouts.get(&format!("struct.{}", tag)).cloned()
             }
-            TypeSpecifier::Union(tag, Some(fields)) => {
-                let struct_fields: Vec<StructField> = fields.iter().map(|f| {
-                    let bit_width = f.bit_width.as_ref().and_then(|bw| {
-                        self.eval_const_expr(bw).and_then(|c| match c {
-                            IrConst::I8(v) => Some(v as u32),
-                            IrConst::I16(v) => Some(v as u32),
-                            IrConst::I32(v) => Some(v as u32),
-                            IrConst::I64(v) => Some(v as u32),
-                            _ => None,
-                        })
-                    });
-                    StructField {
-                        name: f.name.clone().unwrap_or_default(),
-                        ty: self.type_spec_to_ctype(&f.type_spec),
-                        bit_width,
-                    }
-                }).collect();
-                Some(StructLayout::for_union(&struct_fields))
+            TypeSpecifier::Union(_, Some(fields)) => {
+                Some(self.compute_struct_layout(&fields, true))
             }
             TypeSpecifier::Union(Some(tag), None) => {
-                let key = format!("union.{}", tag);
-                self.struct_layouts.get(&key).cloned()
+                self.struct_layouts.get(&format!("union.{}", tag)).cloned()
             }
             _ => None,
         }

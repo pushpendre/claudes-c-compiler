@@ -13,7 +13,7 @@ Each basic block has a list of `Instruction`s and a `Terminator` (branch, condit
 
 ## Modules
 
-- **ir.rs** - Core IR data structures: `IrModule`, `IrFunction`, `BasicBlock`, `Instruction`, `Terminator`, `Operand`, `Value`, `IrConst`
+- **ir.rs** - Core IR data structures: `IrModule`, `IrFunction`, `BasicBlock`, `Instruction`, `Terminator`, `Operand`, `Value`, `IrConst`. `IrConst` provides type-safe conversion helpers (`to_i64()`, `to_u64()`, `to_u32()`, `coerce_to()`, `push_le_bytes()`, `from_i64()`, `zero()`), eliminating manual match-on-variant patterns throughout the codebase.
 - **lowering/** - AST → IR lowering (see lowering/README.md)
 - **mem2reg/** - Stub for SSA promotion (promotes allocas to SSA values with phi insertion)
 

@@ -207,15 +207,7 @@ impl Lowerer {
                     GlobalInit::Zero
                 };
 
-                let align = match var_ty {
-                    IrType::I8 | IrType::U8 => 1,
-                    IrType::I16 | IrType::U16 => 2,
-                    IrType::I32 | IrType::U32 => 4,
-                    IrType::I64 | IrType::U64 | IrType::Ptr => 8,
-                    IrType::F32 => 4,
-                    IrType::F64 => 8,
-                    IrType::Void => 1,
-                };
+                let align = var_ty.align();
 
                 // For struct initializers emitted as byte arrays, set element type to I8
                 // so the backend emits .byte directives for each element.
@@ -504,17 +496,15 @@ impl Lowerer {
     ) {
         let mut current_field_idx = 0usize;
         for item in items {
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-            } else {
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
+            let desig_name = match item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
+            };
+            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                Some(idx) => idx,
+                None => break,
             };
 
-            if field_idx >= layout.fields.len() { break; }
             let field = &layout.fields[field_idx];
             let field_offset = field.offset;
             let field_ty = IrType::from_ctype(&field.ty);
@@ -1033,21 +1023,14 @@ impl Lowerer {
         while item_idx < items.len() {
             let item = &items[item_idx];
 
-            // Determine target field from designator or position
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                // Designated initializer: look up field by name regardless of current_field_idx
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-            } else {
-                // Positional init: use current_field_idx, skip unnamed fields
-                if current_field_idx >= layout.fields.len() { break; }
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
+            let desig_name = match item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
             };
-
-            if field_idx >= layout.fields.len() { break; }
+            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                Some(idx) => idx,
+                None => break,
+            };
             let field = &layout.fields[field_idx].clone();
             let field_offset = base_offset + field.offset;
 

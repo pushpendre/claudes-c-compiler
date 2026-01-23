@@ -674,16 +674,7 @@ impl Lowerer {
                 c_type,
             });
 
-            // Determine alignment based on type
-            let align = match var_ty {
-                IrType::I8 | IrType::U8 => 1,
-                IrType::I16 | IrType::U16 => 2,
-                IrType::I32 | IrType::U32 => 4,
-                IrType::I64 | IrType::U64 | IrType::Ptr => 8,
-                IrType::F32 => 4,
-                IrType::F64 => 8,
-                IrType::Void => 1,
-            };
+            let align = var_ty.align();
 
             let is_static = decl.is_static;
 
@@ -802,14 +793,8 @@ impl Lowerer {
                         for item in items {
                             // Check for index designator
                             if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
-                                if let Some(idx) = self.eval_const_expr(idx_expr) {
-                                    current_idx = match idx {
-                                        IrConst::I8(v) => v as usize,
-                                        IrConst::I16(v) => v as usize,
-                                        IrConst::I32(v) => v as usize,
-                                        IrConst::I64(v) => v as usize,
-                                        _ => current_idx,
-                                    };
+                                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                                    current_idx = idx;
                                 }
                             }
                             if current_idx >= num_elems {
@@ -916,14 +901,8 @@ impl Lowerer {
                         for item in items {
                             // Check for index designator
                             if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
-                                if let Some(idx) = self.eval_const_expr(idx_expr) {
-                                    current_idx = match idx {
-                                        IrConst::I8(v) => v as usize,
-                                        IrConst::I16(v) => v as usize,
-                                        IrConst::I32(v) => v as usize,
-                                        IrConst::I64(v) => v as usize,
-                                        _ => current_idx,
-                                    };
+                                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                                    current_idx = idx;
                                 }
                             }
                             if current_idx < num_elems {
@@ -1009,20 +988,10 @@ impl Lowerer {
             self.sizeof_type(type_spec)
         };
 
-        let align = match base_ty {
-            IrType::I8 | IrType::U8 => 1,
-            IrType::I16 | IrType::U16 => 2,
-            IrType::I32 | IrType::U32 => 4,
-            IrType::I64 | IrType::U64 | IrType::Ptr => 8,
-            IrType::F32 => 4,
-            IrType::F64 => 8,
-            IrType::Void => 1,
-        };
-        // Use struct alignment if available
         let align = if let Some(ref layout) = struct_layout {
-            layout.align.max(align)
+            layout.align.max(base_ty.align())
         } else {
-            align
+            base_ty.align()
         };
 
         let global_init = self.lower_global_init(init, type_spec, base_ty, false, 0, alloc_size, &struct_layout, &[]);
@@ -1093,23 +1062,17 @@ impl Lowerer {
         while item_idx < items.len() {
             let item = &items[item_idx];
 
-            // Determine which field this initializer targets
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                // Designated initializer: look up field by name
-                match layout.fields.iter().position(|f| f.name == *name) {
-                    Some(idx) => idx,
-                    None => { item_idx += 1; continue; }
-                }
-            } else {
-                // Positional: use current_field_idx, skip unnamed fields
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
+            let designator_name = match item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
             };
-
-            if field_idx >= layout.fields.len() { break; }
+            let field_idx = match layout.resolve_init_field_idx(designator_name, current_field_idx) {
+                Some(idx) => idx,
+                None => {
+                    if designator_name.is_some() { item_idx += 1; continue; }
+                    break;
+                }
+            };
             let field_layout = &layout.fields[field_idx];
             let field_offset = base_offset + field_layout.offset;
 
@@ -1344,30 +1307,10 @@ impl Lowerer {
 
     /// Push a constant value as individual bytes into a compound init element list.
     fn push_const_as_bytes(&self, elements: &mut Vec<GlobalInit>, val: &IrConst, size: usize) {
-        let int_val = match val {
-            IrConst::I8(v) => *v as i64,
-            IrConst::I16(v) => *v as i64,
-            IrConst::I32(v) => *v as i64,
-            IrConst::I64(v) => *v,
-            IrConst::Zero => 0,
-            IrConst::F32(v) => {
-                let bits = v.to_bits().to_le_bytes();
-                for &b in &bits {
-                    elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
-                }
-                return;
-            }
-            IrConst::F64(v) => {
-                let bits = v.to_bits().to_le_bytes();
-                for &b in &bits {
-                    elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
-                }
-                return;
-            }
-        };
-        let le_bytes = int_val.to_le_bytes();
-        for i in 0..size {
-            elements.push(GlobalInit::Scalar(IrConst::I8(le_bytes[i] as i8)));
+        let mut bytes = Vec::with_capacity(size);
+        val.push_le_bytes(&mut bytes, size);
+        for b in bytes {
+            elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
         }
     }
 
@@ -1378,15 +1321,12 @@ impl Lowerer {
         layout: &StructLayout,
         current_field_idx: usize,
     ) -> usize {
-        if let Some(Designator::Field(ref name)) = item.designators.first() {
-            layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-        } else {
-            let mut idx = current_field_idx;
-            while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                idx += 1;
-            }
-            idx
-        }
+        let designator_name = match item.designators.first() {
+            Some(Designator::Field(ref name)) => Some(name.as_str()),
+            _ => None,
+        };
+        layout.resolve_init_field_idx(designator_name, current_field_idx)
+            .unwrap_or(current_field_idx)
     }
 
     /// Write an initializer item to a byte buffer at the given offset.
@@ -1425,47 +1365,15 @@ impl Lowerer {
         }
     }
 
-    /// Recursively write a nested struct initializer list to a byte buffer.
     /// Write an IrConst value to a byte buffer at the given offset using the field's IR type.
     fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
-        // Coerce integer constants to float if writing to a float field
-        let val = &self.coerce_const_to_type(val.clone(), ty);
-        match val {
-            IrConst::F32(v) => {
-                // Write float as IEEE 754 bit pattern (4 bytes, little-endian)
-                let bits = v.to_bits().to_le_bytes();
-                for i in 0..4 {
-                    if offset + i < bytes.len() {
-                        bytes[offset + i] = bits[i];
-                    }
-                }
-            }
-            IrConst::F64(v) => {
-                // Write double as IEEE 754 bit pattern (8 bytes, little-endian)
-                let bits = v.to_bits().to_le_bytes();
-                for i in 0..8 {
-                    if offset + i < bytes.len() {
-                        bytes[offset + i] = bits[i];
-                    }
-                }
-            }
-            _ => {
-                let int_val = match val {
-                    IrConst::I8(v) => *v as i64,
-                    IrConst::I16(v) => *v as i64,
-                    IrConst::I32(v) => *v as i64,
-                    IrConst::I64(v) => *v,
-                    IrConst::Zero => 0,
-                    _ => 0,
-                };
-                // Write integer value in little-endian at the appropriate size
-                let le_bytes = int_val.to_le_bytes();
-                let size = ty.size();
-                for i in 0..size {
-                    if offset + i < bytes.len() {
-                        bytes[offset + i] = le_bytes[i];
-                    }
-                }
+        let coerced = val.coerce_to(ty);
+        let size = ty.size();
+        let mut le_buf = Vec::with_capacity(size);
+        coerced.push_le_bytes(&mut le_buf, size);
+        for (i, &b) in le_buf.iter().enumerate() {
+            if offset + i < bytes.len() {
+                bytes[offset + i] = b;
             }
         }
     }
@@ -1473,15 +1381,7 @@ impl Lowerer {
     /// Write a bitfield value into a byte buffer at the given offset.
     /// Uses read-modify-write to pack the value at the correct bit position.
     fn write_bitfield_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType, bit_offset: u32, bit_width: u32) {
-        let int_val = match val {
-            IrConst::I8(v) => *v as u64,
-            IrConst::I16(v) => *v as u64,
-            IrConst::I32(v) => *v as u64,
-            IrConst::I64(v) => *v as u64,
-            IrConst::Zero => 0,
-            IrConst::F32(v) => *v as u64,
-            IrConst::F64(v) => *v as u64,
-        };
+        let int_val = val.to_u64().unwrap_or(0);
 
         let size = ty.size();
         let mask = if bit_width >= 64 { u64::MAX } else { (1u64 << bit_width) - 1 };
@@ -1519,21 +1419,14 @@ impl Lowerer {
     ) {
         let mut current_field_idx = 0usize;
         for item in items {
-            // Determine which field this initializer targets
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-            } else {
-                // Skip unnamed fields (anonymous bitfields)
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
+            let designator_name = match item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
             };
-
-            if field_idx >= layout.fields.len() {
-                break;
-            }
+            let field_idx = match layout.resolve_init_field_idx(designator_name, current_field_idx) {
+                Some(idx) => idx,
+                None => break,
+            };
 
             let field_layout = &layout.fields[field_idx];
             let field_offset = base_offset + field_layout.offset;
@@ -1679,16 +1572,14 @@ impl Lowerer {
                     Initializer::List(sub_items) => {
                         let mut current_field_idx = 0usize;
                         for sub_item in sub_items {
-                            let field_idx = if let Some(Designator::Field(ref name)) = sub_item.designators.first() {
-                                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-                            } else {
-                                let mut idx = current_field_idx;
-                                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                                    idx += 1;
-                                }
-                                idx
+                            let desig_name = match sub_item.designators.first() {
+                                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                                _ => None,
                             };
-                            if field_idx >= layout.fields.len() { break; }
+                            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                                Some(idx) => idx,
+                                None => break,
+                            };
                             let field = &layout.fields[field_idx];
                             let field_offset = base_offset + field.offset;
                             let field_ir_ty = IrType::from_ctype(&field.ty);
@@ -2000,44 +1891,8 @@ impl Lowerer {
         }
     }
 
-    /// Get the element size for pointer arithmetic on a variable.
-    /// For `int *p`, returns 4. For `char *s`, returns 1.
-    pub(super) fn get_pointer_elem_size(&self, expr: &Expr) -> usize {
-        // Use CType-based resolution first for accurate multi-level pointer handling.
-        // For int **pp, CType is Pointer(Pointer(Int)), so pointee is Pointer(Int) with size 8.
-        if let Some(ctype) = self.get_expr_ctype(expr) {
-            match &ctype {
-                CType::Pointer(pointee) => return pointee.size().max(1),
-                CType::Array(elem, _) => return elem.size().max(1),
-                _ => {}
-            }
-        }
-        if let Expr::Identifier(name, _) = expr {
-            if let Some(info) = self.locals.get(name) {
-                // Prefer pointee_type over elem_size for pointers, as elem_size may
-                // reflect the base type (e.g., sizeof(int)=4 for int **pp) rather
-                // than the actual pointed-to type (e.g., sizeof(int*)=8).
-                if let Some(pt) = info.pointee_type {
-                    return pt.size();
-                }
-                if info.elem_size > 0 {
-                    return info.elem_size;
-                }
-            }
-            if let Some(ginfo) = self.globals.get(name) {
-                if let Some(pt) = ginfo.pointee_type {
-                    return pt.size();
-                }
-                if ginfo.elem_size > 0 {
-                    return ginfo.elem_size;
-                }
-            }
-        }
-        // Default: treat as pointer to 8-byte values
-        8
-    }
-
     /// Get the element size for a pointer expression (for scaling in pointer arithmetic).
+    /// For `int *p`, returns 4. For `char *s`, returns 1.
     pub(super) fn get_pointer_elem_size_from_expr(&self, expr: &Expr) -> usize {
         // Try CType-based resolution first for accurate type information
         if let Some(ctype) = self.get_expr_ctype(expr) {
@@ -2048,8 +1903,25 @@ impl Lowerer {
             }
         }
         match expr {
-            Expr::Identifier(_, _) => {
-                self.get_pointer_elem_size(expr)
+            Expr::Identifier(name, _) => {
+                // Check locals then globals for pointee_type or elem_size.
+                if let Some(info) = self.locals.get(name) {
+                    if let Some(pt) = info.pointee_type {
+                        return pt.size();
+                    }
+                    if info.elem_size > 0 {
+                        return info.elem_size;
+                    }
+                }
+                if let Some(ginfo) = self.globals.get(name) {
+                    if let Some(pt) = ginfo.pointee_type {
+                        return pt.size();
+                    }
+                    if ginfo.elem_size > 0 {
+                        return ginfo.elem_size;
+                    }
+                }
+                8
             }
             Expr::PostfixOp(_, inner, _) => self.get_pointer_elem_size_from_expr(inner),
             Expr::UnaryOp(op, inner, _) => {

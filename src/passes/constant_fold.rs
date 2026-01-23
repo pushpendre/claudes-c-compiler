@@ -102,28 +102,14 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
 /// Extract a constant integer value from an operand.
 fn as_i64_const(op: &Operand) -> Option<i64> {
     match op {
-        Operand::Const(c) => match c {
-            IrConst::I8(v) => Some(*v as i64),
-            IrConst::I16(v) => Some(*v as i64),
-            IrConst::I32(v) => Some(*v as i64),
-            IrConst::I64(v) => Some(*v),
-            IrConst::Zero => Some(0),
-            IrConst::F32(_) | IrConst::F64(_) => None, // TODO: float constant folding
-        },
+        Operand::Const(c) => c.to_i64(),
         Operand::Value(_) => None,
     }
 }
 
 /// Convert a result i64 back to an IrConst of the appropriate type.
 fn i64_to_irconst(val: i64, ty: crate::common::types::IrType) -> IrConst {
-    use crate::common::types::IrType;
-    match ty {
-        IrType::I8 => IrConst::I8(val as i8),
-        IrType::I16 => IrConst::I16(val as i16),
-        IrType::I32 => IrConst::I32(val as i32),
-        IrType::I64 | IrType::Ptr => IrConst::I64(val),
-        _ => IrConst::I64(val),
-    }
+    IrConst::from_i64(val, ty)
 }
 
 /// Evaluate a binary operation on two constant integers.

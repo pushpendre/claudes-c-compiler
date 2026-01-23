@@ -175,16 +175,13 @@ impl Lowerer {
             _ => {
                 // For non-cast expressions, evaluate normally and convert to bits
                 let val = self.eval_const_expr(expr)?;
-                let (bits, signed) = match val {
-                    IrConst::I8(v) => (v as i64 as u64, true),
-                    IrConst::I16(v) => (v as i64 as u64, true),
-                    IrConst::I32(v) => (v as i64 as u64, true),
-                    IrConst::I64(v) => (v as u64, true),
-                    IrConst::F32(v) => (v as i64 as u64, true),
-                    IrConst::F64(v) => (v as i64 as u64, true),
-                    IrConst::Zero => (0u64, true),
+                // Sign-extend to i64, then interpret as u64 bit pattern
+                let bits = match &val {
+                    IrConst::F32(v) => *v as i64 as u64,
+                    IrConst::F64(v) => *v as i64 as u64,
+                    _ => val.to_i64().unwrap_or(0) as u64,
                 };
-                Some((bits, signed))
+                Some((bits, true))
             }
         }
     }
@@ -500,85 +497,22 @@ impl Lowerer {
 
     /// Evaluate a constant expression and return as usize (for array index designators).
     pub(super) fn eval_const_expr_for_designator(&self, expr: &Expr) -> Option<usize> {
-        if let Some(val) = self.eval_const_expr(expr) {
-            match val {
-                IrConst::I8(v) => Some(v as usize),
-                IrConst::I16(v) => Some(v as usize),
-                IrConst::I32(v) => Some(v as usize),
-                IrConst::I64(v) => Some(v as usize),
-                IrConst::Zero => Some(0),
-                _ => None,
-            }
-        } else {
-            None
-        }
+        self.eval_const_expr(expr).and_then(|v| v.to_usize())
     }
 
-    /// Convert an IrConst to i64.
+    /// Convert an IrConst to i64. Delegates to IrConst::to_i64().
     pub(super) fn const_to_i64(&self, c: &IrConst) -> Option<i64> {
-        match c {
-            IrConst::I8(v) => Some(*v as i64),
-            IrConst::I16(v) => Some(*v as i64),
-            IrConst::I32(v) => Some(*v as i64),
-            IrConst::I64(v) => Some(*v),
-            IrConst::Zero => Some(0),
-            _ => None,
-        }
+        c.to_i64()
     }
 
-    /// Coerce an IrConst to match a target IrType.
-    /// This handles cases like CharLiteral('a') = I32(97) needing to become I8(97) for char arrays.
+    /// Coerce an IrConst to match a target IrType. Delegates to IrConst::coerce_to().
     pub(super) fn coerce_const_to_type(&self, val: IrConst, target_ty: IrType) -> IrConst {
-        // If already the right type, return as-is
-        match (&val, target_ty) {
-            (IrConst::I8(_), IrType::I8 | IrType::U8) => return val,
-            (IrConst::I16(_), IrType::I16 | IrType::U16) => return val,
-            (IrConst::I32(_), IrType::I32 | IrType::U32) => return val,
-            (IrConst::I64(_), IrType::I64 | IrType::U64 | IrType::Ptr) => return val,
-            (IrConst::F32(_), IrType::F32) => return val,
-            (IrConst::F64(_), IrType::F64) => return val,
-            _ => {}
-        }
-        // Convert integer types
-        if let Some(int_val) = self.const_to_i64(&val) {
-            match target_ty {
-                IrType::I8 | IrType::U8 => return IrConst::I8(int_val as i8),
-                IrType::I16 | IrType::U16 => return IrConst::I16(int_val as i16),
-                IrType::I32 | IrType::U32 => return IrConst::I32(int_val as i32),
-                IrType::I64 | IrType::U64 | IrType::Ptr => return IrConst::I64(int_val),
-                IrType::F32 => return IrConst::F32(int_val as f32),
-                IrType::F64 => return IrConst::F64(int_val as f64),
-                _ => {}
-            }
-        }
-        // Convert float types
-        match (&val, target_ty) {
-            (IrConst::F64(v), IrType::F32) => return IrConst::F32(*v as f32),
-            (IrConst::F32(v), IrType::F64) => return IrConst::F64(*v as f64),
-            (IrConst::F64(v), IrType::I8 | IrType::U8) => return IrConst::I8(*v as i8),
-            (IrConst::F64(v), IrType::I16 | IrType::U16) => return IrConst::I16(*v as i16),
-            (IrConst::F64(v), IrType::I32 | IrType::U32) => return IrConst::I32(*v as i32),
-            (IrConst::F64(v), IrType::I64 | IrType::U64) => return IrConst::I64(*v as i64),
-            (IrConst::F32(v), IrType::I8 | IrType::U8) => return IrConst::I8(*v as i8),
-            (IrConst::F32(v), IrType::I16 | IrType::U16) => return IrConst::I16(*v as i16),
-            (IrConst::F32(v), IrType::I32 | IrType::U32) => return IrConst::I32(*v as i32),
-            (IrConst::F32(v), IrType::I64 | IrType::U64) => return IrConst::I64(*v as i64),
-            _ => {}
-        }
-        val
+        val.coerce_to(target_ty)
     }
 
     /// Get the zero constant for a given IR type.
     pub(super) fn zero_const(&self, ty: IrType) -> IrConst {
-        match ty {
-            IrType::I8 | IrType::U8 => IrConst::I8(0),
-            IrType::I16 | IrType::U16 => IrConst::I16(0),
-            IrType::I32 | IrType::U32 => IrConst::I32(0),
-            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(0),
-            IrType::F32 => IrConst::F32(0.0),
-            IrType::F64 => IrConst::F64(0.0),
-            IrType::Void => IrConst::Zero,
-        }
+        if ty == IrType::Void { IrConst::Zero } else { IrConst::zero(ty) }
     }
 
     /// Check if an expression refers to a struct/union value (not pointer-to-struct).
@@ -1105,13 +1039,7 @@ impl Lowerer {
                 let is_union = matches!(ts, TypeSpecifier::Union(_, _));
                 let struct_fields: Vec<StructField> = fields.iter().map(|f| {
                     let bit_width = f.bit_width.as_ref().and_then(|bw| {
-                        self.eval_const_expr(bw).and_then(|c| match c {
-                            IrConst::I8(v) => Some(v as u32),
-                            IrConst::I16(v) => Some(v as u32),
-                            IrConst::I32(v) => Some(v as u32),
-                            IrConst::I64(v) => Some(v as u32),
-                            _ => None,
-                        })
+                        self.eval_const_expr(bw).and_then(|c| c.to_u32())
                     });
                     StructField {
                         name: f.name.clone().unwrap_or_default(),
@@ -1674,13 +1602,7 @@ impl Lowerer {
         if let Some(fs) = fields {
             let struct_fields: Vec<StructField> = fs.iter().map(|f| {
                 let bit_width = f.bit_width.as_ref().and_then(|bw| {
-                    self.eval_const_expr(bw).and_then(|c| match c {
-                        IrConst::I8(v) => Some(v as u32),
-                        IrConst::I16(v) => Some(v as u32),
-                        IrConst::I32(v) => Some(v as u32),
-                        IrConst::I64(v) => Some(v as u32),
-                        _ => None,
-                    })
+                    self.eval_const_expr(bw).and_then(|c| c.to_u32())
                 });
                 StructField {
                     name: f.name.clone().unwrap_or_default(),
