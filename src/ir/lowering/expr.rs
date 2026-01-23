@@ -161,6 +161,21 @@ impl Lowerer {
             }
         }
 
+        // Pointer comparison: compare as integer addresses, not as the pointed-to type.
+        // We use lower_expr (not lower_expr_with_type) because pointer arithmetic
+        // already produces I64 results, and lower_expr_with_type would insert a
+        // spurious float-to-int cast based on get_expr_type returning the element type.
+        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            if self.expr_is_pointer(lhs) || self.expr_is_pointer(rhs) {
+                let lhs_val = self.lower_expr(lhs);
+                let rhs_val = self.lower_expr(rhs);
+                let dest = self.fresh_value();
+                let cmp_op = Self::binop_to_cmp(*op, true); // pointer comparison is unsigned
+                self.emit(Instruction::Cmp { dest, op: cmp_op, lhs: lhs_val, rhs: rhs_val, ty: IrType::I64 });
+                return Operand::Value(dest);
+            }
+        }
+
         // Regular arithmetic/comparison
         self.lower_arithmetic_binop(op, lhs, rhs)
     }

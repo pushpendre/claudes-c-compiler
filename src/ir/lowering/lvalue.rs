@@ -307,7 +307,11 @@ impl Lowerer {
                     }
                     return *info.array_dim_strides.last().unwrap_or(&info.elem_size.max(1));
                 }
-                if info.elem_size > 0 {
+                // Only use elem_size at depth 0 (direct subscript into this array).
+                // At depth > 0, the subscript is into a loaded pointer value (e.g.,
+                // ptrs[0][1] where ptrs is char*[]), so we need the pointee's element
+                // size, not the array's element size. Fall through to CType resolution.
+                if depth == 0 && info.elem_size > 0 {
                     return info.elem_size;
                 }
             }
@@ -318,7 +322,7 @@ impl Lowerer {
                     }
                     return *ginfo.array_dim_strides.last().unwrap_or(&ginfo.elem_size.max(1));
                 }
-                if ginfo.elem_size > 0 {
+                if depth == 0 && ginfo.elem_size > 0 {
                     return ginfo.elem_size;
                 }
             }

@@ -18,6 +18,8 @@ pub struct ArmCodegen {
     va_named_gp_count: usize,
     /// Number of named (non-variadic) FP params for current variadic function.
     va_named_fp_count: usize,
+    /// Number of named GP params that are passed on the stack (beyond 8 register args).
+    va_named_stack_gp_count: usize,
 }
 
 impl ArmCodegen {
@@ -30,6 +32,7 @@ impl ArmCodegen {
             va_fp_save_offset: 0,
             va_named_gp_count: 0,
             va_named_fp_count: 0,
+            va_named_stack_gp_count: 0,
         }
     }
 
@@ -513,6 +516,8 @@ impl ArchCodegen for ArmCodegen {
             }
             self.va_named_gp_count = named_gp.min(8);
             self.va_named_fp_count = named_fp.min(8);
+            // Track stack-passed named args (GP args beyond 8 register slots)
+            self.va_named_stack_gp_count = named_gp.saturating_sub(8);
         }
 
         space
@@ -1160,15 +1165,17 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // __stack: pointer to the stack overflow area (caller's stack frame above ours).
+        // __stack: pointer to the first variadic stack argument.
         // After prologue: sp = x29, [x29] = saved fp, [x29+8] = saved lr,
         // [x29+16..x29+frame_size-1] = local slots.
         // Caller's stack args are at x29 + frame_size (above our frame).
-        let frame_size = self.current_frame_size;
-        if frame_size <= 4095 {
-            self.state.emit(&format!("    add x1, x29, #{}", frame_size));
+        // If there are named args on the stack (more than 8 GP params), we must
+        // skip past them to point to the first variadic stack arg.
+        let stack_offset = self.current_frame_size + (self.va_named_stack_gp_count as i64 * 8);
+        if stack_offset <= 4095 {
+            self.state.emit(&format!("    add x1, x29, #{}", stack_offset));
         } else {
-            self.load_large_imm("x1", frame_size);
+            self.load_large_imm("x1", stack_offset);
             self.state.emit("    add x1, x29, x1");
         }
         self.state.emit("    str x1, [x0]");  // __stack at offset 0

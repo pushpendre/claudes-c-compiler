@@ -1026,10 +1026,18 @@ impl Lowerer {
 
                     // Check if any element is an address expression or string literal
                     // (for pointer arrays like char *arr[] or func_ptr arr[])
+                    // For multi-dim char arrays (char a[2][4] = {"abc", "xyz"}), string literals
+                    // should be inlined as bytes, not treated as address expressions.
+                    // Distinguish from char *arr[] by checking array_dim_strides.len() > 1.
+                    let is_multidim_char_array = matches!(base_ty, IrType::I8 | IrType::U8)
+                        && array_dim_strides.len() > 1;
                     let has_addr_exprs = items.iter().any(|item| {
                         if let Initializer::Expr(expr) = &item.init {
-                            matches!(expr, Expr::StringLiteral(_, _))
-                                || (self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some())
+                            if matches!(expr, Expr::StringLiteral(_, _)) {
+                                !is_multidim_char_array
+                            } else {
+                                self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some()
+                            }
                         } else {
                             false
                         }
@@ -2476,8 +2484,26 @@ impl Lowerer {
                     }
                 }
                 Initializer::Expr(expr) => {
-                    // Bare scalar: fills one base element, no sub-array padding
-                    if let Some(val) = self.eval_const_expr(expr) {
+                    if let Expr::StringLiteral(s, _) = expr {
+                        // String literal initializing a char sub-array: inline the bytes
+                        let start_len = values.len();
+                        for &byte in s.as_bytes() {
+                            values.push(IrConst::I64(byte as i64));
+                        }
+                        // Add null terminator if room
+                        if values.len() < start_len + sub_elem_count {
+                            values.push(IrConst::I64(0));
+                        }
+                        // Pad to sub_elem_count
+                        while values.len() < start_len + sub_elem_count {
+                            values.push(self.zero_const(base_ty));
+                        }
+                        // Truncate if string was too long for the sub-array
+                        if values.len() > start_len + sub_elem_count {
+                            values.truncate(start_len + sub_elem_count);
+                        }
+                    } else if let Some(val) = self.eval_const_expr(expr) {
+                        // Bare scalar: fills one base element, no sub-array padding
                         values.push(self.coerce_const_to_type(val, base_ty));
                     } else {
                         values.push(self.zero_const(base_ty));
