@@ -1,0 +1,11 @@
+Refactoring IR lowering subsystem to eliminate widespread code duplication.
+
+Key changes:
+1. Add alignment() and size() methods to IrType (eliminate 3+ duplicated match blocks)
+2. Add to_i64(), to_u64(), to_u32() methods to IrConst (eliminate 8+ duplicated extraction patterns)
+3. Extract resolve_struct_field_idx() as reusable helper (eliminate 6+ copies)
+4. Merge get_pointer_elem_size into get_pointer_elem_size_from_expr (subset function)
+5. Merge compound_assign_to_ir into binop_to_ir (near-identical functions)
+6. Extract shared inc/dec helper for pre/post increment
+7. Extract shared bitfield assign helper
+8. Clean up dead code and add documentation
