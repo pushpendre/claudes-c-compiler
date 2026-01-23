@@ -1485,6 +1485,13 @@ impl Lowerer {
                 }
             }
             current_field_idx = field_idx + 1;
+
+            // For unions, only one member can be active. If this was a flat init
+            // (no field designator), stop after the first field. Designated inits
+            // (.a = 1, .c = 2) are allowed to overwrite - the last designator wins.
+            if layout.is_union && designator_name.is_none() {
+                break;
+            }
         }
         item_idx
     }
@@ -1508,6 +1515,10 @@ impl Lowerer {
             if field_idx >= layout.fields.len() { continue; }
             field_inits[field_idx] = Some(item);
             current_field_idx = field_idx + 1;
+            // For unions with flat init, stop after first member.
+            // Designated inits can overwrite (last wins).
+            let has_designator = !item.designators.is_empty();
+            if layout.is_union && !has_designator { break; }
         }
 
         for fi in 0..layout.fields.len() {
@@ -1787,6 +1798,12 @@ impl Lowerer {
             }
 
             current_field_idx = field_idx + 1;
+
+            // For unions with flat init, only the first member can be initialized.
+            // Designated inits can overwrite (last designator wins).
+            if layout.is_union && designator_name.is_none() {
+                break;
+            }
         }
     }
 
