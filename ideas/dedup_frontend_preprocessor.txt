@@ -1,0 +1,20 @@
+MEDIUM PRIORITY: Eliminate duplication in frontend preprocessor and parser
+
+1. preprocess() vs preprocess_included() (preprocessor.rs lines 353-551): These two methods
+   are 80-90% identical. Only differences: preprocess_included saves/restores conditional
+   stack, preprocess handles pending_injections. Merge into single method with flag parameter.
+
+2. String literal skipping duplicated 6+ times (macro_defs.rs, preprocessor.rs): The pattern
+   of "skip string/char literal respecting backslash escapes" is copy-pasted in expand_text,
+   parse_macro_args, find_paste_and_stringify_params, substitute_params, strip_block_comments,
+   has_unbalanced_parens, strip_line_comment. Extract a shared skip_quoted() helper.
+
+3. Abstract declarator parsing duplicated 4 times in parser.rs: parse_cast_expr,
+   parse_unary_expr sizeof, parse_va_arg_type, parse_param_declarator_full all reimplement
+   the same "consume * tokens, skip cv qualifiers, parse array brackets" logic. Extract
+   parse_abstract_declarator().
+
+4. parse_type_specifier (404 lines): Uses 14 boolean flags and 3 overlapping collection
+   loops. Could be refactored into a TypeSpecifierBuilder that validates combinations.
+
+Estimated impact: ~200+ lines reduction, cleaner parser architecture.

@@ -1,0 +1,23 @@
+HIGH PRIORITY: Eliminate triplicated logic across x86/arm/riscv codegen backends
+
+The three backend codegen files (x86: 999 lines, arm: 1068 lines, riscv: 813 lines) contain
+significant structural duplication. Key opportunities:
+
+1. emit_cast_instrs (~415 combined lines): Identical Ptr-normalization and cast-category
+   classification (float-to-int, int-to-float, widen, narrow) across all three. Extract a
+   shared `classify_cast(from, to) -> CastKind` enum, each backend only implements emission.
+
+2. emit_binop float detection: All three begin with the same float-operand detection and
+   the same fallback for unsupported float ops (silently emitting fadd - a latent bug).
+
+3. Parameter classification: emit_store_params and emit_call all independently classify
+   params as int-reg/float-reg/stack. Extract shared classify_params() helper.
+
+4. ARM-specific: load_large_imm helper exists (line 127) but operand_to_x0 (lines 160-247)
+   manually inlines the same movz+movk pattern 4 times. Also, va_arg/va_start bypass
+   large-offset helpers, creating bugs for large stack frames.
+
+5. emit_memcpy: ARM and RISC-V both have nearly identical loop-based memcpy implementations
+   (label creation, loop preamble, byte-by-byte copy, done label).
+
+Estimated impact: Could eliminate ~300+ lines of duplicated code and fix latent bugs.
