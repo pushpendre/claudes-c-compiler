@@ -360,6 +360,13 @@ impl Lowerer {
         let rhs_ty = self.get_expr_type(rhs);
         let rhs_val = self.emit_implicit_cast(rhs_val, rhs_ty, lhs_ty);
 
+        // _Bool variables clamp any value to 0 or 1
+        let rhs_val = if self.is_bool_lvalue(lhs) {
+            self.emit_bool_normalize(rhs_val)
+        } else {
+            rhs_val
+        };
+
         if let Some(lv) = self.lower_lvalue(lhs) {
             self.store_lvalue_typed(&lv, rhs_val.clone(), lhs_ty);
             return rhs_val;
@@ -1322,6 +1329,38 @@ impl Lowerer {
             return Operand::Value(dest);
         }
         src
+    }
+
+    /// Check if an lvalue expression refers to a _Bool variable.
+    fn is_bool_lvalue(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name) {
+                    return info.is_bool;
+                }
+                false
+            }
+            Expr::Deref(inner, _) => {
+                // *p where p points to _Bool - check via pointer dereference
+                // For now, we don't track this
+                let _ = inner;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Normalize a value for _Bool storage: emit (val != 0) to clamp to 0 or 1.
+    pub(super) fn emit_bool_normalize(&mut self, val: Operand) -> Operand {
+        let dest = self.fresh_value();
+        self.emit(Instruction::Cmp {
+            dest,
+            op: IrCmpOp::Ne,
+            lhs: val,
+            rhs: Operand::Const(IrConst::I64(0)),
+            ty: IrType::I64,
+        });
+        Operand::Value(dest)
     }
 
     /// Check if a function is variadic.

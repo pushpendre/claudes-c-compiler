@@ -31,6 +31,8 @@ pub(super) struct LocalInfo {
     pub array_dim_strides: Vec<usize>,
     /// Full C type for precise multi-level pointer type resolution.
     pub c_type: Option<CType>,
+    /// Whether this variable has _Bool type (needs value clamping to 0/1).
+    pub is_bool: bool,
 }
 
 /// Information about a global variable tracked by the lowerer.
@@ -81,6 +83,8 @@ pub struct Lowerer {
     pub(super) current_function_name: String,
     /// Return type of the function currently being lowered (for narrowing casts on return)
     pub(super) current_return_type: IrType,
+    /// Whether the current function returns _Bool (for value clamping on return)
+    pub(super) current_return_is_bool: bool,
     // Variable -> alloca mapping with metadata
     pub(super) locals: HashMap<String, LocalInfo>,
     // Global variable tracking (name -> info)
@@ -128,6 +132,7 @@ impl Lowerer {
             current_label: String::new(),
             current_function_name: String::new(),
             current_return_type: IrType::I64,
+            current_return_is_bool: false,
             locals: HashMap::new(),
             globals: HashMap::new(),
             known_functions: HashSet::new(),
@@ -273,6 +278,7 @@ impl Lowerer {
 
         let return_type = self.type_spec_to_ir(&func.return_type);
         self.current_return_type = return_type;
+        self.current_return_is_bool = matches!(self.resolve_type_spec(&func.return_type), TypeSpecifier::Bool);
         let params: Vec<IrParam> = func.params.iter().map(|p| IrParam {
             name: p.name.clone().unwrap_or_default(),
             ty: self.type_spec_to_ir(&p.type_spec),
@@ -342,6 +348,9 @@ impl Lowerer {
                     } else { None };
 
                     let c_type = func.params.get(i).map(|p| self.type_spec_to_ctype(&p.type_spec));
+                    let is_bool = func.params.get(i).map_or(false, |p| {
+                        matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+                    });
                     self.locals.insert(param.name.clone(), LocalInfo {
                         alloca,
                         elem_size,
@@ -353,6 +362,7 @@ impl Lowerer {
                         alloc_size: ty.size(),
                         array_dim_strides: vec![],
                         c_type,
+                        is_bool,
                     });
                 }
             }
@@ -394,6 +404,7 @@ impl Lowerer {
                 alloc_size: sp.struct_size,
                 array_dim_strides: vec![],
                 c_type: None,
+                is_bool: false,
             });
         }
 

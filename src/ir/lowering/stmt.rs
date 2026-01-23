@@ -192,6 +192,7 @@ impl Lowerer {
                 });
 
                 let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+                let is_bool = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool) && !is_pointer && !is_array;
                 self.locals.insert(declarator.name.clone(), LocalInfo {
                     alloca: addr,
                     elem_size,
@@ -203,6 +204,7 @@ impl Lowerer {
                     alloc_size: actual_alloc_size,
                     array_dim_strides: array_dim_strides.clone(),
                     c_type,
+                    is_bool,
                 });
 
                 self.next_static_local += 1;
@@ -219,6 +221,7 @@ impl Lowerer {
             });
             let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
             let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
+            let is_bool = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool) && !is_pointer && !is_array;
             self.locals.insert(declarator.name.clone(), LocalInfo {
                 alloca,
                 elem_size,
@@ -230,6 +233,7 @@ impl Lowerer {
                 alloc_size: actual_alloc_size,
                 array_dim_strides: array_dim_strides.clone(),
                 c_type,
+                is_bool,
             });
 
             if let Some(ref init) = declarator.init {
@@ -259,6 +263,8 @@ impl Lowerer {
                             // (e.g., float f = 'a', int x = 3.14, char c = 99.0)
                             let expr_ty = self.get_expr_type(expr);
                             let val = self.emit_implicit_cast(val, expr_ty, var_ty);
+                            // _Bool variables clamp any value to 0 or 1
+                            let val = if is_bool { self.emit_bool_normalize(val) } else { val };
                             self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
                         }
                     }
@@ -405,7 +411,9 @@ impl Lowerer {
                     let expr_ty = self.get_expr_type(e);
                     // Insert implicit cast for return value type mismatch
                     // Handles: float<->int, float<->float, and integer narrowing
-                    self.emit_implicit_cast(val, expr_ty, ret_ty)
+                    let val = self.emit_implicit_cast(val, expr_ty, ret_ty);
+                    // _Bool functions clamp return value to 0 or 1
+                    if self.current_return_is_bool { self.emit_bool_normalize(val) } else { val }
                 });
                 self.terminate(Terminator::Return(op));
                 // Start a new unreachable block for any code after return
