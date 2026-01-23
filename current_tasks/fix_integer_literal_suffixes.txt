@@ -1,0 +1,19 @@
+Task: Fix integer literal suffix handling (l/L, u/U, ul/UL, ll/LL)
+
+Status: In Progress
+
+Problem:
+The compiler ignores `l`/`L` (long) and `ll`/`LL` (long long) suffixes on integer literals.
+- `40l` is treated as `int` instead of `long` because the suffix is consumed but not tracked
+- This causes `40l << 40` to produce 0 (32-bit shift overflow) instead of the correct 64-bit result
+- Also causes sizeof(40l) to be 4 instead of 8
+- UIntLiteral info is also lost in the parser (coerced to IntLiteral)
+
+Fix:
+1. Add LongLiteral(i64) and ULongLiteral(u64) token variants to lexer
+2. Add corresponding AST variants
+3. Update parser to preserve these distinctions
+4. Update infer_expr_type to return correct types for long/ulong literals
+5. Update sizeof_expr, get_expr_type, and lower_expr to handle new variants
+
+Impact: Fixes ~50+ tests related to long arithmetic, shifts, and pointer operations.
