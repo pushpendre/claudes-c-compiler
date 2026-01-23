@@ -106,7 +106,15 @@ impl MacroTable {
                                 let (args, end_pos) = self.parse_macro_args(&chars, j);
                                 i = end_pos;
                                 let expanded = self.expand_function_macro(mac, &args, expanding);
-                                result.push_str(&expanded);
+                                // Add spaces around expansion to prevent token pasting
+                                // with adjacent characters (e.g., M(-) before --b)
+                                if !expanded.is_empty() {
+                                    if !result.is_empty() && !result.ends_with(' ') && !result.ends_with('\t') && !result.ends_with('\n') {
+                                        result.push(' ');
+                                    }
+                                    result.push_str(&expanded);
+                                    result.push(' ');
+                                }
                                 continue;
                             } else {
                                 // Function-like macro without args - don't expand
