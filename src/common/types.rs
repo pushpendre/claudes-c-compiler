@@ -134,10 +134,73 @@ impl StructLayout {
     }
 
     /// Look up a field by name, returning its offset and type.
+    /// Recursively searches anonymous struct/union members.
     pub fn field_offset(&self, name: &str) -> Option<(usize, &CType)> {
-        self.fields.iter()
-            .find(|f| f.name == name)
-            .map(|f| (f.offset, &f.ty))
+        // First, try direct field lookup
+        if let Some(f) = self.fields.iter().find(|f| f.name == name) {
+            return Some((f.offset, &f.ty));
+        }
+        // Then, search anonymous (unnamed) struct/union members recursively
+        for f in &self.fields {
+            if !f.name.is_empty() {
+                continue;
+            }
+            let anon_fields = match &f.ty {
+                CType::Struct(st) | CType::Union(st) => &st.fields,
+                _ => continue,
+            };
+            // Check if the target field is directly in this anonymous member
+            if let Some(inner_field) = anon_fields.iter().find(|sf| sf.name == name) {
+                // Compute offset within the anonymous struct/union
+                let inner_offset = match &f.ty {
+                    CType::Struct(_) => {
+                        let layout = StructLayout::for_struct(anon_fields);
+                        layout.field_offset(name).map(|(o, _)| o).unwrap_or(0)
+                    }
+                    CType::Union(_) => 0, // all union fields at offset 0
+                    _ => 0,
+                };
+                return Some((f.offset + inner_offset, &inner_field.ty));
+            }
+            // Recurse into nested anonymous members
+            let inner_layout = match &f.ty {
+                CType::Struct(_) => StructLayout::for_struct(anon_fields),
+                CType::Union(_) => StructLayout::for_union(anon_fields),
+                _ => continue,
+            };
+            if let Some((inner_offset, _)) = inner_layout.field_offset(name) {
+                // Found in a deeper nested anonymous - but we can't return
+                // the &CType from the temporary layout. Search the anon fields
+                // for a nested anonymous that contains the field.
+                for sf in anon_fields {
+                    if sf.name.is_empty() {
+                        if let Some(deep_ty) = Self::find_field_type_in_anon(&sf.ty, name) {
+                            return Some((f.offset + inner_offset, deep_ty));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Helper: find a field's type reference within an anonymous struct/union type.
+    fn find_field_type_in_anon<'a>(ty: &'a CType, name: &str) -> Option<&'a CType> {
+        let fields = match ty {
+            CType::Struct(st) | CType::Union(st) => &st.fields,
+            _ => return None,
+        };
+        for f in fields {
+            if f.name == name {
+                return Some(&f.ty);
+            }
+            if f.name.is_empty() {
+                if let Some(deep) = Self::find_field_type_in_anon(&f.ty, name) {
+                    return Some(deep);
+                }
+            }
+        }
+        None
     }
 }
 
