@@ -4,7 +4,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional.** ~68% of x86-64 tests passing.
+**Basic compilation pipeline functional.** ~72% of x86-64 tests passing.
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
@@ -14,9 +14,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~70.9% passing (2120/2991)
-- AArch64: ~72.8% passing (2088/2869)
-- RISC-V 64: ~69.1% passing (1978/2861)
+- x86-64: ~72.3% passing (2162/2991)
+- AArch64: ~74.0% passing (2124/2869)
+- RISC-V 64: ~68.5% passing (1961/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -54,6 +54,11 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Integer promotion for unary operators and switch**: Unary operators (`-`, `~`, `+`) now
+  correctly apply C99 integer promotion rules, promoting `char`/`short` operands to `int` before
+  the operation. Also fixed switch statement controlling expression promotion. Fixed binary op
+  type inference (`get_expr_type`) to return `common_type` instead of falling through. Fixed
+  constant folding for `Neg`/`BitNot` on `I8`/`I16` to produce `I32` results.
 - **GCC atomic builtins**: Full implementation of `__atomic_*` (C11-style) and `__sync_*` (legacy)
   builtin families across all three backends. Includes `__atomic_fetch_add/sub/and/or/xor`,
   `__atomic_add/sub/and/or/xor_fetch`, `__atomic_compare_exchange_n`, `__atomic_exchange_n`,

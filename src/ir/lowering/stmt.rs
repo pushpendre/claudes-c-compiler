@@ -887,8 +887,19 @@ impl Lowerer {
             Stmt::Switch(expr, body, _span) => {
                 // Evaluate switch expression and store it in an alloca so we can
                 // reload it in the dispatch chain (which is emitted after the body).
-                let switch_expr_ty = self.get_expr_type(expr);
+                // C99 6.8.4.2: Integer promotions are performed on the controlling expression.
+                let raw_expr_ty = self.get_expr_type(expr);
+                let switch_expr_ty = match raw_expr_ty {
+                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
+                    _ => raw_expr_ty,
+                };
                 let val = self.lower_expr(expr);
+                // If the expression type was sub-int, widen it via implicit cast
+                let val = if switch_expr_ty != raw_expr_ty {
+                    self.emit_implicit_cast(val, raw_expr_ty, switch_expr_ty)
+                } else {
+                    val
+                };
                 let switch_alloca = self.fresh_value();
                 self.emit(Instruction::Alloca {
                     dest: switch_alloca,

@@ -365,7 +365,25 @@ impl Lowerer {
 
     fn lower_unary_op(&mut self, op: UnaryOp, inner: &Expr) -> Operand {
         match op {
-            UnaryOp::Plus => self.lower_expr(inner),
+            UnaryOp::Plus => {
+                // Unary plus applies integer promotion (C99 6.5.3.3)
+                let val = self.lower_expr(inner);
+                let inner_ty = self.infer_expr_type(inner);
+                let promoted_ty = Self::integer_promote(inner_ty);
+                if promoted_ty != inner_ty && inner_ty.is_integer() {
+                    // Widen sub-int types to int
+                    let dest = self.fresh_value();
+                    self.emit(Instruction::Cast {
+                        dest,
+                        src: val,
+                        from_ty: inner_ty,
+                        to_ty: promoted_ty,
+                    });
+                    Operand::Value(dest)
+                } else {
+                    val
+                }
+            }
             UnaryOp::Neg => {
                 let ty = self.get_expr_type(inner);
                 let inner_ty = self.infer_expr_type(inner);
@@ -374,7 +392,9 @@ impl Lowerer {
                 let dest = self.fresh_value();
                 self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src: val, ty: neg_ty });
                 if !neg_ty.is_float() {
-                    self.maybe_narrow(dest, inner_ty)
+                    // Apply integer promotion: narrow to promoted type (at least I32)
+                    let promoted_ty = Self::integer_promote(inner_ty);
+                    self.maybe_narrow(dest, promoted_ty)
                 } else {
                     Operand::Value(dest)
                 }
@@ -384,7 +404,9 @@ impl Lowerer {
                 let val = self.lower_expr(inner);
                 let dest = self.fresh_value();
                 self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Not, src: val, ty: IrType::I64 });
-                self.maybe_narrow(dest, inner_ty)
+                // Apply integer promotion: narrow to promoted type (at least I32)
+                let promoted_ty = Self::integer_promote(inner_ty);
+                self.maybe_narrow(dest, promoted_ty)
             }
             UnaryOp::LogicalNot => {
                 let val = self.lower_expr(inner);
@@ -2372,7 +2394,23 @@ impl Lowerer {
                     Self::common_type(self.infer_expr_type(lhs), self.infer_expr_type(rhs))
                 }
             }
-            Expr::UnaryOp(_, inner, _) => self.infer_expr_type(inner),
+            Expr::UnaryOp(op, inner, _) => {
+                match op {
+                    // Neg, BitNot, and Plus apply integer promotion (C99 6.3.1.1)
+                    UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Plus => {
+                        let inner_ty = self.infer_expr_type(inner);
+                        if inner_ty.is_float() {
+                            inner_ty
+                        } else {
+                            Self::integer_promote(inner_ty)
+                        }
+                    }
+                    // LogicalNot always produces int
+                    UnaryOp::LogicalNot => IrType::I32,
+                    // PreInc/PreDec preserve the operand type
+                    _ => self.infer_expr_type(inner),
+                }
+            }
             Expr::Sizeof(_, _) => IrType::U64,  // sizeof returns size_t (unsigned long)
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {

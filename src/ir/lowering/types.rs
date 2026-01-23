@@ -32,7 +32,11 @@ impl Lowerer {
                     match val {
                         IrConst::I64(v) => Some(IrConst::I64(-v)),
                         IrConst::I32(v) => Some(IrConst::I32(-v)),
+                        // Integer promotion: sub-int types promote to int before negation
+                        IrConst::I8(v) => Some(IrConst::I32(-(v as i32))),
+                        IrConst::I16(v) => Some(IrConst::I32(-(v as i32))),
                         IrConst::F64(v) => Some(IrConst::F64(-v)),
+                        IrConst::F32(v) => Some(IrConst::F32(-v)),
                         _ => None,
                     }
                 } else {
@@ -51,6 +55,9 @@ impl Lowerer {
                     match val {
                         IrConst::I64(v) => Some(IrConst::I64(!v)),
                         IrConst::I32(v) => Some(IrConst::I32(!v)),
+                        // Integer promotion: sub-int types promote to int before complement
+                        IrConst::I8(v) => Some(IrConst::I32(!(v as i32))),
+                        IrConst::I16(v) => Some(IrConst::I32(!(v as i32))),
                         _ => None,
                     }
                 } else {
@@ -617,14 +624,36 @@ impl Lowerer {
             Expr::StringLiteral(_, _) => return IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => return self.type_spec_to_ir(target_type),
             Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _)
-            | Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _)
             | Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
+                // C99 6.3.1.1: Integer promotion - result type is at least int
+                let inner_ty = self.get_expr_type(inner);
+                if inner_ty.is_float() {
+                    return inner_ty;
+                }
+                // Apply integer promotion: sub-int types promote to I32
+                return match inner_ty {
+                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 => IrType::I32,
+                    IrType::U32 => IrType::U32,
+                    _ => inner_ty,
+                };
+            }
+            Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
+                // PreInc/PreDec preserve the operand type (they modify and return the lvalue)
                 return self.get_expr_type(inner);
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 match op {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     | BinOp::LogicalAnd | BinOp::LogicalOr => return IrType::I64,
+                    BinOp::Shl | BinOp::Shr => {
+                        // Shift result type is the promoted type of the left operand
+                        let lty = self.get_expr_type(lhs);
+                        return match lty {
+                            IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 => IrType::I32,
+                            IrType::U32 => IrType::U32,
+                            _ => lty,
+                        };
+                    }
                     _ => {
                         let lty = self.get_expr_type(lhs);
                         let rty = self.get_expr_type(rhs);
@@ -633,6 +662,8 @@ impl Lowerer {
                         } else if lty == IrType::F32 || rty == IrType::F32 {
                             return IrType::F32;
                         }
+                        // Integer binary ops: apply usual arithmetic conversions
+                        return Self::common_type(lty, rty);
                     }
                 }
             }
