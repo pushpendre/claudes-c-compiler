@@ -1,0 +1,18 @@
+Task: Implement designated initializer support
+Status: In Progress
+
+Problem:
+- Designated initializers (.field = val for structs, [idx] = val for arrays) are parsed
+  into the AST (Designator::Field, Designator::Index) but ignored during IR lowering
+- Global struct initializers (lower_struct_global_init) iterate items sequentially,
+  ignoring .field designators, so {.b = 2, .a = 1} assigns wrong values
+- Local struct initializers in stmt.rs iterate by enumerate index, not by designator
+- Array designated initializers ([2] = 5) are not supported in either local or global context
+- Compound literals with struct type don't handle designators either
+
+Fix:
+- In lower_struct_global_init: look up field index from designator name in struct layout
+- In local struct init (stmt.rs): same - use designator to determine field target
+- In array init: use designator index to determine target element position
+- Zero-initialize first, then fill designated positions
+- Support mixed designated/positional initializers (positional continues from last position)
