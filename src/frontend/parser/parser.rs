@@ -491,8 +491,11 @@ impl Parser {
                     fields.push(StructFieldDecl { type_spec, name: None, bit_width: None });
                 } else {
                     loop {
-                        // Skip pointer
-                        while self.consume_if(&TokenKind::Star) {}
+                        // Parse pointer declarators: wrap type_spec for each *
+                        let mut field_type = type_spec.clone();
+                        while self.consume_if(&TokenKind::Star) {
+                            field_type = TypeSpecifier::Pointer(Box::new(field_type));
+                        }
                         let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                             self.advance();
                             Some(n)
@@ -513,7 +516,7 @@ impl Parser {
                         } else {
                             None
                         };
-                        fields.push(StructFieldDecl { type_spec: type_spec.clone(), name, bit_width });
+                        fields.push(StructFieldDecl { type_spec: field_type, name, bit_width });
                         if !self.consume_if(&TokenKind::Comma) {
                             break;
                         }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{IrType, StructLayout, StructField, CType};
 
 /// Information about a local variable stored in an alloca.
 #[derive(Debug, Clone)]
@@ -16,6 +16,10 @@ struct LocalInfo {
     is_array: bool,
     /// The IR type of the variable (I8 for char, I32 for int, I64 for long, Ptr for pointers).
     ty: IrType,
+    /// If this is a struct/union variable, its layout for member access.
+    struct_layout: Option<StructLayout>,
+    /// Whether this variable is a struct (not a pointer to struct).
+    is_struct: bool,
 }
 
 /// Information about a global variable tracked by the lowerer.
@@ -27,6 +31,10 @@ struct GlobalInfo {
     elem_size: usize,
     /// Whether this is an array.
     is_array: bool,
+    /// If this is a struct/union variable, its layout for member access.
+    struct_layout: Option<StructLayout>,
+    /// Whether this variable is a struct (not a pointer to struct).
+    is_struct: bool,
 }
 
 /// Represents an lvalue - something that can be assigned to.
@@ -44,6 +52,7 @@ pub struct Lowerer {
     next_value: u32,
     next_label: u32,
     next_string: u32,
+    next_anon_struct: u32,
     module: IrModule,
     // Current function state
     current_blocks: Vec<BasicBlock>,
@@ -64,6 +73,8 @@ pub struct Lowerer {
     switch_default: Vec<Option<String>>,
     /// Alloca holding the switch expression value for the current switch.
     switch_val_allocas: Vec<Value>,
+    /// Struct/union layouts indexed by tag name (or anonymous id).
+    struct_layouts: HashMap<String, StructLayout>,
 }
 
 impl Lowerer {
@@ -72,6 +83,7 @@ impl Lowerer {
             next_value: 0,
             next_label: 0,
             next_string: 0,
+            next_anon_struct: 0,
             module: IrModule::new(),
             current_blocks: Vec::new(),
             current_instrs: Vec::new(),
@@ -85,6 +97,7 @@ impl Lowerer {
             switch_cases: Vec::new(),
             switch_default: Vec::new(),
             switch_val_allocas: Vec::new(),
+            struct_layouts: HashMap::new(),
         }
     }
 
@@ -180,6 +193,8 @@ impl Lowerer {
                     elem_size: 0,
                     is_array: false,
                     ty,
+                    struct_layout: None,
+                    is_struct: false,
                 });
             }
         }
@@ -212,6 +227,9 @@ impl Lowerer {
     }
 
     fn lower_global_decl(&mut self, decl: &Declaration) {
+        // Register any struct/union definitions
+        self.register_struct_type(&decl.type_spec);
+
         for declarator in &decl.declarators {
             if declarator.name.is_empty() {
                 continue; // Skip anonymous declarations (e.g., struct definitions)
@@ -226,9 +244,19 @@ impl Lowerer {
             let (alloc_size, elem_size, is_array, is_pointer) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
             let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
 
+            // Determine struct layout for global struct/pointer-to-struct variables
+            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
+            let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
+
+            let actual_alloc_size = if let Some(ref layout) = struct_layout {
+                layout.size
+            } else {
+                alloc_size
+            };
+
             // Determine initializer
             let init = if let Some(ref initializer) = declarator.init {
-                self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, alloc_size)
+                self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size)
             } else {
                 GlobalInit::Zero
             };
@@ -238,6 +266,8 @@ impl Lowerer {
                 ty: var_ty,
                 elem_size,
                 is_array,
+                struct_layout,
+                is_struct,
             });
 
             // Determine alignment based on type
@@ -257,7 +287,7 @@ impl Lowerer {
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),
                 ty: var_ty,
-                size: alloc_size,
+                size: actual_alloc_size,
                 align,
                 init,
                 is_static,
@@ -413,32 +443,78 @@ impl Lowerer {
     }
 
     fn lower_local_decl(&mut self, decl: &Declaration) {
+        // First, register any struct/union definition from the type specifier
+        self.register_struct_type(&decl.type_spec);
+
         for declarator in &decl.declarators {
+            if declarator.name.is_empty() {
+                continue; // Skip anonymous declarations (e.g., bare struct definitions)
+            }
+
             let base_ty = self.type_spec_to_ir(&decl.type_spec);
             let (alloc_size, elem_size, is_array, is_pointer) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
             let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
+
+            // Determine if this is a struct/union variable or pointer-to-struct.
+            // For pointer-to-struct, we still store the layout so p->field works.
+            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
+            let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
+
+            // For struct variables, use the struct's actual size
+            let actual_alloc_size = if let Some(ref layout) = struct_layout {
+                layout.size
+            } else {
+                alloc_size
+            };
+
             let alloca = self.fresh_value();
             self.emit(Instruction::Alloca {
                 dest: alloca,
-                ty: if is_array { IrType::Ptr } else { var_ty },
-                size: alloc_size,
+                ty: if is_array || is_struct { IrType::Ptr } else { var_ty },
+                size: actual_alloc_size,
             });
             self.locals.insert(declarator.name.clone(), LocalInfo {
                 alloca,
                 elem_size,
                 is_array,
                 ty: var_ty,
+                struct_layout,
+                is_struct,
             });
 
             if let Some(ref init) = declarator.init {
                 match init {
                     Initializer::Expr(expr) => {
-                        let val = self.lower_expr(expr);
-                        self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                        if !is_struct {
+                            let val = self.lower_expr(expr);
+                            self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                        }
+                        // TODO: struct assignment from expression
                     }
                     Initializer::List(items) => {
-                        // Initialize array/struct elements from initializer list
-                        if is_array && elem_size > 0 {
+                        if is_struct {
+                            // Initialize struct fields from initializer list
+                            if let Some(layout) = self.locals.get(&declarator.name).and_then(|l| l.struct_layout.clone()) {
+                                for (i, item) in items.iter().enumerate() {
+                                    if i >= layout.fields.len() { break; }
+                                    let field = &layout.fields[i];
+                                    let field_offset = field.offset;
+                                    let field_ty = self.ctype_to_ir(&field.ty);
+                                    let val = match &item.init {
+                                        Initializer::Expr(e) => self.lower_expr(e),
+                                        _ => Operand::Const(IrConst::I64(0)),
+                                    };
+                                    let field_addr = self.fresh_value();
+                                    self.emit(Instruction::GetElementPtr {
+                                        dest: field_addr,
+                                        base: alloca,
+                                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                                        ty: field_ty,
+                                    });
+                                    self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                                }
+                            }
+                        } else if is_array && elem_size > 0 {
                             // Store each element at its correct offset
                             for (i, item) in items.iter().enumerate() {
                                 let val = match &item.init {
@@ -805,6 +881,40 @@ impl Lowerer {
                 // base[index] -> compute address of element
                 let addr = self.compute_array_element_addr(base, index);
                 Some(LValue::Address(addr))
+            }
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                // s.field as lvalue -> compute address of the field
+                let (field_offset, _field_ty) = self.resolve_member_access(base_expr, field_name);
+                let base_addr = self.get_struct_base_addr(base_expr);
+                let field_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: field_addr,
+                    base: base_addr,
+                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    ty: IrType::Ptr,
+                });
+                Some(LValue::Address(field_addr))
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                // p->field as lvalue -> load pointer, compute field address
+                let ptr_val = self.lower_expr(base_expr);
+                let base_addr = match ptr_val {
+                    Operand::Value(v) => v,
+                    Operand::Const(_) => {
+                        let tmp = self.fresh_value();
+                        self.emit(Instruction::Copy { dest: tmp, src: ptr_val });
+                        tmp
+                    }
+                };
+                let (field_offset, _field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
+                let field_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: field_addr,
+                    base: base_addr,
+                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    ty: IrType::Ptr,
+                });
+                Some(LValue::Address(field_addr))
             }
             _ => None,
         }
@@ -1211,9 +1321,43 @@ impl Lowerer {
                 self.emit(Instruction::Load { dest, ptr: addr, ty: elem_ty });
                 Operand::Value(dest)
             }
-            Expr::MemberAccess(_, _, _) | Expr::PointerMemberAccess(_, _, _) => {
-                // TODO: struct member access
-                Operand::Const(IrConst::I64(0))
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                // s.field -> compute address of struct base + field offset, then load
+                let (field_offset, field_ty) = self.resolve_member_access(base_expr, field_name);
+                let base_addr = self.get_struct_base_addr(base_expr);
+                let field_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: field_addr,
+                    base: base_addr,
+                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    ty: field_ty,
+                });
+                let dest = self.fresh_value();
+                self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
+                Operand::Value(dest)
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                // p->field -> load pointer, then compute field offset, then load
+                let ptr_val = self.lower_expr(base_expr);
+                let base_addr = match ptr_val {
+                    Operand::Value(v) => v,
+                    Operand::Const(_) => {
+                        let tmp = self.fresh_value();
+                        self.emit(Instruction::Copy { dest: tmp, src: ptr_val });
+                        tmp
+                    }
+                };
+                let (field_offset, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
+                let field_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: field_addr,
+                    base: base_addr,
+                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    ty: field_ty,
+                });
+                let dest = self.fresh_value();
+                self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
+                Operand::Value(dest)
             }
             Expr::Comma(lhs, rhs, _) => {
                 self.lower_expr(lhs);
@@ -1433,6 +1577,14 @@ impl Lowerer {
                 }
                 IrType::I64
             }
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                let (_, field_ty) = self.resolve_member_access(base_expr, field_name);
+                field_ty
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                let (_, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
+                field_ty
+            }
             _ => IrType::I64,
         }
     }
@@ -1469,12 +1621,35 @@ impl Lowerer {
             TypeSpecifier::Double => 8,
             TypeSpecifier::Pointer(_) => 8,
             TypeSpecifier::Array(elem, Some(size_expr)) => {
-                // Try to evaluate the size expression as a constant
                 let elem_size = self.sizeof_type(elem);
                 if let Expr::IntLiteral(n, _) = size_expr.as_ref() {
                     return elem_size * (*n as usize);
                 }
-                elem_size // Fallback: unknown size
+                elem_size
+            }
+            TypeSpecifier::Struct(_, Some(fields)) | TypeSpecifier::Union(_, Some(fields)) => {
+                let is_union = matches!(ts, TypeSpecifier::Union(_, _));
+                let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    StructField {
+                        name: f.name.clone().unwrap_or_default(),
+                        ty: self.type_spec_to_ctype(&f.type_spec),
+                        bit_width: None,
+                    }
+                }).collect();
+                let layout = if is_union {
+                    StructLayout::for_union(&struct_fields)
+                } else {
+                    StructLayout::for_struct(&struct_fields)
+                };
+                layout.size
+            }
+            TypeSpecifier::Struct(Some(tag), None) => {
+                let key = format!("struct.{}", tag);
+                self.struct_layouts.get(&key).map(|l| l.size).unwrap_or(8)
+            }
+            TypeSpecifier::Union(Some(tag), None) => {
+                let key = format!("union.{}", tag);
+                self.struct_layouts.get(&key).map(|l| l.size).unwrap_or(8)
             }
             _ => 8,
         }
@@ -1508,11 +1683,427 @@ impl Lowerer {
             }
         }
 
+        // For struct/union types, use their layout size
+        if let Some(layout) = self.get_struct_layout_for_type(ts) {
+            return (layout.size, 0, false, false);
+        }
+
         // Regular scalar - we use 8-byte slots for each stack value
-        // (simplifies codegen) but Store/Load type will be correct for the actual type.
-        // The unused ts parameter is kept for future use when we optimize stack layout.
-        let _ = ts;
         (8, 0, false, false)
+    }
+
+    // =========================================================================
+    // Struct/union support methods
+    // =========================================================================
+
+    /// Register a struct/union type definition from a TypeSpecifier, computing and
+    /// caching its layout in self.struct_layouts.
+    fn register_struct_type(&mut self, ts: &TypeSpecifier) {
+        match ts {
+            TypeSpecifier::Struct(tag, Some(fields)) => {
+                let layout = self.compute_struct_layout(fields, false);
+                let key = self.struct_layout_key(tag, false);
+                self.struct_layouts.insert(key, layout);
+            }
+            TypeSpecifier::Union(tag, Some(fields)) => {
+                let layout = self.compute_struct_layout(fields, true);
+                let key = self.struct_layout_key(tag, true);
+                self.struct_layouts.insert(key, layout);
+            }
+            _ => {}
+        }
+    }
+
+    /// Compute a layout key for a struct/union.
+    fn struct_layout_key(&mut self, tag: &Option<String>, is_union: bool) -> String {
+        let prefix = if is_union { "union." } else { "struct." };
+        if let Some(name) = tag {
+            format!("{}{}", prefix, name)
+        } else {
+            let id = self.next_anon_struct;
+            self.next_anon_struct += 1;
+            format!("{}__anon_{}", prefix, id)
+        }
+    }
+
+    /// Compute struct/union layout from AST field declarations.
+    fn compute_struct_layout(&self, fields: &[StructFieldDecl], is_union: bool) -> StructLayout {
+        let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+            StructField {
+                name: f.name.clone().unwrap_or_default(),
+                ty: self.type_spec_to_ctype(&f.type_spec),
+                bit_width: None, // TODO: bitfields
+            }
+        }).collect();
+
+        if is_union {
+            StructLayout::for_union(&struct_fields)
+        } else {
+            StructLayout::for_struct(&struct_fields)
+        }
+    }
+
+    /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
+    fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
+        match ts {
+            TypeSpecifier::Struct(tag, Some(fields)) => {
+                // Inline struct definition: compute layout directly
+                let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    StructField {
+                        name: f.name.clone().unwrap_or_default(),
+                        ty: self.type_spec_to_ctype(&f.type_spec),
+                        bit_width: None,
+                    }
+                }).collect();
+                Some(StructLayout::for_struct(&struct_fields))
+            }
+            TypeSpecifier::Struct(Some(tag), None) => {
+                // Reference to previously defined struct
+                let key = format!("struct.{}", tag);
+                self.struct_layouts.get(&key).cloned()
+            }
+            TypeSpecifier::Union(tag, Some(fields)) => {
+                let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    StructField {
+                        name: f.name.clone().unwrap_or_default(),
+                        ty: self.type_spec_to_ctype(&f.type_spec),
+                        bit_width: None,
+                    }
+                }).collect();
+                Some(StructLayout::for_union(&struct_fields))
+            }
+            TypeSpecifier::Union(Some(tag), None) => {
+                let key = format!("union.{}", tag);
+                self.struct_layouts.get(&key).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the base address of a struct variable (for member access).
+    /// For struct locals, the alloca IS the struct base.
+    /// For struct globals, we emit GlobalAddr.
+    fn get_struct_base_addr(&mut self, expr: &Expr) -> Value {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name).cloned() {
+                    if info.is_struct {
+                        // The alloca is the struct base address
+                        return info.alloca;
+                    }
+                    // It's a pointer to struct: load the pointer
+                    let loaded = self.fresh_value();
+                    self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr });
+                    return loaded;
+                }
+                if self.globals.contains_key(name) {
+                    let addr = self.fresh_value();
+                    self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
+                    return addr;
+                }
+                // Unknown - try to evaluate as expression
+                let val = self.lower_expr(expr);
+                match val {
+                    Operand::Value(v) => v,
+                    Operand::Const(_) => {
+                        let tmp = self.fresh_value();
+                        self.emit(Instruction::Copy { dest: tmp, src: val });
+                        tmp
+                    }
+                }
+            }
+            Expr::Deref(inner, _) => {
+                // (*ptr).field - evaluate ptr to get base address
+                let val = self.lower_expr(inner);
+                match val {
+                    Operand::Value(v) => v,
+                    Operand::Const(_) => {
+                        let tmp = self.fresh_value();
+                        self.emit(Instruction::Copy { dest: tmp, src: val });
+                        tmp
+                    }
+                }
+            }
+            Expr::ArraySubscript(base, index, _) => {
+                // array[i].field
+                self.compute_array_element_addr(base, index)
+            }
+            Expr::MemberAccess(inner_base, inner_field, _) => {
+                // Nested member access: s.inner.field
+                let (inner_offset, _) = self.resolve_member_access(inner_base, inner_field);
+                let inner_base_addr = self.get_struct_base_addr(inner_base);
+                let inner_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: inner_addr,
+                    base: inner_base_addr,
+                    offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                    ty: IrType::Ptr,
+                });
+                inner_addr
+            }
+            _ => {
+                let val = self.lower_expr(expr);
+                match val {
+                    Operand::Value(v) => v,
+                    Operand::Const(_) => {
+                        let tmp = self.fresh_value();
+                        self.emit(Instruction::Copy { dest: tmp, src: val });
+                        tmp
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve member access on a struct expression: returns (byte_offset, ir_type_of_field).
+    fn resolve_member_access(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType) {
+        // Try to find the struct layout from the base expression
+        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, self.ctype_to_ir(ctype));
+            }
+        }
+        // Fallback: assume 4-byte aligned int fields
+        // TODO: improve fallback by tracking more type info
+        (0, IrType::I32)
+    }
+
+    /// Resolve pointer member access (p->field): returns (byte_offset, ir_type_of_field).
+    /// For p->field, we need the struct layout that p points to.
+    fn resolve_pointer_member_access(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType) {
+        // Try to determine what struct layout p points to
+        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, self.ctype_to_ir(ctype));
+            }
+        }
+        // Fallback: assume first field at offset 0
+        (0, IrType::I32)
+    }
+
+    /// Try to determine the struct layout that an expression (a pointer) points to.
+    fn get_pointed_struct_layout(&self, expr: &Expr) -> Option<StructLayout> {
+        match expr {
+            Expr::Identifier(name, _) => {
+                // Check if this variable has struct layout info (pointer to struct)
+                if let Some(info) = self.locals.get(name) {
+                    return info.struct_layout.clone();
+                }
+                if let Some(ginfo) = self.globals.get(name) {
+                    return ginfo.struct_layout.clone();
+                }
+                None
+            }
+            Expr::MemberAccess(inner_base, inner_field, _) => {
+                // expr is something like s.p where p is a pointer to struct.
+                // Get the type of the field `p` from the struct layout of `s`.
+                if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
+                    if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field) {
+                        return self.resolve_struct_from_pointer_ctype(ctype);
+                    }
+                }
+                None
+            }
+            Expr::PointerMemberAccess(inner_base, inner_field, _) => {
+                // expr is something like p->q where q is also a pointer to struct
+                if let Some(inner_layout) = self.get_pointed_struct_layout(inner_base) {
+                    if let Some((_offset, ctype)) = inner_layout.field_offset(inner_field) {
+                        return self.resolve_struct_from_pointer_ctype(ctype);
+                    }
+                }
+                None
+            }
+            Expr::UnaryOp(UnaryOp::PreInc | UnaryOp::PreDec, inner, _) => {
+                self.get_pointed_struct_layout(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to get the struct layout for an expression.
+    fn get_layout_for_expr(&self, expr: &Expr) -> Option<StructLayout> {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name) {
+                    return info.struct_layout.clone();
+                }
+                if let Some(ginfo) = self.globals.get(name) {
+                    return ginfo.struct_layout.clone();
+                }
+                None
+            }
+            Expr::MemberAccess(inner_base, inner_field, _) => {
+                // For nested member access, find the layout of the inner field
+                if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
+                    if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field) {
+                        // If the inner field is itself a struct, get its layout
+                        if let CType::Struct(st) = ctype {
+                            return Some(StructLayout::for_struct(&st.fields));
+                        }
+                        if let CType::Union(st) = ctype {
+                            return Some(StructLayout::for_union(&st.fields));
+                        }
+                    }
+                }
+                None
+            }
+            Expr::ArraySubscript(base, _, _) => {
+                // array[i] where array is of struct type
+                self.get_layout_for_expr(base)
+            }
+            _ => None,
+        }
+    }
+
+    /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
+    /// Handles self-referential structs by looking up the cache when fields are empty.
+    fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<StructLayout> {
+        if let CType::Pointer(inner) = ctype {
+            match inner.as_ref() {
+                CType::Struct(st) => {
+                    if st.fields.is_empty() {
+                        // Empty fields: likely a forward/self-referential struct.
+                        // Look up by tag name from the cache.
+                        if let Some(ref tag) = st.name {
+                            let key = format!("struct.{}", tag);
+                            return self.struct_layouts.get(&key).cloned();
+                        }
+                    }
+                    return Some(StructLayout::for_struct(&st.fields));
+                }
+                CType::Union(st) => {
+                    if st.fields.is_empty() {
+                        if let Some(ref tag) = st.name {
+                            let key = format!("union.{}", tag);
+                            return self.struct_layouts.get(&key).cloned();
+                        }
+                    }
+                    return Some(StructLayout::for_union(&st.fields));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Convert a TypeSpecifier to CType (for struct layout computation).
+    fn type_spec_to_ctype(&self, ts: &TypeSpecifier) -> CType {
+        match ts {
+            TypeSpecifier::Void => CType::Void,
+            TypeSpecifier::Char => CType::Char,
+            TypeSpecifier::UnsignedChar => CType::UChar,
+            TypeSpecifier::Short => CType::Short,
+            TypeSpecifier::UnsignedShort => CType::UShort,
+            TypeSpecifier::Int | TypeSpecifier::Signed => CType::Int,
+            TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned | TypeSpecifier::Bool => CType::UInt,
+            TypeSpecifier::Long => CType::Long,
+            TypeSpecifier::UnsignedLong => CType::ULong,
+            TypeSpecifier::LongLong => CType::LongLong,
+            TypeSpecifier::UnsignedLongLong => CType::ULongLong,
+            TypeSpecifier::Float => CType::Float,
+            TypeSpecifier::Double => CType::Double,
+            TypeSpecifier::Pointer(inner) => CType::Pointer(Box::new(self.type_spec_to_ctype(inner))),
+            TypeSpecifier::Array(elem, size_expr) => {
+                let elem_ctype = self.type_spec_to_ctype(elem);
+                let size = size_expr.as_ref().and_then(|e| {
+                    if let Expr::IntLiteral(n, _) = e.as_ref() {
+                        Some(*n as usize)
+                    } else {
+                        None
+                    }
+                });
+                CType::Array(Box::new(elem_ctype), size)
+            }
+            TypeSpecifier::Struct(name, fields) => {
+                if let Some(fs) = fields {
+                    let struct_fields: Vec<StructField> = fs.iter().map(|f| {
+                        StructField {
+                            name: f.name.clone().unwrap_or_default(),
+                            ty: self.type_spec_to_ctype(&f.type_spec),
+                            bit_width: None,
+                        }
+                    }).collect();
+                    CType::Struct(crate::common::types::StructType {
+                        name: name.clone(),
+                        fields: struct_fields,
+                    })
+                } else if let Some(tag) = name {
+                    // Forward reference: look up cached layout to get field info
+                    let key = format!("struct.{}", tag);
+                    if let Some(layout) = self.struct_layouts.get(&key) {
+                        let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
+                            StructField {
+                                name: f.name.clone(),
+                                ty: f.ty.clone(),
+                                bit_width: None,
+                            }
+                        }).collect();
+                        CType::Struct(crate::common::types::StructType {
+                            name: Some(tag.clone()),
+                            fields: struct_fields,
+                        })
+                    } else {
+                        // Unknown struct - return empty
+                        CType::Struct(crate::common::types::StructType {
+                            name: Some(tag.clone()),
+                            fields: Vec::new(),
+                        })
+                    }
+                } else {
+                    CType::Struct(crate::common::types::StructType {
+                        name: None,
+                        fields: Vec::new(),
+                    })
+                }
+            }
+            TypeSpecifier::Union(name, fields) => {
+                if let Some(fs) = fields {
+                    let struct_fields: Vec<StructField> = fs.iter().map(|f| {
+                        StructField {
+                            name: f.name.clone().unwrap_or_default(),
+                            ty: self.type_spec_to_ctype(&f.type_spec),
+                            bit_width: None,
+                        }
+                    }).collect();
+                    CType::Union(crate::common::types::StructType {
+                        name: name.clone(),
+                        fields: struct_fields,
+                    })
+                } else if let Some(tag) = name {
+                    let key = format!("union.{}", tag);
+                    if let Some(layout) = self.struct_layouts.get(&key) {
+                        let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
+                            StructField {
+                                name: f.name.clone(),
+                                ty: f.ty.clone(),
+                                bit_width: None,
+                            }
+                        }).collect();
+                        CType::Union(crate::common::types::StructType {
+                            name: Some(tag.clone()),
+                            fields: struct_fields,
+                        })
+                    } else {
+                        CType::Union(crate::common::types::StructType {
+                            name: Some(tag.clone()),
+                            fields: Vec::new(),
+                        })
+                    }
+                } else {
+                    CType::Union(crate::common::types::StructType {
+                        name: None,
+                        fields: Vec::new(),
+                    })
+                }
+            }
+            TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
+            TypeSpecifier::TypedefName(_) => CType::Int, // TODO: resolve typedef
+        }
+    }
+
+    /// Convert a CType to IrType.
+    fn ctype_to_ir(&self, ctype: &CType) -> IrType {
+        IrType::from_ctype(ctype)
     }
 }
 

@@ -48,6 +48,105 @@ pub struct EnumType {
     pub variants: Vec<(String, i64)>,
 }
 
+/// Computed layout for a struct or union, with field offsets and total size.
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    /// Each field's (name, byte offset, CType).
+    pub fields: Vec<StructFieldLayout>,
+    /// Total size of the struct in bytes (including trailing padding).
+    pub size: usize,
+    /// Required alignment of the struct.
+    pub align: usize,
+    /// Whether this is a union (all fields at offset 0).
+    pub is_union: bool,
+}
+
+/// Layout info for a single field.
+#[derive(Debug, Clone)]
+pub struct StructFieldLayout {
+    pub name: String,
+    pub offset: usize,
+    pub ty: CType,
+}
+
+impl StructLayout {
+    /// Compute the layout for a struct (fields laid out sequentially with alignment padding).
+    pub fn for_struct(fields: &[StructField]) -> Self {
+        let mut offset = 0usize;
+        let mut max_align = 1usize;
+        let mut field_layouts = Vec::with_capacity(fields.len());
+
+        for field in fields {
+            let field_align = field.ty.align();
+            let field_size = field.ty.size();
+            max_align = max_align.max(field_align);
+
+            // Align the current offset
+            offset = align_up(offset, field_align);
+
+            field_layouts.push(StructFieldLayout {
+                name: field.name.clone(),
+                offset,
+                ty: field.ty.clone(),
+            });
+
+            offset += field_size;
+        }
+
+        // Pad total size to struct alignment
+        let size = align_up(offset, max_align);
+
+        StructLayout {
+            fields: field_layouts,
+            size,
+            align: max_align,
+            is_union: false,
+        }
+    }
+
+    /// Compute the layout for a union (all fields at offset 0, size = max field size).
+    pub fn for_union(fields: &[StructField]) -> Self {
+        let mut max_size = 0usize;
+        let mut max_align = 1usize;
+        let mut field_layouts = Vec::with_capacity(fields.len());
+
+        for field in fields {
+            let field_align = field.ty.align();
+            let field_size = field.ty.size();
+            max_align = max_align.max(field_align);
+            max_size = max_size.max(field_size);
+
+            field_layouts.push(StructFieldLayout {
+                name: field.name.clone(),
+                offset: 0, // All union fields start at offset 0
+                ty: field.ty.clone(),
+            });
+        }
+
+        let size = align_up(max_size, max_align);
+
+        StructLayout {
+            fields: field_layouts,
+            size,
+            align: max_align,
+            is_union: true,
+        }
+    }
+
+    /// Look up a field by name, returning its offset and type.
+    pub fn field_offset(&self, name: &str) -> Option<(usize, &CType)> {
+        self.fields.iter()
+            .find(|f| f.name == name)
+            .map(|f| (f.offset, &f.ty))
+    }
+}
+
+/// Align `offset` up to the next multiple of `align`.
+pub fn align_up(offset: usize, align: usize) -> usize {
+    if align == 0 { return offset; }
+    (offset + align - 1) & !(align - 1)
+}
+
 impl CType {
     /// Size in bytes on a 64-bit target.
     pub fn size(&self) -> usize {
@@ -64,9 +163,13 @@ impl CType {
             CType::Array(elem, Some(n)) => elem.size() * n,
             CType::Array(_, None) => 8, // incomplete array treated as pointer
             CType::Function(_) => 8, // function pointer size
-            CType::Struct(s) | CType::Union(s) => {
-                // TODO: proper layout with alignment
-                s.fields.iter().map(|f| f.ty.size()).sum()
+            CType::Struct(s) => {
+                let layout = StructLayout::for_struct(&s.fields);
+                layout.size
+            }
+            CType::Union(s) => {
+                let layout = StructLayout::for_union(&s.fields);
+                layout.size
             }
             CType::Enum(_) => 4,
         }
