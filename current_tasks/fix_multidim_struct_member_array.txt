@@ -1,0 +1,5 @@
+Fix multi-dimensional array access through struct members (e.g., s.arr[i][j]).
+The compiler currently segfaults on 2D array member access in structs because
+subscript_result_is_array and get_array_elem_size_for_subscript don't handle
+MemberAccess as the root of a subscript chain, causing a load to be emitted
+where only address arithmetic should happen.
