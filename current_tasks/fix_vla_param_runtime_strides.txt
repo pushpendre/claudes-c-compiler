@@ -1,0 +1,21 @@
+Task: Fix VLA function parameter strides to use runtime dimension values
+Status: IN PROGRESS
+
+Problem: When a function takes a VLA parameter like int m[rows][cols], the inner 
+dimension 'cols' is a runtime variable. Currently compute_ptr_array_strides falls 
+back to 1 when the array size expression isn't a compile-time constant, causing 
+wrong strides for multi-dimensional array access through these parameters.
+
+Example:
+  void f(int rows, int cols, int m[rows][cols]) {
+      m[1][0]; // should access at offset cols*sizeof(int), but uses 1*sizeof(int)
+  }
+
+Fix approach:
+1. Add vla_stride_values: Vec<Option<Value>> to LocalInfo to store runtime stride IR values
+2. In lower_function, detect VLA params whose dimensions reference other params
+3. Emit runtime multiply instructions to compute strides when dimension is not constant
+4. In get_array_elem_size_for_subscript, use runtime stride values when available
+5. Modify compute_array_element_addr to use runtime stride operands
+
+Expected impact: Fixes ~29 VLA-related test failures plus 2D dynamic array tests.
