@@ -1,8 +1,0 @@
-Implementing floating-point classification builtins and related fixes:
-- __builtin_fpclassify(nan, inf, norm, subnorm, zero, x)
-- __builtin_signbit(x)
-- __builtin_isinf(x)
-- __builtin_isnan(x)
-- __builtin_isfinite(x)
-- Add .note.GNU-stack section to generated assembly
-- Fix __builtin_islessgreater for long double comparisons
