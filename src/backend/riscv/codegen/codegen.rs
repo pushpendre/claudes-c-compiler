@@ -302,26 +302,55 @@ impl ArchCodegen for RiscvCodegen {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
+        // Stack-passed params are at positive offsets from s0 (s0 = old sp)
+        let mut stack_param_offset: i64 = 0;
         for (_i, param) in func.params.iter().enumerate() {
+            let is_float = param.ty.is_float();
+            let is_stack_passed = if is_float { float_reg_idx >= 8 } else { int_reg_idx >= 8 };
+
             if param.name.is_empty() {
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
                 continue;
             }
             if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if ty.is_float() && float_reg_idx < 8 {
+                    if is_stack_passed {
+                        // Stack-passed parameter: load from positive s0 offset
+                        self.emit_load_from_s0("t0", stack_param_offset, "ld");
+                        let store_instr = Self::store_for_type(ty);
+                        self.emit_store_to_s0("t0", slot.0, store_instr);
+                        stack_param_offset += 8;
+                    } else if is_float {
                         // Float params arrive in fa0-fa7 per RISC-V calling convention
-                        self.state.emit(&format!("    fmv.x.d t0, {}", float_arg_regs[float_reg_idx]));
+                        if ty == IrType::F32 {
+                            // F32 param: extract 32-bit float from fa-reg
+                            self.state.emit(&format!("    fmv.x.w t0, {}", float_arg_regs[float_reg_idx]));
+                        } else {
+                            // F64 param: extract 64-bit double from fa-reg
+                            self.state.emit(&format!("    fmv.x.d t0, {}", float_arg_regs[float_reg_idx]));
+                        }
                         self.emit_store_to_s0("t0", slot.0, "sd");
                         float_reg_idx += 1;
-                    } else if int_reg_idx < 8 {
+                    } else {
                         let store_instr = Self::store_for_type(ty);
                         self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, store_instr);
                         int_reg_idx += 1;
                     }
                 }
             } else {
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
             }
         }
     }
@@ -594,7 +623,12 @@ impl ArchCodegen for RiscvCodegen {
 
         if let Some(dest) = dest {
             if let Some(slot) = self.state.get_slot(dest.0) {
-                if return_type.is_float() {
+                if return_type == IrType::F32 {
+                    // F32 return value is in fa0 as single-precision
+                    self.state.emit("    fmv.x.w t0, fa0");
+                    self.emit_store_to_s0("t0", slot.0, "sd");
+                } else if return_type.is_float() {
+                    // F64 return value is in fa0 as double-precision
                     self.state.emit("    fmv.x.d t0, fa0");
                     self.emit_store_to_s0("t0", slot.0, "sd");
                 } else {
@@ -663,7 +697,11 @@ impl ArchCodegen for RiscvCodegen {
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_t0(val);
-            if self.current_return_type.is_float() {
+            if self.current_return_type == IrType::F32 {
+                // F32 return: bit pattern in t0, move to fa0 as single-precision
+                self.state.emit("    fmv.w.x fa0, t0");
+            } else if self.current_return_type.is_float() {
+                // F64 return: bit pattern in t0, move to fa0 as double-precision
                 self.state.emit("    fmv.d.x fa0, t0");
             } else {
                 self.state.emit("    mv a0, t0");

@@ -423,27 +423,44 @@ impl ArchCodegen for ArmCodegen {
     fn emit_store_params(&mut self, func: &IrFunction) {
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
+        // Stack-passed params are above the callee's frame at [sp + frame_size + offset]
+        let mut stack_param_offset: i64 = 0;
+        let frame_size = self.current_frame_size;
         for (i, param) in func.params.iter().enumerate() {
+            let is_float = param.ty.is_float();
+            let is_stack_passed = if is_float { float_reg_idx >= 8 } else { int_reg_idx >= 8 };
+
             if param.name.is_empty() {
-                // Still need to count the register
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
                 continue;
             }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if ty.is_float() && float_reg_idx < 8 {
+                    if is_stack_passed {
+                        // Stack-passed parameter: load from caller's stack above our frame
+                        let caller_offset = frame_size + stack_param_offset;
+                        self.emit_load_from_sp("x0", caller_offset, "ldr");
+                        let store_instr = Self::str_for_type(ty);
+                        let reg = Self::reg_for_type("x0", ty);
+                        self.emit_store_to_sp(reg, slot.0, store_instr);
+                        stack_param_offset += 8;
+                    } else if is_float {
                         // Float params arrive in sN/dN per AAPCS64
                         if ty == IrType::F32 {
-                            // F32 param arrives in sN, move bits to w0
                             self.state.emit(&format!("    fmov w0, s{}", float_reg_idx));
                             self.emit_store_to_sp("x0", slot.0, "str");
                         } else {
-                            // F64 param arrives in dN, move bits to x0
                             self.state.emit(&format!("    fmov x0, d{}", float_reg_idx));
                             self.emit_store_to_sp("x0", slot.0, "str");
                         }
                         float_reg_idx += 1;
-                    } else if int_reg_idx < 8 {
+                    } else {
                         let store_instr = Self::str_for_type(ty);
                         let reg = Self::reg_for_type(ARM_ARG_REGS[int_reg_idx], ty);
                         self.emit_store_to_sp(reg, slot.0, store_instr);
@@ -451,8 +468,13 @@ impl ArchCodegen for ArmCodegen {
                     }
                 }
             } else {
-                // Count the register even if we don't have an alloca destination
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
             }
         }
     }
@@ -504,7 +526,7 @@ impl ArchCodegen for ArmCodegen {
             self.operand_to_x0(rhs);
             self.state.emit("    mov x2, x0");
             if ty == IrType::F32 {
-                // Single-precision: use s registers
+                // F32: bit pattern in low 32 bits of x-reg, use s-registers
                 self.state.emit("    fmov s0, w1");
                 self.state.emit("    fmov s1, w2");
                 match op {
@@ -518,7 +540,7 @@ impl ArchCodegen for ArmCodegen {
                 // Zero-extend to 64-bit so upper bits are clean
                 self.state.emit("    mov w0, w0");
             } else {
-                // Double-precision: use d registers
+                // F64: full 64-bit bit pattern in x-reg, use d-registers
                 self.state.emit("    fmov d0, x1");
                 self.state.emit("    fmov d1, x2");
                 match op {
@@ -637,10 +659,12 @@ impl ArchCodegen for ArmCodegen {
             self.state.emit("    mov x1, x0");
             self.operand_to_x0(rhs);
             if ty == IrType::F32 {
+                // F32: bit pattern in low 32 bits, use s-registers
                 self.state.emit("    fmov s0, w1");
                 self.state.emit("    fmov s1, w0");
                 self.state.emit("    fcmp s0, s1");
             } else {
+                // F64: full 64-bit bit pattern, use d-registers
                 self.state.emit("    fmov d0, x1");
                 self.state.emit("    fmov d1, x0");
                 self.state.emit("    fcmp d0, d1");
@@ -745,7 +769,11 @@ impl ArchCodegen for ArmCodegen {
         }
 
         if let Some(dest) = dest {
-            if return_type.is_float() {
+            if return_type == IrType::F32 {
+                // F32 return value is in s0 per AAPCS64
+                self.state.emit("    fmov w0, s0");
+            } else if return_type.is_float() {
+                // F64 return value is in d0 per AAPCS64
                 self.state.emit("    fmov x0, d0");
             }
             self.store_x0_to(&dest);
@@ -810,7 +838,11 @@ impl ArchCodegen for ArmCodegen {
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_x0(val);
-            if self.current_return_type.is_float() {
+            if self.current_return_type == IrType::F32 {
+                // F32 return: bit pattern in w0, move to s0 per AAPCS64
+                self.state.emit("    fmov s0, w0");
+            } else if self.current_return_type.is_float() {
+                // F64 return: bit pattern in x0, move to d0 per AAPCS64
                 self.state.emit("    fmov d0, x0");
             }
         }

@@ -255,19 +255,37 @@ impl ArchCodegen for X86Codegen {
         let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
+        // Stack-passed parameters start at 16(%rbp) (after saved rbp + return addr)
+        let mut stack_param_offset: i64 = 16;
         for (_i, param) in func.params.iter().enumerate() {
+            let is_float = param.ty.is_float();
+            let is_stack_passed = if is_float { float_reg_idx >= 8 } else { int_reg_idx >= 6 };
+
             if param.name.is_empty() {
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
                 continue;
             }
             if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if ty.is_float() && float_reg_idx < 8 {
+                    if is_stack_passed {
+                        // Stack-passed parameter: copy from positive rbp offset to local slot
+                        self.state.emit(&format!("    movq {}(%rbp), %rax", stack_param_offset));
+                        let store_instr = Self::mov_store_for_type(ty);
+                        let reg = Self::reg_for_type("rax", ty);
+                        self.state.emit(&format!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                        stack_param_offset += 8;
+                    } else if is_float {
                         // Float params arrive in xmm0-xmm7 per SysV ABI
                         self.state.emit(&format!("    movq %{}, {}(%rbp)",
                             xmm_regs[float_reg_idx], slot.0));
                         float_reg_idx += 1;
-                    } else if int_reg_idx < 6 {
+                    } else {
                         let store_instr = Self::mov_store_for_type(ty);
                         let reg = Self::reg_for_type(X86_ARG_REGS[int_reg_idx], ty);
                         self.state.emit(&format!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
@@ -275,7 +293,13 @@ impl ArchCodegen for X86Codegen {
                     }
                 }
             } else {
-                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                if is_stack_passed {
+                    stack_param_offset += 8;
+                } else if is_float {
+                    float_reg_idx += 1;
+                } else {
+                    int_reg_idx += 1;
+                }
             }
         }
     }
@@ -438,14 +462,14 @@ impl ArchCodegen for X86Codegen {
             match op {
                 IrUnaryOp::Neg => {
                     if ty == IrType::F32 {
-                        // XOR sign bit (bit 31) to negate float
-                        self.state.emit("    movq %rax, %xmm0");
+                        // F32: XOR the 32-bit sign bit (bit 31)
+                        self.state.emit("    movd %eax, %xmm0");
                         self.state.emit("    movl $0x80000000, %ecx");
                         self.state.emit("    movd %ecx, %xmm1");
                         self.state.emit("    xorps %xmm1, %xmm0");
-                        self.state.emit("    movq %xmm0, %rax");
+                        self.state.emit("    movd %xmm0, %eax");
                     } else {
-                        // XOR sign bit (bit 63) to negate double
+                        // F64: XOR the 64-bit sign bit (bit 63)
                         self.state.emit("    movq %rax, %xmm0");
                         self.state.emit("    movabsq $-9223372036854775808, %rcx"); // 0x8000000000000000
                         self.state.emit("    movq %rcx, %xmm1");
