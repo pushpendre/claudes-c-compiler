@@ -71,10 +71,15 @@ impl Lowerer {
                 };
 
                 // Convert to IrConst based on target type
+                // For unsigned types, use I64 to preserve zero-extension semantics
+                // (IrConst::I32 would sign-extend when later converted to i64)
                 let result = match target_ir_ty {
-                    IrType::I8 | IrType::U8 => IrConst::I8(truncated as i8),
-                    IrType::I16 | IrType::U16 => IrConst::I16(truncated as i16),
-                    IrType::I32 | IrType::U32 => IrConst::I32(truncated as i32),
+                    IrType::I8 => IrConst::I8(truncated as i8),
+                    IrType::U8 => IrConst::I64(truncated as u8 as i64),
+                    IrType::I16 => IrConst::I16(truncated as i16),
+                    IrType::U16 => IrConst::I64(truncated as u16 as i64),
+                    IrType::I32 => IrConst::I32(truncated as i32),
+                    IrType::U32 => IrConst::I64(truncated as u32 as i64),
                     IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(truncated as i64),
                     IrType::F32 => {
                         let int_val = if target_signed { truncated as i64 as f32 } else { truncated as f32 };
