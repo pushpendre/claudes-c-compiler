@@ -340,10 +340,11 @@ impl ArchCodegen for X86Codegen {
             (-new_space, new_space)
         });
 
-        // For variadic functions, reserve 48 bytes for the register save area
-        // (6 integer registers: rdi, rsi, rdx, rcx, r8, r9)
+        // For variadic functions, reserve 176 bytes for the register save area:
+        // 48 bytes for 6 integer registers (rdi, rsi, rdx, rcx, r8, r9)
+        // 128 bytes for 8 XMM registers (xmm0-xmm7, 16 bytes each)
         if func.is_variadic {
-            space += 48;
+            space += 176;
             self.reg_save_area_offset = -space;
         }
 
@@ -362,16 +363,22 @@ impl ArchCodegen for X86Codegen {
             self.state.emit(&format!("    subq ${}, %rsp", frame_size));
         }
 
-        // For variadic functions, save all integer arg registers to the register save area.
+        // For variadic functions, save all arg registers to the register save area.
         // This allows va_arg to retrieve register-passed arguments.
+        // Layout: [0..47] = integer regs, [48..175] = XMM regs (16 bytes each)
         if func.is_variadic {
             let base = self.reg_save_area_offset;
+            // Save 6 integer argument registers
             self.state.emit(&format!("    movq %rdi, {}(%rbp)", base));
             self.state.emit(&format!("    movq %rsi, {}(%rbp)", base + 8));
             self.state.emit(&format!("    movq %rdx, {}(%rbp)", base + 16));
             self.state.emit(&format!("    movq %rcx, {}(%rbp)", base + 24));
             self.state.emit(&format!("    movq %r8, {}(%rbp)", base + 32));
             self.state.emit(&format!("    movq %r9, {}(%rbp)", base + 40));
+            // Save 8 XMM argument registers (16 bytes each)
+            for i in 0..8i64 {
+                self.state.emit(&format!("    movdqu %xmm{}, {}(%rbp)", i, base + 48 + i * 16));
+            }
         }
     }
 
@@ -935,8 +942,8 @@ impl ArchCodegen for X86Codegen {
         // Cap at 48 (6 registers * 8 bytes) since only 6 GP regs are saved
         let gp_offset = self.num_named_int_params.min(6) * 8;
         self.state.emit(&format!("    movl ${}, (%rax)", gp_offset));
-        // fp_offset = 48 + 0 (no FP register saving yet, force overflow for FP)
-        self.state.emit("    movl $176, 4(%rax)");
+        // fp_offset = 48 (start of XMM save area in register save area)
+        self.state.emit("    movl $48, 4(%rax)");
         // overflow_arg_area = rbp + 16 + num_stack_named_params * 8
         // Stack-passed named params are those beyond the 6 register params
         let num_stack_named = if self.num_named_int_params > 6 { self.num_named_int_params - 6 } else { 0 };

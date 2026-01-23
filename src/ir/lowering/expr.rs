@@ -1733,6 +1733,7 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => self.infer_expr_type(rhs),
             Expr::AddressOf(_, _) => IrType::Ptr,
             Expr::StringLiteral(_, _) => IrType::Ptr,
+            Expr::VaArg(_, type_spec, _) => self.resolve_va_arg_type(type_spec),
             _ => IrType::I64,
         }
     }
@@ -1866,7 +1867,7 @@ impl Lowerer {
     }
 
     /// Resolve the type specified in va_arg to an IrType.
-    fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
+    pub(super) fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
         match type_spec {
             TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,
             TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,

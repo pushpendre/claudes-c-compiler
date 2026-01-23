@@ -673,6 +673,7 @@ impl Lowerer {
                 }
                 return IrType::I64;
             }
+            Expr::VaArg(_, type_spec, _) => return self.resolve_va_arg_type(type_spec),
             _ => {}
         }
         match expr {
