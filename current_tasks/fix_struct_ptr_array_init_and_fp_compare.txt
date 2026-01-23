@@ -1,0 +1,9 @@
+Task: Fix struct pointer array initialization, __builtin_isgreater float types, and array decay in ternary expressions
+Status: IN PROGRESS
+
+Three fixes:
+1. Global struct initialization with array-of-pointer members (char *s[2]) now correctly emits address relocations
+2. __builtin_isgreater/isless now use the actual argument types for comparison (was hardcoded to F64)
+3. get_expr_type now returns Ptr for array identifiers (array-to-pointer decay)
+
+Tests gained: ~5 (pointer array init, isgreater float, void pointer ternary)
