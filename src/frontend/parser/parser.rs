@@ -1740,8 +1740,17 @@ impl Parser {
                             self.pos = save2;
                         }
                     }
-                    // Skip array dimensions in abstract declarators e.g. (int [3])
-                    self.skip_array_dimensions();
+                    // Parse array dimensions in abstract declarators e.g. (int [3])
+                    while matches!(self.peek(), TokenKind::LBracket) {
+                        self.advance(); // consume '['
+                        let size = if matches!(self.peek(), TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()))
+                        };
+                        self.expect(&TokenKind::RBracket);
+                        result_type = TypeSpecifier::Array(Box::new(result_type), size);
+                    }
                     if matches!(self.peek(), TokenKind::RParen) {
                         let span = self.peek_span();
                         self.advance();

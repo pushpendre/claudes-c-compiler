@@ -628,14 +628,24 @@ impl Lowerer {
                 self.emit(Instruction::Store { val, ptr: alloca, ty });
             }
             Initializer::List(items) => {
-                if let Some(layout) = struct_layout {
-                    self.init_struct_fields(alloca, items, &layout);
+                if let Some(ref layout) = struct_layout {
+                    self.init_struct_fields(alloca, items, layout);
                 } else {
                     self.init_array_compound_literal(alloca, items, type_spec, ty, size);
                 }
             }
         }
-        Operand::Value(alloca)
+
+        // For scalar compound literals (not struct/array), return the loaded value.
+        // Struct and array compound literals return the alloca address (they are lvalues).
+        let is_scalar = struct_layout.is_none() && !matches!(type_spec, TypeSpecifier::Array(..));
+        if is_scalar {
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: alloca, ty });
+            Operand::Value(loaded)
+        } else {
+            Operand::Value(alloca)
+        }
     }
 
     /// Initialize struct fields from an initializer list (used by both compound
@@ -742,9 +752,29 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_address_of(&mut self, inner: &Expr) -> Operand {
-        // &(compound_literal) - compound literal already returns alloca address
-        if let Expr::CompoundLiteral(..) = inner {
-            return self.lower_expr(inner);
+        // &(compound_literal) - need to get the alloca address directly
+        if let Expr::CompoundLiteral(type_spec, init, _) = inner {
+            // For scalar compound literals, lower_expr would return the loaded value,
+            // so we need to allocate and init directly here to get the address.
+            let ty = self.type_spec_to_ir(type_spec);
+            let size = self.sizeof_type(type_spec);
+            let alloca = self.fresh_value();
+            self.emit(Instruction::Alloca { dest: alloca, size, ty });
+            let struct_layout = self.get_struct_layout_for_type(type_spec);
+            match init.as_ref() {
+                Initializer::Expr(expr) => {
+                    let val = self.lower_expr(expr);
+                    self.emit(Instruction::Store { val, ptr: alloca, ty });
+                }
+                Initializer::List(items) => {
+                    if let Some(ref layout) = struct_layout {
+                        self.init_struct_fields(alloca, items, layout);
+                    } else {
+                        self.init_array_compound_literal(alloca, items, type_spec, ty, size);
+                    }
+                }
+            }
+            return Operand::Value(alloca);
         }
 
         // Try lvalue path: &variable, &array[i], &struct.field, etc.
