@@ -2056,6 +2056,10 @@ impl Lowerer {
                 }
                 None
             }
+            Expr::VaArg(_, type_spec, _) => {
+                let resolved = self.resolve_type_spec(type_spec);
+                Some(self.type_spec_to_ctype(resolved))
+            }
             _ => None,
         }
     }
