@@ -1,0 +1,27 @@
+Task: Fix enum constant scope leakage in lowerer
+
+Problem:
+The lowerer pre-collects all enum constants from the entire AST into a flat
+HashMap (self.enum_constants) before lowering any code. This means enum
+constants declared in block scopes leak to other scopes, causing incorrect
+name resolution when local variables share names with enum constants.
+
+Example:
+  int main() {
+      { int a = 5; printf("%d", a); }  // Should print 5
+      { enum { a, b }; }                // 'a' = 0 leaks
+      { int a = 10; printf("%d", a); } // Should print 10
+  }
+  // Currently prints 0, 0, 0 instead of 5, 0, 10
+
+Fix approach:
+- Remove the global enum constant pre-collection pass
+- Instead, track enum constants with scope awareness in the lowerer
+- Use the lowerer's existing scope mechanism (or add one) to ensure
+  enum constants only resolve within their declaring scope
+- When a name lookup occurs, check local variables first, then
+  enum constants visible in the current scope
+
+This fixes multiple test failures including:
+- compiler_suite_0149_0101 and similar ternary tests
+- Various tests where local variable names conflict with enum constants
