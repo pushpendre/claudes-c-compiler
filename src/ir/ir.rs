@@ -98,10 +98,10 @@ pub enum Instruction {
     Cmp { dest: Value, op: IrCmpOp, lhs: Operand, rhs: Operand, ty: IrType },
 
     /// Function call: %dest = call func(args...)
-    Call { dest: Option<Value>, func: String, args: Vec<Operand>, return_type: IrType },
+    Call { dest: Option<Value>, func: String, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType },
 
     /// Indirect function call through a pointer: %dest = call_indirect ptr(args...)
-    CallIndirect { dest: Option<Value>, func_ptr: Operand, args: Vec<Operand>, return_type: IrType },
+    CallIndirect { dest: Option<Value>, func_ptr: Operand, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType },
 
     /// Get element pointer (for arrays/structs)
     GetElementPtr { dest: Value, base: Value, offset: Operand, ty: IrType },

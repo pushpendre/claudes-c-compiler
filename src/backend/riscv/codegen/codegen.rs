@@ -295,13 +295,29 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_store_params(&mut self, func: &IrFunction) {
-        for (i, param) in func.params.iter().enumerate() {
-            if i >= 8 || param.name.is_empty() { continue; }
-            if let Some((dest, ty)) = find_param_alloca(func, i) {
+        let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+        let mut int_reg_idx = 0usize;
+        let mut float_reg_idx = 0usize;
+        for (_i, param) in func.params.iter().enumerate() {
+            if param.name.is_empty() {
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                continue;
+            }
+            if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    let store_instr = Self::store_for_type(ty);
-                    self.emit_store_to_s0(RISCV_ARG_REGS[i], slot.0, store_instr);
+                    if ty.is_float() && float_reg_idx < 8 {
+                        // Float params arrive in fa0-fa7 per RISC-V calling convention
+                        self.state.emit(&format!("    fmv.x.d t0, {}", float_arg_regs[float_reg_idx]));
+                        self.emit_store_to_s0("t0", slot.0, "sd");
+                        float_reg_idx += 1;
+                    } else if int_reg_idx < 8 {
+                        let store_instr = Self::store_for_type(ty);
+                        self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, store_instr);
+                        int_reg_idx += 1;
+                    }
                 }
+            } else {
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
             }
         }
     }
@@ -534,17 +550,26 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
+    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
         let mut int_idx = 0usize;
         let mut float_idx = 0usize;
 
-        for arg in args.iter() {
-            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
+        for (i, arg) in args.iter().enumerate() {
+            let is_float_arg = if i < arg_types.len() {
+                arg_types[i].is_float()
+            } else {
+                matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
+            };
             if is_float_arg && float_idx < 8 {
                 self.operand_to_t0(arg);
-                self.state.emit(&format!("    fmv.d.x {}, t0", float_arg_regs[float_idx]));
+                let arg_ty = if i < arg_types.len() { Some(arg_types[i]) } else { None };
+                if arg_ty == Some(IrType::F32) {
+                    self.state.emit(&format!("    fmv.w.x {}, t0", float_arg_regs[float_idx]));
+                } else {
+                    self.state.emit(&format!("    fmv.d.x {}, t0", float_arg_regs[float_idx]));
+                }
                 float_idx += 1;
             } else if int_idx < 8 {
                 self.operand_to_t0(arg);

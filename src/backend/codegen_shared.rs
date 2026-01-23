@@ -119,7 +119,8 @@ pub trait ArchCodegen {
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a function call (direct or indirect).
-    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
+    /// `arg_types` provides the IR type of each argument for proper calling convention handling.
+    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType);
 
     /// Emit a global address load.
@@ -224,11 +225,11 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         Instruction::Cmp { dest, op, lhs, rhs, ty } => {
             cg.emit_cmp(dest, *op, lhs, rhs, *ty);
         }
-        Instruction::Call { dest, func, args, return_type } => {
-            cg.emit_call(args, Some(func), None, *dest, *return_type);
+        Instruction::Call { dest, func, args, arg_types, return_type } => {
+            cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type);
         }
-        Instruction::CallIndirect { dest, func_ptr, args, return_type } => {
-            cg.emit_call(args, None, Some(func_ptr), *dest, *return_type);
+        Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type } => {
+            cg.emit_call(args, arg_types, None, Some(func_ptr), *dest, *return_type);
         }
         Instruction::GlobalAddr { dest, name } => {
             cg.emit_global_addr(dest, name);

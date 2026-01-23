@@ -275,6 +275,18 @@ impl ArmCodegen {
         }
     }
 
+    /// Convert an x-register name to its w-register counterpart.
+    fn w_for_x(xreg: &str) -> &'static str {
+        match xreg {
+            "x0" => "w0", "x1" => "w1", "x2" => "w2", "x3" => "w3",
+            "x4" => "w4", "x5" => "w5", "x6" => "w6", "x7" => "w7",
+            "x8" => "w8", "x9" => "w9", "x10" => "w10", "x11" => "w11",
+            "x12" => "w12", "x13" => "w13", "x14" => "w14", "x15" => "w15",
+            "x16" => "w16", "x17" => "w17",
+            _ => "w0",
+        }
+    }
+
     /// Emit a type cast instruction sequence for AArch64.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         if from_ty == to_ty { return; }
@@ -296,15 +308,29 @@ impl ArmCodegen {
 
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
-            self.state.emit("    fmov d0, x0");
-            self.state.emit("    fcvtzs x0, d0");
+            if from_ty == IrType::F32 {
+                // F32 bits in w0 -> convert to int
+                self.state.emit("    fmov s0, w0");
+                self.state.emit("    fcvtzs x0, s0");
+            } else {
+                // F64 bits in x0 -> convert to int
+                self.state.emit("    fmov d0, x0");
+                self.state.emit("    fcvtzs x0, d0");
+            }
             return;
         }
 
         // Int-to-float cast
         if !from_ty.is_float() && to_ty.is_float() {
-            self.state.emit("    scvtf d0, x0");
-            self.state.emit("    fmov x0, d0");
+            if to_ty == IrType::F32 {
+                // int -> F32
+                self.state.emit("    scvtf s0, x0");
+                self.state.emit("    fmov w0, s0");
+            } else {
+                // int -> F64
+                self.state.emit("    scvtf d0, x0");
+                self.state.emit("    fmov x0, d0");
+            }
             return;
         }
 
@@ -394,14 +420,38 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_store_params(&mut self, func: &IrFunction) {
+        let mut int_reg_idx = 0usize;
+        let mut float_reg_idx = 0usize;
         for (i, param) in func.params.iter().enumerate() {
-            if i >= 8 || param.name.is_empty() { continue; }
+            if param.name.is_empty() {
+                // Still need to count the register
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                continue;
+            }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    let store_instr = Self::str_for_type(ty);
-                    let reg = Self::reg_for_type(ARM_ARG_REGS[i], ty);
-                    self.emit_store_to_sp(reg, slot.0, store_instr);
+                    if ty.is_float() && float_reg_idx < 8 {
+                        // Float params arrive in sN/dN per AAPCS64
+                        if ty == IrType::F32 {
+                            // F32 param arrives in sN, move bits to w0
+                            self.state.emit(&format!("    fmov w0, s{}", float_reg_idx));
+                            self.emit_store_to_sp("x0", slot.0, "str");
+                        } else {
+                            // F64 param arrives in dN, move bits to x0
+                            self.state.emit(&format!("    fmov x0, d{}", float_reg_idx));
+                            self.emit_store_to_sp("x0", slot.0, "str");
+                        }
+                        float_reg_idx += 1;
+                    } else if int_reg_idx < 8 {
+                        let store_instr = Self::str_for_type(ty);
+                        let reg = Self::reg_for_type(ARM_ARG_REGS[int_reg_idx], ty);
+                        self.emit_store_to_sp(reg, slot.0, store_instr);
+                        int_reg_idx += 1;
+                    }
                 }
+            } else {
+                // Count the register even if we don't have an alloca destination
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
             }
         }
     }
@@ -605,10 +655,11 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
+    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
         let num_args = args.len().min(8);
         let mut float_reg_idx = 0usize;
+        let mut int_reg_idx = 0usize;
 
         // For indirect calls, load the function pointer into x17 BEFORE
         // setting up arguments, to avoid clobbering x0 (first arg register).
@@ -623,14 +674,33 @@ impl ArchCodegen for ArmCodegen {
             self.operand_to_x0(arg);
             self.state.emit(&format!("    mov {}, x0", ARM_TMP_REGS[i]));
         }
-        // Move from temps to arg registers, float args go to dN via fmov
-        for (i, arg) in args.iter().enumerate().take(num_args) {
-            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
-            if is_float_arg && float_reg_idx < 8 {
-                self.state.emit(&format!("    fmov d{}, {}", float_reg_idx, ARM_TMP_REGS[i]));
-                float_reg_idx += 1;
+        // Move from temps to arg registers using type info for float detection.
+        // Float args go to dN; integer args go to xN.
+        // For AAPCS64: float/double args use d0-d7, int args use x0-x7.
+        for (i, _arg) in args.iter().enumerate().take(num_args) {
+            let arg_ty = if i < arg_types.len() {
+                Some(arg_types[i])
             } else {
-                self.state.emit(&format!("    mov {}, {}", ARM_ARG_REGS[i], ARM_TMP_REGS[i]));
+                None
+            };
+            let is_float_arg = if let Some(ty) = arg_ty {
+                ty.is_float()
+            } else {
+                matches!(args[i], Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
+            };
+            if is_float_arg && float_reg_idx < 8 {
+                if arg_ty == Some(IrType::F32) {
+                    // F32 value: bit pattern in low 32 bits of temp reg
+                    self.state.emit(&format!("    fmov s{}, {}",
+                        float_reg_idx, Self::w_for_x(ARM_TMP_REGS[i])));
+                } else {
+                    // F64 value: full 64-bit bit pattern in temp reg
+                    self.state.emit(&format!("    fmov d{}, {}", float_reg_idx, ARM_TMP_REGS[i]));
+                }
+                float_reg_idx += 1;
+            } else if int_reg_idx < 8 {
+                self.state.emit(&format!("    mov {}, {}", ARM_ARG_REGS[int_reg_idx], ARM_TMP_REGS[i]));
+                int_reg_idx += 1;
             }
         }
 

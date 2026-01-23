@@ -254,6 +254,7 @@ mod tests {
                     dest: Some(Value(0)),
                     func: "printf".to_string(),
                     args: vec![],
+                    arg_types: vec![],
                     return_type: IrType::I32,
                 },
             ],

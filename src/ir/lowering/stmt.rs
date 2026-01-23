@@ -256,6 +256,10 @@ impl Lowerer {
                             }
                         } else if !is_struct {
                             let val = self.lower_expr(expr);
+                            // Insert implicit cast for type mismatches
+                            // (e.g., float f = 'a', int x = 3.14, char c = 99.0)
+                            let expr_ty = self.get_expr_type(expr);
+                            let val = self.emit_implicit_cast(val, expr_ty, var_ty);
                             self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
                         }
                         // TODO: struct assignment from expression
@@ -561,22 +565,11 @@ impl Lowerer {
             Stmt::Return(expr, _span) => {
                 let op = expr.as_ref().map(|e| {
                     let val = self.lower_expr(e);
-                    // Insert narrowing cast if function returns a type narrower than I64
                     let ret_ty = self.current_return_type;
-                    if ret_ty != IrType::I64 && ret_ty != IrType::Ptr
-                        && ret_ty != IrType::Void && ret_ty.is_integer()
-                    {
-                        let narrowed = self.fresh_value();
-                        self.emit(Instruction::Cast {
-                            dest: narrowed,
-                            src: val,
-                            from_ty: IrType::I64,
-                            to_ty: ret_ty,
-                        });
-                        Operand::Value(narrowed)
-                    } else {
-                        val
-                    }
+                    let expr_ty = self.get_expr_type(e);
+                    // Insert implicit cast for return value type mismatch
+                    // Handles: float<->int, float<->float, and integer narrowing
+                    self.emit_implicit_cast(val, expr_ty, ret_ty)
                 });
                 self.terminate(Terminator::Return(op));
                 // Start a new unreachable block for any code after return

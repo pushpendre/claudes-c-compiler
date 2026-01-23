@@ -285,9 +285,12 @@ impl Lowerer {
                     rhs_val
                 } else {
                     let rhs_val = self.lower_expr(rhs);
-                    let ty = self.get_expr_type(lhs);
+                    let lhs_ty = self.get_expr_type(lhs);
+                    let rhs_ty = self.get_expr_type(rhs);
+                    // Insert implicit cast for type mismatches (e.g., float = int, int = double)
+                    let rhs_val = self.emit_implicit_cast(rhs_val, rhs_ty, lhs_ty);
                     if let Some(lv) = self.lower_lvalue(lhs) {
-                        self.store_lvalue_typed(&lv, rhs_val.clone(), ty);
+                        self.store_lvalue_typed(&lv, rhs_val.clone(), lhs_ty);
                         return rhs_val;
                     }
                     // Fallback: just return the rhs value
@@ -303,12 +306,14 @@ impl Lowerer {
                     if let Some(builtin_info) = builtins::resolve_builtin(name) {
                         match &builtin_info.kind {
                             BuiltinKind::LibcAlias(libc_name) => {
+                                let builtin_arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
                                 let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                                 let dest = self.fresh_value();
                                 self.emit(Instruction::Call {
                                     dest: Some(dest),
                                     func: libc_name.clone(),
                                     args: arg_vals,
+                                    arg_types: builtin_arg_types,
                                     return_type: IrType::I64,
                                 });
                                 return Operand::Value(dest);
@@ -330,12 +335,14 @@ impl Lowerer {
                             BuiltinKind::Intrinsic(_intr) => {
                                 // Strip __builtin_ prefix and call the underlying function
                                 let cleaned_name = name.strip_prefix("__builtin_").unwrap_or(name).to_string();
+                                let intrinsic_arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
                                 let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                                 let dest = self.fresh_value();
                                 self.emit(Instruction::Call {
                                     dest: Some(dest),
                                     func: cleaned_name,
                                     args: arg_vals,
+                                    arg_types: intrinsic_arg_types,
                                     return_type: IrType::I64,
                                 });
                                 return Operand::Value(dest);
@@ -345,7 +352,38 @@ impl Lowerer {
                 }
 
                 // Normal call dispatch (direct calls and indirect function pointer calls)
-                let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                // Look up parameter types for implicit argument casts
+                let param_types: Option<Vec<IrType>> = if let Expr::Identifier(name, _) = func.as_ref() {
+                    self.function_param_types.get(name).cloned()
+                } else {
+                    None
+                };
+
+                // Lower arguments with implicit casts to match parameter types
+                // Also track the resulting arg types for the backend's calling convention
+                let mut computed_arg_types: Vec<IrType> = Vec::new();
+                let arg_vals: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
+                    let val = self.lower_expr(a);
+                    let arg_ty = self.get_expr_type(a);
+                    // If we have parameter type info and this is a non-variadic param,
+                    // insert an implicit cast if the types differ
+                    if let Some(ref ptypes) = param_types {
+                        if i < ptypes.len() {
+                            let param_ty = ptypes[i];
+                            computed_arg_types.push(param_ty);
+                            return self.emit_implicit_cast(val, arg_ty, param_ty);
+                        }
+                    }
+                    // For variadic or unknown params, apply default argument promotions:
+                    // float -> double, narrow int types stay as-is (already I64 in our IR)
+                    if arg_ty == IrType::F32 {
+                        // Promote float to double for variadic args
+                        computed_arg_types.push(IrType::F64);
+                        return self.emit_implicit_cast(val, IrType::F32, IrType::F64);
+                    }
+                    computed_arg_types.push(arg_ty);
+                    val
+                }).collect();
                 let dest = self.fresh_value();
 
                 // Look up function return type for narrowing cast after the call.
@@ -375,6 +413,7 @@ impl Lowerer {
                                 dest: Some(dest),
                                 func_ptr: Operand::Value(ptr_val),
                                 args: arg_vals,
+                                arg_types: computed_arg_types.clone(),
                                 return_type: IrType::I64,
                             });
                         } else if is_global_fptr {
@@ -391,6 +430,7 @@ impl Lowerer {
                                 dest: Some(dest),
                                 func_ptr: Operand::Value(ptr_val),
                                 args: arg_vals,
+                                arg_types: computed_arg_types.clone(),
                                 return_type: IrType::I64,
                             });
                         } else {
@@ -402,6 +442,7 @@ impl Lowerer {
                                 dest: Some(dest),
                                 func: name.clone(),
                                 args: arg_vals,
+                                arg_types: computed_arg_types.clone(),
                                 return_type: IrType::I64,
                             });
                         }
@@ -414,6 +455,7 @@ impl Lowerer {
                             dest: Some(dest),
                             func_ptr,
                             args: arg_vals,
+                            arg_types: computed_arg_types.clone(),
                             return_type: IrType::I64,
                         });
                     }
@@ -425,6 +467,7 @@ impl Lowerer {
                             dest: Some(dest),
                             func_ptr,
                             args: arg_vals,
+                            arg_types: computed_arg_types.clone(),
                             return_type: IrType::I64,
                         });
                     }
@@ -1041,20 +1084,41 @@ impl Lowerer {
     pub(super) fn lower_expr_with_type(&mut self, expr: &Expr, target_ty: IrType) -> Operand {
         let src = self.lower_expr(expr);
         let src_ty = self.get_expr_type(expr);
+        self.emit_implicit_cast(src, src_ty, target_ty)
+    }
+
+    /// Insert an implicit type cast from src_ty to target_ty if needed.
+    /// Handles float<->int conversions, float<->float conversions, and integer
+    /// widening/narrowing.
+    pub(super) fn emit_implicit_cast(&mut self, src: Operand, src_ty: IrType, target_ty: IrType) -> Operand {
         if src_ty == target_ty {
+            return src;
+        }
+        // Don't cast if both are pointer-like or void
+        if target_ty == IrType::Ptr || target_ty == IrType::Void {
+            return src;
+        }
+        if src_ty == IrType::Ptr && target_ty.is_integer() {
+            // Pointer to integer is allowed (truncation/zero-ext handled at backend)
             return src;
         }
         if target_ty.is_float() && !src_ty.is_float() {
             // int -> float promotion
             let dest = self.fresh_value();
-            self.emit(Instruction::Cast { dest, src, from_ty: IrType::I64, to_ty: target_ty });
+            self.emit(Instruction::Cast { dest, src, from_ty: src_ty, to_ty: target_ty });
             Operand::Value(dest)
         } else if !target_ty.is_float() && src_ty.is_float() {
             // float -> int demotion
             let dest = self.fresh_value();
             self.emit(Instruction::Cast { dest, src, from_ty: src_ty, to_ty: target_ty });
             Operand::Value(dest)
+        } else if target_ty.is_float() && src_ty.is_float() && target_ty != src_ty {
+            // float -> float (e.g., F64 -> F32 or F32 -> F64)
+            let dest = self.fresh_value();
+            self.emit(Instruction::Cast { dest, src, from_ty: src_ty, to_ty: target_ty });
+            Operand::Value(dest)
         } else {
+            // Integer to integer - only emit cast for narrowing or sign-changing
             src
         }
     }

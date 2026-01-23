@@ -104,6 +104,8 @@ pub struct Lowerer {
     pub(super) typedefs: HashMap<String, TypeSpecifier>,
     /// Function name -> return type mapping for inserting narrowing casts after calls.
     pub(super) function_return_types: HashMap<String, IrType>,
+    /// Function name -> parameter types mapping for inserting implicit argument casts.
+    pub(super) function_param_types: HashMap<String, Vec<IrType>>,
 }
 
 impl Lowerer {
@@ -135,6 +137,7 @@ impl Lowerer {
             user_labels: HashMap::new(),
             typedefs: HashMap::new(),
             function_return_types: HashMap::new(),
+            function_param_types: HashMap::new(),
         }
     }
 
@@ -142,22 +145,38 @@ impl Lowerer {
         // Seed builtin typedefs (matching the parser's pre-seeded typedef names)
         self.seed_builtin_typedefs();
 
-        // First pass: collect all function names and return types so we can
-        // distinguish function references from global variable references
-        // and insert proper narrowing casts after calls.
+        // First pass: collect all function names, return types, and parameter types
+        // so we can distinguish function references from global variable references,
+        // insert proper narrowing casts after calls, and insert implicit argument casts.
         for decl in &tu.decls {
             if let ExternalDecl::FunctionDef(func) = decl {
                 self.known_functions.insert(func.name.clone());
                 let ret_ty = self.type_spec_to_ir(&func.return_type);
                 self.function_return_types.insert(func.name.clone(), ret_ty);
+                // Collect parameter types (skip variadic portion)
+                let param_tys: Vec<IrType> = func.params.iter().map(|p| {
+                    self.type_spec_to_ir(&p.type_spec)
+                }).collect();
+                if !func.variadic || !param_tys.is_empty() {
+                    self.function_param_types.insert(func.name.clone(), param_tys);
+                }
             }
             // Also detect function declarations (extern prototypes)
             if let ExternalDecl::Declaration(decl) = decl {
                 for declarator in &decl.declarators {
-                    if declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _))) {
-                        self.known_functions.insert(declarator.name.clone());
-                        let ret_ty = self.type_spec_to_ir(&decl.type_spec);
-                        self.function_return_types.insert(declarator.name.clone(), ret_ty);
+                    for d in &declarator.derived {
+                        if let DerivedDeclarator::Function(params, variadic) = d {
+                            self.known_functions.insert(declarator.name.clone());
+                            let ret_ty = self.type_spec_to_ir(&decl.type_spec);
+                            self.function_return_types.insert(declarator.name.clone(), ret_ty);
+                            let param_tys: Vec<IrType> = params.iter().map(|p| {
+                                self.type_spec_to_ir(&p.type_spec)
+                            }).collect();
+                            if !variadic || !param_tys.is_empty() {
+                                self.function_param_types.insert(declarator.name.clone(), param_tys);
+                            }
+                            break;
+                        }
                     }
                 }
             }

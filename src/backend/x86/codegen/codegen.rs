@@ -252,14 +252,30 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_store_params(&mut self, func: &IrFunction) {
-        for (i, param) in func.params.iter().enumerate() {
-            if i >= 6 || param.name.is_empty() { continue; }
-            if let Some((dest, ty)) = find_param_alloca(func, i) {
+        let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
+        let mut int_reg_idx = 0usize;
+        let mut float_reg_idx = 0usize;
+        for (_i, param) in func.params.iter().enumerate() {
+            if param.name.is_empty() {
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
+                continue;
+            }
+            if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    let store_instr = Self::mov_store_for_type(ty);
-                    let reg = Self::reg_for_type(X86_ARG_REGS[i], ty);
-                    self.state.emit(&format!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                    if ty.is_float() && float_reg_idx < 8 {
+                        // Float params arrive in xmm0-xmm7 per SysV ABI
+                        self.state.emit(&format!("    movq %{}, {}(%rbp)",
+                            xmm_regs[float_reg_idx], slot.0));
+                        float_reg_idx += 1;
+                    } else if int_reg_idx < 6 {
+                        let store_instr = Self::mov_store_for_type(ty);
+                        let reg = Self::reg_for_type(X86_ARG_REGS[int_reg_idx], ty);
+                        self.state.emit(&format!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                        int_reg_idx += 1;
+                    }
                 }
+            } else {
+                if param.ty.is_float() { float_reg_idx += 1; } else { int_reg_idx += 1; }
             }
         }
     }
@@ -492,16 +508,20 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
+    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
-        // Classify args: float constants go in xmm regs, others in int regs
+        // Classify args: float args go in xmm regs, others in int regs
         let mut stack_args: Vec<&Operand> = Vec::new();
         let mut int_idx = 0usize;
         let mut float_idx = 0usize;
         let mut arg_assignments: Vec<(&Operand, bool, usize)> = Vec::new(); // (arg, is_float, reg_idx)
 
-        for arg in args.iter() {
-            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
+        for (i, arg) in args.iter().enumerate() {
+            let is_float_arg = if i < arg_types.len() {
+                arg_types[i].is_float()
+            } else {
+                matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
+            };
             if is_float_arg && float_idx < 8 {
                 arg_assignments.push((arg, true, float_idx));
                 float_idx += 1;
