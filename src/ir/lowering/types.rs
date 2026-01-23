@@ -1335,11 +1335,17 @@ impl Lowerer {
     /// Extract an integer value from any integer literal expression (Int, UInt, Long, ULong).
     /// Used for array sizes and other compile-time integer expressions.
     pub(super) fn expr_as_array_size(&self, expr: &Expr) -> Option<i64> {
+        // Try simple literals first (fast path)
         match expr {
-            Expr::IntLiteral(n, _) | Expr::LongLiteral(n, _) => Some(*n),
-            Expr::UIntLiteral(n, _) | Expr::ULongLiteral(n, _) => Some(*n as i64),
-            _ => None,
+            Expr::IntLiteral(n, _) | Expr::LongLiteral(n, _) => return Some(*n),
+            Expr::UIntLiteral(n, _) | Expr::ULongLiteral(n, _) => return Some(*n as i64),
+            _ => {}
         }
+        // Fall back to full constant expression evaluation (handles sizeof, arithmetic, etc.)
+        if let Some(val) = self.eval_const_expr(expr) {
+            return self.const_to_i64(&val);
+        }
+        None
     }
 
     /// For Array(Array(Int, 3), 2), returns [2, 3] (but we skip the outermost

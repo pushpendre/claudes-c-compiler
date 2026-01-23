@@ -657,6 +657,8 @@ impl Lowerer {
             Initializer::Expr(expr) => {
                 // Try to evaluate as a constant
                 if let Some(val) = self.eval_const_expr(expr) {
+                    // Convert integer constants to float if target type is float/double
+                    let val = self.coerce_const_to_type(val, base_ty);
                     return GlobalInit::Scalar(val);
                 }
                 // String literal initializer
@@ -905,13 +907,18 @@ impl Lowerer {
         let mut item_idx = 0usize;
         let mut current_field_idx = 0usize;
 
-        while item_idx < items.len() && current_field_idx < layout.fields.len() {
+        while item_idx < items.len() {
             let item = &items[item_idx];
 
             // Determine which field this initializer targets
             let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
+                // Designated initializer: look up field by name
+                match layout.fields.iter().position(|f| f.name == *name) {
+                    Some(idx) => idx,
+                    None => { item_idx += 1; continue; }
+                }
             } else {
+                // Positional: use current_field_idx, skip unnamed fields
                 let mut idx = current_field_idx;
                 while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
                     idx += 1;
@@ -1016,7 +1023,7 @@ impl Lowerer {
         let mut field_inits: Vec<Option<&InitializerItem>> = vec![None; layout.fields.len()];
         for item in items {
             let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
-            if field_idx >= layout.fields.len() { break; }
+            if field_idx >= layout.fields.len() { continue; }
             field_inits[field_idx] = Some(item);
             current_field_idx = field_idx + 1;
         }
@@ -1159,6 +1166,8 @@ impl Lowerer {
     /// Recursively write a nested struct initializer list to a byte buffer.
     /// Write an IrConst value to a byte buffer at the given offset using the field's IR type.
     fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
+        // Coerce integer constants to float if writing to a float field
+        let val = &self.coerce_const_to_type(val.clone(), ty);
         let int_val = match val {
             IrConst::I8(v) => *v as i64,
             IrConst::I16(v) => *v as i64,
@@ -1440,19 +1449,28 @@ impl Lowerer {
 
     /// Collect enum constants from a type specifier.
     pub(super) fn collect_enum_constants(&mut self, ts: &TypeSpecifier) {
-        if let TypeSpecifier::Enum(_, Some(variants)) = ts {
-            let mut next_val: i64 = 0;
-            for variant in variants {
-                if let Some(ref expr) = variant.value {
-                    if let Some(val) = self.eval_const_expr(expr) {
-                        if let Some(v) = self.const_to_i64(&val) {
-                            next_val = v;
+        match ts {
+            TypeSpecifier::Enum(_, Some(variants)) => {
+                let mut next_val: i64 = 0;
+                for variant in variants {
+                    if let Some(ref expr) = variant.value {
+                        if let Some(val) = self.eval_const_expr(expr) {
+                            if let Some(v) = self.const_to_i64(&val) {
+                                next_val = v;
+                            }
                         }
                     }
+                    self.enum_constants.insert(variant.name.clone(), next_val);
+                    next_val += 1;
                 }
-                self.enum_constants.insert(variant.name.clone(), next_val);
-                next_val += 1;
             }
+            // Recurse into struct/union fields to find enum definitions within them
+            TypeSpecifier::Struct(_, Some(fields)) | TypeSpecifier::Union(_, Some(fields)) => {
+                for field in fields {
+                    self.collect_enum_constants(&field.type_spec);
+                }
+            }
+            _ => {}
         }
     }
 
