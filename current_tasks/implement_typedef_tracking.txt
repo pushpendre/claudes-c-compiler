@@ -1,0 +1,12 @@
+Implement proper typedef name tracking in the parser.
+
+Currently the parser has a `typedefs` vector and checks it in `is_type_specifier`,
+but it never actually records typedef names when parsing typedef declarations.
+
+This causes cast expressions like `(test_t)x` to fail when `test_t` is a typedef'd type.
+
+Tasks:
+- Track whether parse_type_specifier encountered a `typedef` keyword
+- When parsing declarations with typedef, add declared names to self.typedefs
+- This will fix cast expressions using typedef names
+- Also fix local typedef declarations in function bodies
