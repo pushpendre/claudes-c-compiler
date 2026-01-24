@@ -1,0 +1,11 @@
+Fix expr_ctype integer promotion for unary ops in complex arithmetic lowering
+
+Bug: expr_ctype for UnaryOp::Neg/Plus returns the inner expression's CType
+without applying integer promotion. This causes -(unsigned short) to be
+reported as CType::UShort instead of CType::Int when used in complex
+arithmetic, leading to wrong unsigned-to-float casts on ARM and RISC-V.
+
+Example: _Complex float result = -(p1) - -(p2);  // p2 is unsigned short
+Produces -18446744073709551616.0 instead of correct value on ARM/RISC-V.
+
+Fix: Apply integer promotion in expr_ctype for Neg/Plus/BitNot unary ops.
