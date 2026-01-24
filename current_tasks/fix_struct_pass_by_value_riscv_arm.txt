@@ -1,0 +1,16 @@
+Fix struct pass-by-value for RISC-V and ARM backends.
+
+Problem: The IR always represents struct function arguments as IrType::Ptr (pointer to
+struct data). On x86-64, the backend correctly handles this because the callee memcpy's
+from the pointer. However, on RISC-V and ARM, the calling convention requires small
+structs (≤ 2*XLEN = 16 bytes) to be passed by VALUE - the struct content flattened into
+registers or placed on the stack directly.
+
+Currently, the RISC-V/ARM caller passes the POINTER (alloca address) in registers instead
+of loading the struct content and passing the VALUE. This causes:
+1. va_arg on struct types reads the pointer value instead of struct data → segfaults
+2. Non-variadic callee stores the pointer in the alloca instead of the struct value
+
+Fix: Add struct_arg_sizes metadata to Call/CallIndirect IR instructions. In RISC-V/ARM
+emit_call, when struct_arg_sizes[i] = Some(size), load the struct value from the pointer
+and pass it by value. Also fix the predefined 'bool' macro issue.
