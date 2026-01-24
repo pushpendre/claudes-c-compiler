@@ -2586,8 +2586,6 @@ impl Lowerer {
             } else {
                 self.operand_to_value(result)
             };
-
-            // Store result back into LHS using LHS type size
             let comp_size = Self::complex_component_size(&lhs_ct);
             self.emit(Instruction::Memcpy {
                 dest: lhs_ptr,

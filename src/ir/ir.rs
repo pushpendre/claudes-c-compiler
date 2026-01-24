@@ -498,7 +498,13 @@ impl IrConst {
             }
             _ => {
                 let le_bytes = self.to_i64().unwrap_or(0).to_le_bytes();
-                out.extend_from_slice(&le_bytes[..size]);
+                if size <= 8 {
+                    out.extend_from_slice(&le_bytes[..size]);
+                } else {
+                    // For sizes > 8 (e.g. __int128), zero-extend
+                    out.extend_from_slice(&le_bytes);
+                    out.extend_from_slice(&vec![0u8; size - 8]);
+                }
             }
         }
     }

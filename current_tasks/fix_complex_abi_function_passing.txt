@@ -1,0 +1,16 @@
+Fix complex type ABI for function calls and returns
+
+Problem:
+- _Complex double is passed as a pointer (in integer register) instead of as
+  two doubles in XMM registers (x86-64 SysV ABI)
+- _Complex double return uses sret instead of xmm0+xmm1
+- Similar issues on ARM64 (should use two FP registers) and RISC-V (fa0+fa1)
+- This causes cabs(), creal(), etc. to receive garbage when called with complex args
+
+Fix approach:
+- At function call sites, decompose complex arguments into real+imag parts
+- Pass them as separate float values with correct ABI register assignment
+- For function definitions, receive complex params as separate float values
+- Fix return convention for _Complex double (xmm0+xmm1 on x86, d0+d1 on ARM, fa0+fa1 on RISC-V)
+- _Complex float (8 bytes) can stay as single register on x86 (already works)
+- _Complex long double stays as memory/sret (already correct)

@@ -484,27 +484,86 @@ impl Preprocessor {
             if Self::has_unbalanced_parens(line) {
                 *pending_line = line.to_string();
                 *pending_newlines = 1;
+            } else if self.ends_with_funclike_macro(line) {
+                // Line ends with a function-like macro name without '(' on same line.
+                // Per C standard, whitespace (including newlines) between macro name
+                // and '(' is allowed, so accumulate to check next line for '('.
+                *pending_line = line.to_string();
+                *pending_newlines = 1;
             } else {
                 let expanded = self.macros.expand_line(line);
                 output.push_str(&expanded);
                 output.push('\n');
             }
         } else {
+            // Check if this continuation line starts with '(' (after whitespace)
+            // when we were accumulating for a trailing function-like macro name.
+            let needs_more = Self::has_unbalanced_parens(pending_line);
             pending_line.push('\n');
             pending_line.push_str(line);
             *pending_newlines += 1;
 
-            if !Self::has_unbalanced_parens(pending_line) || *pending_newlines > 20 {
-                // Parens balanced or safety limit reached - expand accumulated lines
-                let expanded = self.macros.expand_line(pending_line);
-                output.push_str(&expanded);
-                output.push('\n');
-                for _ in 1..*pending_newlines {
+            if needs_more {
+                // Was accumulating for unbalanced parens
+                if !Self::has_unbalanced_parens(pending_line) || *pending_newlines > 20 {
+                    let expanded = self.macros.expand_line(pending_line);
+                    output.push_str(&expanded);
                     output.push('\n');
+                    for _ in 1..*pending_newlines {
+                        output.push('\n');
+                    }
+                    pending_line.clear();
+                    *pending_newlines = 0;
                 }
-                pending_line.clear();
-                *pending_newlines = 0;
+            } else {
+                // Was accumulating for trailing function-like macro name.
+                // Now we have the next line joined. Check if parens are balanced.
+                if Self::has_unbalanced_parens(pending_line) && *pending_newlines <= 20 {
+                    // The joined text has unbalanced parens (macro args span more lines)
+                    // Keep accumulating.
+                } else {
+                    // Parens balanced or next line didn't start with '(' - expand now.
+                    let expanded = self.macros.expand_line(pending_line);
+                    output.push_str(&expanded);
+                    output.push('\n');
+                    for _ in 1..*pending_newlines {
+                        output.push('\n');
+                    }
+                    pending_line.clear();
+                    *pending_newlines = 0;
+                }
             }
+        }
+    }
+
+    /// Check if a line ends with an identifier that is a defined function-like macro.
+    /// This is used to detect cases where the macro arguments '(' might be on the next line.
+    fn ends_with_funclike_macro(&self, line: &str) -> bool {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            return false;
+        }
+        // Extract the last identifier from the line
+        let bytes = trimmed.as_bytes();
+        let end = bytes.len();
+        // Walk backwards to find end of last identifier
+        if !is_ident_cont(bytes[end - 1] as char) {
+            return false;
+        }
+        let mut start = end - 1;
+        while start > 0 && is_ident_cont(bytes[start - 1] as char) {
+            start -= 1;
+        }
+        // Check that the identifier starts with a valid start character
+        if !is_ident_start(bytes[start] as char) {
+            return false;
+        }
+        let ident = &trimmed[start..end];
+        // Check if this identifier is a defined function-like macro
+        if let Some(mac) = self.macros.get(ident) {
+            mac.is_function_like
+        } else {
+            false
         }
     }
 
