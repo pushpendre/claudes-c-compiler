@@ -1,9 +1,0 @@
-Task: Commit 7 - Sema populates TypeContext
-
-Implement the seventh step of the lowerer decomposition plan:
-- Have SemanticAnalyzer build a TypeContext during its AST walk
-- Extend sema to register struct/union layouts and populate ctype_cache
-- Change SemaResult to contain a TypeContext
-- Add debug-mode assertions that sema's TypeContext matches lowerer's
-
-Status: IN PROGRESS

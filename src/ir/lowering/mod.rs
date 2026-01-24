@@ -20,3 +20,5 @@ mod pointer_analysis;
 mod ref_collection;
 
 pub use lowering::Lowerer;
+pub use lowering::TypeContext;
+pub use lowering::FunctionTypedefInfo;

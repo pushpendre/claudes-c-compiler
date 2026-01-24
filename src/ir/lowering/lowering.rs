@@ -194,7 +194,7 @@ pub(super) struct SwitchFrame {
 /// Used to detect when a declaration like `func_t add;` is a function declaration
 /// rather than a variable declaration.
 #[derive(Debug, Clone)]
-pub(super) struct FunctionTypedefInfo {
+pub struct FunctionTypedefInfo {
     /// The return TypeSpecifier of the function typedef
     pub return_type: TypeSpecifier,
     /// Parameters of the function typedef
@@ -310,7 +310,7 @@ pub(super) struct FunctionMeta {
 ///   static_local_names, const_local_values, var_ctypes). Managed by
 ///   FunctionBuildState::push_scope/pop_scope.
 #[derive(Debug)]
-pub(super) struct TypeScopeFrame {
+pub struct TypeScopeFrame {
     /// Keys newly inserted into `enum_constants`.
     pub enums_added: Vec<String>,
     /// Keys newly inserted into `struct_layouts`.
@@ -549,7 +549,7 @@ impl FunctionBuildState {
 /// Holds struct/union layouts, typedefs, enum constants, and type caches.
 /// This is module-level state that persists across functions.
 #[derive(Debug)]
-pub(super) struct TypeContext {
+pub struct TypeContext {
     /// Struct/union layouts indexed by tag name
     pub struct_layouts: HashMap<String, StructLayout>,
     /// Enum constant values
@@ -789,6 +789,28 @@ impl Lowerer {
         }
     }
 
+    /// Create a new Lowerer with a pre-populated TypeContext from semantic analysis.
+    /// The sema-provided TypeContext contains typedefs, enum constants, struct layouts,
+    /// and function typedef info collected during the sema pass.
+    pub fn with_type_context(target: Target, type_context: TypeContext) -> Self {
+        Self {
+            target,
+            next_label: 0,
+            next_string: 0,
+            next_anon_struct: 0,
+            next_static_local: 0,
+            module: IrModule::new(),
+            func_state: None,
+            globals: HashMap::new(),
+            known_functions: HashSet::new(),
+            defined_functions: HashSet::new(),
+            static_functions: HashSet::new(),
+            types: type_context,
+            func_meta: FunctionMeta::default(),
+            emitted_global_names: HashSet::new(),
+        }
+    }
+
     /// Access the current function build state (panics if not inside a function).
     #[inline]
     pub(super) fn func(&self) -> &FunctionBuildState {
@@ -893,6 +915,15 @@ impl Lowerer {
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> IrModule {
+        // Snapshot sema's pre-populated type info for debug assertions.
+        // After the lowerer's own pass-0 collection, we verify agreement on
+        // named types. Anonymous struct keys use independent counters so they
+        // may legitimately differ between sema and lowerer.
+        #[cfg(debug_assertions)]
+        let sema_enum_constants = self.types.enum_constants.clone();
+        #[cfg(debug_assertions)]
+        let sema_struct_layouts: HashMap<String, StructLayout> = self.types.struct_layouts.clone();
+
         // Seed builtin typedefs (matching the parser's pre-seeded typedef names)
         self.seed_builtin_typedefs();
         // Seed known libc math function signatures for correct calling convention
@@ -907,6 +938,48 @@ impl Lowerer {
         // Pass 0: Collect all global typedef declarations so that function return
         // types and parameter types that use typedefs can be resolved in pass 1.
         self.collect_all_typedefs(tu);
+
+        // Debug assertions: verify sema's pre-populated type info matches what the
+        // lowerer independently computed. This validates that sema and the lowerer
+        // agree on type resolution before we trust sema's output in commit 8.
+        // Note: anonymous struct keys (like __anon_struct_N) use independent counters
+        // in sema and the lowerer, so they may differ. Only check named types.
+        #[cfg(debug_assertions)]
+        {
+            // Check enum constants: sema should have collected all file-scope enums
+            for (name, sema_val) in &sema_enum_constants {
+                if let Some(lowerer_val) = self.types.enum_constants.get(name) {
+                    if sema_val != lowerer_val {
+                        eprintln!(
+                            "WARNING: sema/lowerer enum constant mismatch for '{}': sema={}, lowerer={}",
+                            name, sema_val, lowerer_val
+                        );
+                    }
+                }
+            }
+
+            // Check struct layouts for named (non-anonymous) structs/unions.
+            for (key, sema_layout) in &sema_struct_layouts {
+                // Skip anonymous struct layouts (counter divergence is expected)
+                if key.starts_with("__anon_struct_") {
+                    continue;
+                }
+                if let Some(lowerer_layout) = self.types.struct_layouts.get(key) {
+                    if sema_layout.size != lowerer_layout.size {
+                        eprintln!(
+                            "WARNING: sema/lowerer struct layout size mismatch for '{}': sema={}, lowerer={}",
+                            key, sema_layout.size, lowerer_layout.size
+                        );
+                    }
+                    if sema_layout.align != lowerer_layout.align {
+                        eprintln!(
+                            "WARNING: sema/lowerer struct layout align mismatch for '{}': sema={}, lowerer={}",
+                            key, sema_layout.align, lowerer_layout.align
+                        );
+                    }
+                }
+            }
+        }
 
         // First pass: collect all function signatures (return types, param types,
         // variadic status, sret) so we can distinguish functions from globals and

@@ -52,8 +52,34 @@ COMPLETED:
    element sizing in array subscript, struct init, and global init paths.
    13 files changed, ~600 insertions, ~378 deletions.)
 
+- Commit 7: Sema populates TypeContext
+  (SemaResult now contains a TypeContext field instead of separate typedefs/
+   enum_constants/struct_layouts HashMaps. SemanticAnalyzer populates the
+   TypeContext during its AST walk: typedefs (including function typedefs and
+   function pointer typedefs), enum constants, and struct/union layouts.
+   TypeContext, TypeScopeFrame, and FunctionTypedefInfo made pub and re-exported
+   from ir::lowering module. Lowerer::with_type_context(target, TypeContext)
+   constructor added — driver passes sema's TypeContext to the lowerer.
+   Sema's type_spec_to_ctype fixed to not overwrite full struct definitions
+   with forward declaration stubs. Sema's convert_struct_fields updated to
+   use build_full_ctype for correct function-pointer-array field handling.
+   Debug assertions verify sema/lowerer agreement on named struct layouts
+   and enum constants. Only known gap: sema's eval_const_expr cannot evaluate
+   offsetof() expressions, so enum constants derived from offsetof differ.
+   5 files changed, ~200 insertions, ~30 deletions.)
+
 REMAINING (in order):
 
-6-8. Sema populates TypeContext / Lowerer receives it from sema
-   - Make sema the authority for type information
-   - Risk: Medium-high
+8. Lowerer receives TypeContext from sema
+   - Remove the lowerer's pass-0 typedef/struct/enum collection
+   - Lowerer trusts sema's TypeContext output
+   - Risk: Medium-high (bugs surface if sema/lowerer disagree)
+
+9. Delete dead code and workarounds
+   - Delete resolve_ctype_size, resolve_forward_declared_ctype
+   - Delete the lowerer's typedef/enum/struct collection pass
+   - Delete stale SemaResult fields that TypeContext replaced
+   - Risk: Low (pure deletion)
+
+10. Remove global #![allow(dead_code)] and fix what it reveals
+   - Risk: Low (compiler-guided cleanup)

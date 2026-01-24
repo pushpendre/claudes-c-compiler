@@ -15,6 +15,7 @@ use crate::common::types::{CType, FunctionType, StructLayout};
 use crate::common::source::Span;
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins;
+use crate::ir::lowering::{TypeContext, FunctionTypedefInfo};
 
 use std::collections::HashMap;
 
@@ -29,18 +30,25 @@ pub struct FunctionInfo {
 }
 
 /// Results of semantic analysis, used by the lowering phase.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SemaResult {
     /// Function signatures discovered during analysis.
     pub functions: HashMap<String, FunctionInfo>,
-    /// Typedef mappings (name -> resolved CType).
-    pub typedefs: HashMap<String, CType>,
-    /// Enum constant values (name -> integer value).
-    pub enum_constants: HashMap<String, i64>,
-    /// Struct/union layouts keyed by layout key (e.g., "struct.Foo", "union.Bar").
-    pub struct_layouts: HashMap<String, StructLayout>,
+    /// Type context populated by sema: typedefs, enum constants, struct layouts,
+    /// function typedefs, function pointer typedefs.
+    pub type_context: TypeContext,
     /// Warnings collected during analysis (non-fatal).
     pub warnings: Vec<String>,
+}
+
+impl Default for SemaResult {
+    fn default() -> Self {
+        Self {
+            functions: HashMap::new(),
+            type_context: TypeContext::new(),
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// Semantic analyzer that builds a scoped symbol table and collects type info.
@@ -172,6 +180,75 @@ impl SemanticAnalyzer {
 
         let base_type = self.type_spec_to_ctype(&decl.type_spec);
 
+        // Handle typedef declarations: populate TypeContext with typedef info
+        if decl.is_typedef {
+            for declarator in &decl.declarators {
+                if declarator.name.is_empty() {
+                    continue;
+                }
+                // Check for function typedef (e.g., typedef int func_t(int, int);)
+                let has_func_derived = declarator.derived.iter().any(|d|
+                    matches!(d, DerivedDeclarator::Function(_, _)));
+                let has_fptr_derived = declarator.derived.iter().any(|d|
+                    matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
+
+                if has_func_derived && !has_fptr_derived {
+                    // Function typedef like: typedef int func_t(int x);
+                    if let Some(DerivedDeclarator::Function(params, variadic)) =
+                        declarator.derived.iter().find(|d| matches!(d, DerivedDeclarator::Function(_, _)))
+                    {
+                        let ptr_count = declarator.derived.iter()
+                            .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+                            .count();
+                        let mut return_type = decl.type_spec.clone();
+                        for _ in 0..ptr_count {
+                            return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                        }
+                        self.result.type_context.function_typedefs.insert(
+                            declarator.name.clone(),
+                            FunctionTypedefInfo {
+                                return_type,
+                                params: params.clone(),
+                                variadic: *variadic,
+                            },
+                        );
+                    }
+                }
+
+                // Function pointer typedef (e.g., typedef void *(*lua_Alloc)(void *, ...))
+                if has_fptr_derived {
+                    if let Some(fptr_derived) = declarator.derived.iter().find(|d|
+                        matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
+                    {
+                        if let DerivedDeclarator::FunctionPointer(params, variadic) = fptr_derived {
+                            let ptr_count = declarator.derived.iter()
+                                .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+                                .count();
+                            let ret_ptr_count = if ptr_count > 0 { ptr_count - 1 } else { 0 };
+                            let mut return_type = decl.type_spec.clone();
+                            for _ in 0..ret_ptr_count {
+                                return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                            }
+                            self.result.type_context.func_ptr_typedefs.insert(declarator.name.clone());
+                            self.result.type_context.func_ptr_typedef_info.insert(
+                                declarator.name.clone(),
+                                FunctionTypedefInfo {
+                                    return_type,
+                                    params: params.clone(),
+                                    variadic: *variadic,
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // Store resolved CType for the typedef
+                let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                self.result.type_context.typedefs.insert(declarator.name.clone(), resolved_ctype);
+            }
+            return; // typedefs don't declare variables
+        }
+
         for init_decl in &decl.declarators {
             let full_type = self.apply_derived_declarators(&base_type, &init_decl.derived);
             let storage = if decl.is_extern {
@@ -221,7 +298,7 @@ impl SemanticAnalyzer {
                     self.enum_counter = val;
                 }
             }
-            self.result.enum_constants.insert(variant.name.clone(), self.enum_counter);
+            self.result.type_context.enum_constants.insert(variant.name.clone(), self.enum_counter);
             self.symbol_table.declare(Symbol {
                 name: variant.name.clone(),
                 ty: CType::Int,
@@ -335,7 +412,7 @@ impl SemanticAnalyzer {
             Expr::Identifier(name, _span) => {
                 // Check if it's a known symbol
                 if self.symbol_table.lookup(name).is_none()
-                    && !self.result.enum_constants.contains_key(name)
+                    && !self.result.type_context.enum_constants.contains_key(name)
                     && !builtins::is_builtin(name)
                     && !self.result.functions.contains_key(name)
                     && name != "__func__" && name != "__FUNCTION__"
@@ -528,27 +605,31 @@ impl SemanticAnalyzer {
                     self.anon_struct_counter += 1;
                     format!("__anon_struct_{}", id)
                 };
-                let mut layout = if struct_fields.is_empty() {
-                    // Forward declaration or empty struct
-                    StructLayout {
+                if !struct_fields.is_empty() {
+                    // Full definition: compute and register the layout
+                    let mut layout = StructLayout::for_struct_with_packing(
+                        &struct_fields, max_field_align, &self.result.type_context.struct_layouts
+                    );
+                    // Apply __attribute__((aligned(N))) min alignment
+                    if let Some(a) = struct_aligned {
+                        if *a > layout.align {
+                            layout.align = *a;
+                            let mask = layout.align - 1;
+                            layout.size = (layout.size + mask) & !mask;
+                        }
+                    }
+                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
+                } else if !self.result.type_context.struct_layouts.contains_key(&key) {
+                    // Forward declaration: only register if no layout exists yet
+                    // (don't overwrite a full definition with an empty forward decl)
+                    let layout = StructLayout {
                         fields: Vec::new(),
                         size: 0,
                         align: 1,
                         is_union: false,
-                    }
-                } else {
-                    StructLayout::for_struct_with_packing(&struct_fields, max_field_align, &self.result.struct_layouts)
-                };
-                // Apply __attribute__((aligned(N))) min alignment
-                if let Some(a) = struct_aligned {
-                    if *a > layout.align {
-                        layout.align = *a;
-                        // Re-pad size to new alignment
-                        let mask = layout.align - 1;
-                        layout.size = (layout.size + mask) & !mask;
-                    }
+                    };
+                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
                 }
-                self.result.struct_layouts.insert(key.clone(), layout);
                 CType::Struct(key)
             }
             TypeSpecifier::Union(name, fields, is_packed, pragma_pack_align, struct_aligned) => {
@@ -560,37 +641,39 @@ impl SemanticAnalyzer {
                     self.anon_struct_counter += 1;
                     format!("__anon_struct_{}", id)
                 };
-                let mut layout = if union_fields.is_empty() {
-                    // Forward declaration or empty union
-                    StructLayout {
+                if !union_fields.is_empty() {
+                    // Full definition: compute and register the layout
+                    let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
+                    // For packed unions, cap alignment
+                    if *is_packed {
+                        layout.align = 1;
+                        layout.size = layout.fields.iter().map(|f| f.ty.size_ctx(&self.result.type_context.struct_layouts)).max().unwrap_or(0);
+                    } else if let Some(pack) = pragma_pack_align {
+                        if *pack < layout.align {
+                            layout.align = *pack;
+                            let mask = layout.align - 1;
+                            layout.size = (layout.size + mask) & !mask;
+                        }
+                    }
+                    // Apply __attribute__((aligned(N))) min alignment
+                    if let Some(a) = struct_aligned {
+                        if *a > layout.align {
+                            layout.align = *a;
+                            let mask = layout.align - 1;
+                            layout.size = (layout.size + mask) & !mask;
+                        }
+                    }
+                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
+                } else if !self.result.type_context.struct_layouts.contains_key(&key) {
+                    // Forward declaration: only register if no layout exists yet
+                    let layout = StructLayout {
                         fields: Vec::new(),
                         size: 0,
                         align: 1,
                         is_union: true,
-                    }
-                } else {
-                    StructLayout::for_union(&union_fields, &self.result.struct_layouts)
-                };
-                // For packed unions, cap alignment
-                if *is_packed {
-                    layout.align = 1;
-                    layout.size = layout.fields.iter().map(|f| f.ty.size_ctx(&self.result.struct_layouts)).max().unwrap_or(0);
-                } else if let Some(pack) = pragma_pack_align {
-                    if *pack < layout.align {
-                        layout.align = *pack;
-                        let mask = layout.align - 1;
-                        layout.size = (layout.size + mask) & !mask;
-                    }
+                    };
+                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
                 }
-                // Apply __attribute__((aligned(N))) min alignment
-                if let Some(a) = struct_aligned {
-                    if *a > layout.align {
-                        layout.align = *a;
-                        let mask = layout.align - 1;
-                        layout.size = (layout.size + mask) & !mask;
-                    }
-                }
-                self.result.struct_layouts.insert(key.clone(), layout);
                 CType::Union(key)
             }
             TypeSpecifier::Enum(name, variants) => {
@@ -604,7 +687,7 @@ impl SemanticAnalyzer {
             }
             TypeSpecifier::TypedefName(name) => {
                 // Look up the typedef
-                if let Some(resolved) = self.result.typedefs.get(name) {
+                if let Some(resolved) = self.result.type_context.typedefs.get(name) {
                     resolved.clone()
                 } else {
                     // Unknown typedef - treat as int (common fallback)
@@ -632,9 +715,9 @@ impl SemanticAnalyzer {
             let ty = if f.derived.is_empty() {
                 self.type_spec_to_ctype(&f.type_spec)
             } else {
-                // Complex declarator (function pointer, etc.): apply derived
-                let base = self.type_spec_to_ctype(&f.type_spec);
-                self.apply_derived_declarators(&base, &f.derived)
+                // Complex declarator (function pointer, array, etc.):
+                // Use build_full_ctype for correct inside-out type construction
+                self.build_full_ctype(&f.type_spec, &f.derived)
             };
             let name = f.name.clone().unwrap_or_default();
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
@@ -701,6 +784,115 @@ impl SemanticAnalyzer {
         ty
     }
 
+    /// Build a full CType from a TypeSpecifier + derived declarators.
+    /// This mirrors the lowerer's build_full_ctype logic for correct function pointer
+    /// type construction (where the declarator ordering is inside-out).
+    fn build_full_ctype(&mut self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
+        let base = self.type_spec_to_ctype(type_spec);
+
+        let fptr_idx = Self::find_function_pointer_core(derived);
+
+        if let Some(fp_start) = fptr_idx {
+            let mut result = base;
+
+            // Process from fp_start to end (function pointer core and inner wrappers)
+            let mut i = fp_start;
+            while i < derived.len() {
+                match &derived[i] {
+                    DerivedDeclarator::Pointer => {
+                        if i + 1 < derived.len() && matches!(&derived[i + 1],
+                            DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _))
+                        {
+                            let (params, variadic) = match &derived[i + 1] {
+                                DerivedDeclarator::FunctionPointer(p, v) | DerivedDeclarator::Function(p, v) => (p, *v),
+                                _ => unreachable!(),
+                            };
+                            let param_types = self.convert_param_decls_to_ctypes(params);
+                            let func_type = CType::Function(Box::new(FunctionType {
+                                return_type: result,
+                                params: param_types,
+                                variadic,
+                            }));
+                            result = CType::Pointer(Box::new(func_type));
+                            i += 2;
+                        } else {
+                            result = CType::Pointer(Box::new(result));
+                            i += 1;
+                        }
+                    }
+                    DerivedDeclarator::FunctionPointer(params, variadic) => {
+                        let param_types = self.convert_param_decls_to_ctypes(params);
+                        let func_type = CType::Function(Box::new(FunctionType {
+                            return_type: result,
+                            params: param_types,
+                            variadic: *variadic,
+                        }));
+                        result = CType::Pointer(Box::new(func_type));
+                        i += 1;
+                    }
+                    DerivedDeclarator::Function(params, variadic) => {
+                        let param_types = self.convert_param_decls_to_ctypes(params);
+                        let func_type = CType::Function(Box::new(FunctionType {
+                            return_type: result,
+                            params: param_types,
+                            variadic: *variadic,
+                        }));
+                        result = func_type;
+                        i += 1;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+
+            // Apply outer wrappers (prefix before fp_start) in reverse order
+            let prefix = &derived[..fp_start];
+            for d in prefix.iter().rev() {
+                match d {
+                    DerivedDeclarator::Array(size_expr) => {
+                        let size = size_expr.as_ref()
+                            .and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
+                        result = CType::Array(Box::new(result), size);
+                    }
+                    DerivedDeclarator::Pointer => {
+                        result = CType::Pointer(Box::new(result));
+                    }
+                    _ => {}
+                }
+            }
+
+            result
+        } else {
+            // No function pointer - use apply_derived_declarators
+            self.apply_derived_declarators(&base, derived)
+        }
+    }
+
+    /// Find the start index of the function pointer core in a derived declarator list.
+    fn find_function_pointer_core(derived: &[DerivedDeclarator]) -> Option<usize> {
+        for i in 0..derived.len() {
+            if matches!(&derived[i], DerivedDeclarator::Pointer) {
+                if i + 1 < derived.len() && matches!(&derived[i + 1], DerivedDeclarator::FunctionPointer(_, _)) {
+                    return Some(i);
+                }
+            }
+            if matches!(&derived[i], DerivedDeclarator::FunctionPointer(_, _)) {
+                return Some(i);
+            }
+            if matches!(&derived[i], DerivedDeclarator::Function(_, _)) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Convert ParamDecl list to CType list for function types.
+    fn convert_param_decls_to_ctypes(&mut self, params: &[ParamDecl]) -> Vec<(CType, Option<String>)> {
+        params.iter().map(|p| {
+            let ty = self.type_spec_to_ctype(&p.type_spec);
+            (ty, p.name.clone())
+        }).collect()
+    }
+
     // === Constant expression evaluation ===
 
     /// Try to evaluate a constant expression at compile time.
@@ -711,7 +903,7 @@ impl SemanticAnalyzer {
             Expr::UIntLiteral(val, _) | Expr::ULongLiteral(val, _) => Some(*val as i64),
             Expr::CharLiteral(ch, _) => Some(*ch as i64),
             Expr::Identifier(name, _) => {
-                self.result.enum_constants.get(name).copied()
+                self.result.type_context.enum_constants.get(name).copied()
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;

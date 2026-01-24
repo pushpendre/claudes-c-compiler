@@ -313,9 +313,11 @@ impl Driver {
             }
             return Err(format!("{} error(s) during semantic analysis", errors.len()));
         }
+        let sema_result = sema.into_result();
 
         // Lower to IR (target-aware for ABI-specific lowering decisions)
-        let lowerer = Lowerer::new(self.target);
+        // Pass sema's TypeContext to the lowerer so it has pre-populated type info.
+        let lowerer = Lowerer::with_type_context(self.target, sema_result.type_context);
         let mut module = lowerer.lower(&ast);
 
         if self.verbose {
