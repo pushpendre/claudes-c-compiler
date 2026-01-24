@@ -1,0 +1,20 @@
+Fix pp-number suffix detection preventing macro expansion after identifiers
+
+Problem: In expand_text() in macro_defs.rs, the pp-number suffix detection
+incorrectly treats identifiers following expressions like `size-C` as
+pp-number suffixes. The check looks at chars[start-1] (which is `-`) and
+chars[start-2] (which is `e` from `size`) and incorrectly concludes this
+is an exponent pattern like `1.5e-3`.
+
+This causes macros like `C` not to be expanded when they appear after
+`identifier-MACRO` where the identifier ends in `e` or `E` or `p` or `P`.
+
+Real-world impact: Breaks zlib compilation because MIN_LOOKAHEAD is not
+expanded inside MAX_DIST(s) = ((s)->w_size-MIN_LOOKAHEAD). The `e` at the
+end of `w_size` causes the `-` to be misread as an exponent sign.
+
+Fix: The pp-number suffix detection should verify that the context before
+the `e`/`E`/`p`/`P` character is actually a numeric literal, not just any
+identifier character.
+
+Status: In progress
