@@ -1,0 +1,11 @@
+Task: Fix global struct pointer array flat-init miscompilation
+Status: IN PROGRESS
+
+Problem:
+Global struct initialization with pointer arrays (e.g., `char *s[2] = {"abc", "def"}`)
+was miscompiled. String literal values were stored inline as bytes instead of as pointers
+because the flat-init grouping logic unconditionally excluded string literals from flat-init
+for ALL array types, when it should only exclude them for char arrays.
+
+File: src/ir/lowering/global_init_compound.rs
+Test case: compiler_suite_0030_0067 (segfault due to this bug)
