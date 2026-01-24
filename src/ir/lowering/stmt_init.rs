@@ -219,6 +219,17 @@ impl Lowerer {
                 param_struct_sizes: Vec::new(),
             }
         };
+        // Don't overwrite an existing, more complete sig from the first pass
+        // (e.g., a K&R definition) with a less complete block-scope declaration
+        // that has empty/unspecified parameters like `int *f();`.
+        if let Some(existing) = self.func_meta.sigs.get(name) {
+            if sig.param_types.is_empty() && !existing.param_types.is_empty() {
+                return;
+            }
+            if sig.param_struct_sizes.is_empty() && !existing.param_struct_sizes.is_empty() {
+                return;
+            }
+        }
         self.func_meta.sigs.insert(name.to_string(), sig);
     }
 
