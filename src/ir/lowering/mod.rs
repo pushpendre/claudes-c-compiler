@@ -8,5 +8,7 @@ pub mod complex;
 pub mod global_init;
 pub mod global_init_bytes;
 pub mod global_init_compound;
+mod pointer_analysis;
+mod ref_collection;
 
 pub use lowering::Lowerer;
