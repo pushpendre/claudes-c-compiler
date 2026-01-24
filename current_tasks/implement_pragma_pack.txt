@@ -1,0 +1,16 @@
+Task: Implement #pragma pack support
+
+Goal: Support #pragma pack(N), pack(push,N), pack(pop), pack() directives
+to control struct field alignment.
+
+Currently #pragma pack is completely ignored by the preprocessor, so all
+struct layouts use natural alignment. This causes 75%+ failure rate on
+pragma-pack related tests.
+
+Plan:
+1. Add PragmaPack token variant to the lexer
+2. Have preprocessor emit synthetic __ccc_pragma_pack directives in output
+3. Parser maintains a pragma pack stack and applies max_field_align to structs
+4. Pass max_field_align through AST to sema and lowering
+
+Status: in progress

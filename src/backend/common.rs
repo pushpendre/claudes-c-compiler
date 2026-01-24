@@ -31,8 +31,25 @@ pub struct LinkerConfig {
 }
 
 /// Assemble text to an object file using an external toolchain.
+///
+/// Uses a unique temporary file for the assembly source to avoid race conditions
+/// when multiple compiler instances target the same output path in parallel builds.
 pub fn assemble(config: &AssemblerConfig, asm_text: &str, output_path: &str) -> Result<(), String> {
-    let asm_path = format!("{}.s", output_path);
+    // Use a unique temp file to avoid races in parallel builds.
+    // Include PID and a counter to guarantee uniqueness even within the same process.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ASM_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = ASM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+
+    let asm_path = if std::env::var("CCC_KEEP_ASM").is_ok() {
+        // When keeping assembly, use the predictable name for debugging
+        format!("{}.s", output_path)
+    } else {
+        // Use a unique name to avoid parallel build races
+        format!("{}.{}.{}.s", output_path, pid, unique_id)
+    };
+
     std::fs::write(&asm_path, asm_text)
         .map_err(|e| format!("Failed to write assembly: {}", e))?;
 

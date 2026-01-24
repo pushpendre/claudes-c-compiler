@@ -92,32 +92,38 @@ impl MacroTable {
                 let ident: String = chars[start..i].iter().collect();
 
                 // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
-                // In C, pp-numbers include sequences like digit followed by identifier chars.
-                // If preceded by a digit or dot-digit, this is a pp-number suffix, not a macro.
-                // Note: a dot only starts a pp-number context if it follows a digit (e.g., 1.0f),
-                // NOT when it's a struct member access operator (e.g., expr.M(x)).
-                let is_ppnumber_suffix = if start > 0 {
-                    let prev = chars[start - 1];
-                    if prev.is_ascii_digit() {
-                        true
-                    } else if prev == '.' && start >= 2 && chars[start - 2].is_ascii_digit() {
-                        // dot-then-identifier is pp-number only if there's a digit before the dot
-                        // (e.g., 1.0f), NOT for struct member access (e.g., expr.field)
-                        true
-                    } else if (prev == '+' || prev == '-') && start >= 2 {
-                        // Handle hex float exponent (0x1p+2, 1.5e-3) where 'e'/'p' precedes sign.
-                        // But ONLY when the e/E/p/P is preceded by a digit or dot, confirming
-                        // this is actually a numeric literal and not an identifier like "size-C"
-                        // where the 'e' at the end of "size" would falsely match.
-                        let exp_char = chars[start - 2];
-                        (exp_char == 'e' || exp_char == 'E' || exp_char == 'p' || exp_char == 'P')
-                            && start >= 3
-                            && (chars[start - 3].is_ascii_digit() || chars[start - 3] == '.')
-                    } else {
+                // A pp-number is: digit (digit|letter|.|e[+-]|p[+-])*
+                // We check the last characters in 'result' (the actual output so far) rather than
+                // chars[start-1] (the original input), because macro expansion may have changed
+                // the preceding context. For example, in `FOO(1).BAR(2)`, after FOO(1) expands to
+                // `1 `, the `.` that follows should not make BAR a pp-number suffix.
+                //
+                // We must be careful: "base+GETARG" should NOT treat GETARG as pp-number suffix
+                // even though 'base' ends in 'e' and '+' follows (looks like an exponent but isn't).
+                // We verify the exponent 'e'/'p' is itself preceded by a hex digit.
+                let is_ppnumber_suffix = {
+                    let result_bytes = result.as_bytes();
+                    let rlen = result_bytes.len();
+                    if rlen == 0 {
                         false
+                    } else {
+                        let prev = result_bytes[rlen - 1];
+                        if prev.is_ascii_digit() {
+                            // Directly after a digit: e.g., "1f", "0x1p"
+                            true
+                        } else if prev == b'.' && rlen >= 2 && result_bytes[rlen - 2].is_ascii_digit() {
+                            // After digit-dot: e.g., "1.f", "3.14e"
+                            true
+                        } else if (prev == b'+' || prev == b'-') && rlen >= 3
+                            && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P')
+                            && result_bytes[rlen - 3].is_ascii_hexdigit() {
+                            // After exponent sign where the e/p is preceded by a hex digit:
+                            // e.g., "1e+f" (valid pp-number), but NOT "base+X" (identifier + operator)
+                            true
+                        } else {
+                            false
+                        }
                     }
-                } else {
-                    false
                 };
                 if is_ppnumber_suffix {
                     result.push_str(&ident);
