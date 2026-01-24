@@ -13,14 +13,7 @@ use crate::ir::ir::*;
 /// Run dead code elimination on the entire module.
 /// Returns the number of instructions removed.
 pub fn run(module: &mut IrModule) -> usize {
-    let mut total_removed = 0;
-    for func in &mut module.functions {
-        if func.is_declaration {
-            continue;
-        }
-        total_removed += eliminate_dead_code(func);
-    }
-    total_removed
+    module.for_each_function(eliminate_dead_code)
 }
 
 /// Eliminate dead code in a single function.
@@ -50,14 +43,8 @@ fn eliminate_dead_code_once(func: &mut IrFunction) -> usize {
             if has_side_effects(inst) {
                 return true; // never remove side-effecting instructions
             }
-            match get_dest(inst) {
-                Some(dest) => {
-                    if used_values.contains(&dest.0) {
-                        true // value is used, keep it
-                    } else {
-                        false // dead instruction, remove it
-                    }
-                }
+            match inst.dest() {
+                Some(dest) => used_values.contains(&dest.0),
                 None => true, // no dest means it's side-effecting (already covered above)
             }
         });
@@ -226,37 +213,6 @@ fn has_side_effects(inst: &Instruction) -> bool {
         Instruction::Fence { .. } |
         Instruction::InlineAsm { .. }
     )
-}
-
-/// Get the destination value of an instruction, if any.
-fn get_dest(inst: &Instruction) -> Option<Value> {
-    match inst {
-        Instruction::Alloca { dest, .. } => Some(*dest),
-        Instruction::Load { dest, .. } => Some(*dest),
-        Instruction::BinOp { dest, .. } => Some(*dest),
-        Instruction::UnaryOp { dest, .. } => Some(*dest),
-        Instruction::Cmp { dest, .. } => Some(*dest),
-        Instruction::Call { dest, .. } => *dest,
-        Instruction::CallIndirect { dest, .. } => *dest,
-        Instruction::GetElementPtr { dest, .. } => Some(*dest),
-        Instruction::Cast { dest, .. } => Some(*dest),
-        Instruction::Copy { dest, .. } => Some(*dest),
-        Instruction::GlobalAddr { dest, .. } => Some(*dest),
-        Instruction::VaArg { dest, .. } => Some(*dest),
-        Instruction::Store { .. } => None,
-        Instruction::Memcpy { .. } => None,
-        Instruction::VaStart { .. } => None,
-        Instruction::VaEnd { .. } => None,
-        Instruction::VaCopy { .. } => None,
-        Instruction::AtomicRmw { dest, .. } => Some(*dest),
-        Instruction::AtomicCmpxchg { dest, .. } => Some(*dest),
-        Instruction::AtomicLoad { dest, .. } => Some(*dest),
-        Instruction::AtomicStore { .. } => None,
-        Instruction::Fence { .. } => None,
-        Instruction::Phi { dest, .. } => Some(*dest),
-        Instruction::LabelAddr { dest, .. } => Some(*dest),
-        Instruction::InlineAsm { .. } => None,
-    }
 }
 
 #[cfg(test)]

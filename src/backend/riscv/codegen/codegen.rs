@@ -426,13 +426,16 @@ impl ArchCodegen for RiscvCodegen {
         for (_i, param) in func.params.iter().enumerate() {
             let is_long_double = param.ty.is_long_double();
             let is_float = param.ty.is_float() && !is_long_double;
-            // F128 (long double) uses GP register pairs in RISC-V LP64D ABI
+            // RISC-V LP64D ABI: FP args go to fa0-fa7, then spill to a0-a7 (GPRs),
+            // then to the stack. This matches the caller's classification in emit_call.
+            let is_float_in_gpr = is_float && float_reg_idx >= 8 && int_reg_idx < 8;
             let is_stack_passed = if is_long_double {
                 // F128 needs an aligned pair of GP regs
                 let aligned = (int_reg_idx + 1) & !1; // align to even
                 aligned + 1 >= 8
             } else if is_float {
-                float_reg_idx >= 8
+                // FP args spill to GPRs first, then to stack
+                float_reg_idx >= 8 && int_reg_idx >= 8
             } else {
                 int_reg_idx >= 8
             };
@@ -450,6 +453,9 @@ impl ArchCodegen for RiscvCodegen {
                     // Align to even GP register
                     if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
                     int_reg_idx += 2;
+                } else if is_float_in_gpr {
+                    // FP arg spilled to GPR - consume a GPR slot
+                    int_reg_idx += 1;
                 } else if is_float {
                     float_reg_idx += 1;
                 } else {
@@ -502,6 +508,17 @@ impl ArchCodegen for RiscvCodegen {
                         let store_instr = Self::store_for_type(ty);
                         self.emit_store_to_s0("t0", slot.0, store_instr);
                         stack_param_offset += 8;
+                    } else if is_float_in_gpr {
+                        // FP arg that spilled to a GP register (fa0-fa7 exhausted)
+                        // The value arrives as raw bits in an integer register
+                        if has_f128_reg_params && !func.is_variadic {
+                            let off = f128_save_offset + (int_reg_idx as i64) * 8;
+                            self.state.emit(&format!("    ld t0, {}(sp)", off));
+                        } else {
+                            self.state.emit(&format!("    mv t0, {}", RISCV_ARG_REGS[int_reg_idx]));
+                        }
+                        self.emit_store_to_s0("t0", slot.0, "sd");
+                        int_reg_idx += 1;
                     } else if is_float {
                         // Float params arrive in fa0-fa7 per RISC-V calling convention
                         if has_f128_reg_params && !func.is_variadic {
@@ -549,6 +566,9 @@ impl ArchCodegen for RiscvCodegen {
                     }
                 } else if is_stack_passed {
                     stack_param_offset += 8;
+                } else if is_float_in_gpr {
+                    // FP arg spilled to GPR - consume a GPR slot
+                    int_reg_idx += 1;
                 } else if is_float {
                     float_reg_idx += 1;
                 } else {

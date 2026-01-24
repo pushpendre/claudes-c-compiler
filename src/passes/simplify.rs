@@ -21,14 +21,7 @@ use crate::ir::ir::*;
 /// Run algebraic simplification on the module.
 /// Returns the number of instructions simplified.
 pub fn run(module: &mut IrModule) -> usize {
-    let mut total = 0;
-    for func in &mut module.functions {
-        if func.is_declaration {
-            continue;
-        }
-        total += simplify_function(func);
-    }
-    total
+    module.for_each_function(simplify_function)
 }
 
 fn simplify_function(func: &mut IrFunction) -> usize {
@@ -94,7 +87,7 @@ fn simplify_binop(
                 // x - x => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
         }
@@ -103,7 +96,7 @@ fn simplify_binop(
                 // x * 0 or 0 * x => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
             if rhs_one {
@@ -124,7 +117,7 @@ fn simplify_binop(
                 // x / x => 1 (assuming x != 0, which is UB anyway)
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_one(ty)),
+                    src: Operand::Const(IrConst::one(ty)),
                 });
             }
         }
@@ -133,14 +126,14 @@ fn simplify_binop(
                 // x % 1 => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
             if same_value {
                 // x % x => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
         }
@@ -149,7 +142,7 @@ fn simplify_binop(
                 // x & 0 => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
             if same_value {
@@ -184,7 +177,7 @@ fn simplify_binop(
                 // x ^ x => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
         }
@@ -197,7 +190,7 @@ fn simplify_binop(
                 // 0 << x or 0 >> x => 0
                 return Some(Instruction::Copy {
                     dest,
-                    src: Operand::Const(make_zero(ty)),
+                    src: Operand::Const(IrConst::zero(ty)),
                 });
             }
         }
@@ -208,19 +201,12 @@ fn simplify_binop(
 
 /// Check if an operand is zero.
 fn is_zero(op: &Operand) -> bool {
-    matches!(op, Operand::Const(IrConst::I8(0)) |
-                 Operand::Const(IrConst::I16(0)) |
-                 Operand::Const(IrConst::I32(0)) |
-                 Operand::Const(IrConst::I64(0)) |
-                 Operand::Const(IrConst::Zero))
+    matches!(op, Operand::Const(c) if c.is_zero())
 }
 
 /// Check if an operand is one.
 fn is_one(op: &Operand) -> bool {
-    matches!(op, Operand::Const(IrConst::I8(1)) |
-                 Operand::Const(IrConst::I16(1)) |
-                 Operand::Const(IrConst::I32(1)) |
-                 Operand::Const(IrConst::I64(1)))
+    matches!(op, Operand::Const(c) if c.is_one())
 }
 
 /// Check if two operands refer to the same value.
@@ -228,30 +214,6 @@ fn same_value_operands(lhs: &Operand, rhs: &Operand) -> bool {
     match (lhs, rhs) {
         (Operand::Value(a), Operand::Value(b)) => a.0 == b.0,
         _ => false,
-    }
-}
-
-/// Create a zero constant for the given type.
-fn make_zero(ty: crate::common::types::IrType) -> IrConst {
-    use crate::common::types::IrType;
-    match ty {
-        IrType::I8 => IrConst::I8(0),
-        IrType::I16 => IrConst::I16(0),
-        IrType::I32 => IrConst::I32(0),
-        IrType::I64 | IrType::Ptr => IrConst::I64(0),
-        _ => IrConst::Zero,
-    }
-}
-
-/// Create a one constant for the given type.
-fn make_one(ty: crate::common::types::IrType) -> IrConst {
-    use crate::common::types::IrType;
-    match ty {
-        IrType::I8 => IrConst::I8(1),
-        IrType::I16 => IrConst::I16(1),
-        IrType::I32 => IrConst::I32(1),
-        IrType::I64 | IrType::Ptr => IrConst::I64(1),
-        _ => IrConst::I64(1),
     }
 }
 

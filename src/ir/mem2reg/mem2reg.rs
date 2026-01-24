@@ -524,7 +524,7 @@ fn rename_variables(
     let mut max_value: u32 = 0;
     for block in &func.blocks {
         for inst in &block.instructions {
-            if let Some(dest) = instruction_dest_value(inst) {
+            if let Some(dest) = inst.dest() {
                 max_value = max_value.max(dest.0);
             }
         }
@@ -757,30 +757,6 @@ fn remove_promoted_instructions(func: &mut IrFunction, alloca_to_idx: &HashMap<u
                 _ => true,
             }
         });
-    }
-}
-
-/// Get the destination value of an instruction.
-fn instruction_dest_value(inst: &Instruction) -> Option<Value> {
-    match inst {
-        Instruction::Alloca { dest, .. }
-        | Instruction::Load { dest, .. }
-        | Instruction::BinOp { dest, .. }
-        | Instruction::UnaryOp { dest, .. }
-        | Instruction::Cmp { dest, .. }
-        | Instruction::GetElementPtr { dest, .. }
-        | Instruction::Cast { dest, .. }
-        | Instruction::Copy { dest, .. }
-        | Instruction::GlobalAddr { dest, .. }
-        | Instruction::VaArg { dest, .. }
-        | Instruction::Phi { dest, .. }
-        | Instruction::LabelAddr { dest, .. } => Some(*dest),
-        Instruction::Call { dest, .. }
-        | Instruction::CallIndirect { dest, .. } => *dest,
-        Instruction::AtomicRmw { dest, .. } => Some(*dest),
-        Instruction::AtomicCmpxchg { dest, .. } => Some(*dest),
-        Instruction::AtomicLoad { dest, .. } => Some(*dest),
-        _ => None,
     }
 }
 

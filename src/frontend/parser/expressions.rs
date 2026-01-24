@@ -1,13 +1,14 @@
 // Expression parsing: precedence climbing from comma expression down to primary.
 //
-// The expression parser implements C's operator precedence through recursive
-// descent. Each function handles one precedence level and delegates to the
-// next-tighter level. This is the standard approach for hand-written parsers
-// and avoids the complexity of Pratt parsing while remaining clear.
+// The expression parser implements C's operator precedence through a table-driven
+// approach. Binary operators (logical, bitwise, relational, arithmetic) are handled
+// by a shared `parse_binary_expr` method parameterized on `PrecedenceLevel`, which
+// maps tokens to operators and recurses to the next-tighter level. This eliminates
+// the repetitive per-level parsing functions while keeping the code clear.
 //
 // Call hierarchy (loosest to tightest binding):
 //   parse_expr -> parse_assignment_expr -> parse_conditional_expr
-//   -> parse_logical_or_expr -> ... -> parse_multiplicative_expr
+//   -> parse_binary_expr(LogicalOr) -> ... -> parse_binary_expr(Multiplicative)
 //   -> parse_cast_expr -> parse_unary_expr -> parse_postfix_expr
 //   -> parse_primary_expr
 
@@ -15,6 +16,22 @@ use crate::common::source::Span;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::Parser;
+
+/// C operator precedence levels (loosest to tightest binding).
+/// Used by the table-driven binary expression parser.
+#[derive(Debug, Clone, Copy)]
+enum PrecedenceLevel {
+    LogicalOr,
+    LogicalAnd,
+    BitwiseOr,
+    BitwiseXor,
+    BitwiseAnd,
+    Equality,
+    Relational,
+    Shift,
+    Additive,
+    Multiplicative,
+}
 
 impl Parser {
     pub(super) fn parse_expr(&mut self) -> Expr {
@@ -53,7 +70,7 @@ impl Parser {
     }
 
     fn parse_conditional_expr(&mut self) -> Expr {
-        let cond = self.parse_logical_or_expr();
+        let cond = self.parse_binary_expr(PrecedenceLevel::LogicalOr);
         if self.consume_if(&TokenKind::Question) {
             let span = cond.span();
             let then_expr = self.parse_expr();
@@ -65,148 +82,63 @@ impl Parser {
         }
     }
 
-    fn parse_logical_or_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_logical_and_expr();
-        while matches!(self.peek(), TokenKind::PipePipe) {
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_logical_and_expr();
-            lhs = Expr::BinaryOp(BinOp::LogicalOr, Box::new(lhs), Box::new(rhs), span);
+    /// Map a token to a binary operator at the current precedence level, if applicable.
+    fn token_to_binop(&self, token: &TokenKind, level: PrecedenceLevel) -> Option<BinOp> {
+        match (token, level) {
+            (TokenKind::PipePipe, PrecedenceLevel::LogicalOr) => Some(BinOp::LogicalOr),
+            (TokenKind::AmpAmp, PrecedenceLevel::LogicalAnd) => Some(BinOp::LogicalAnd),
+            (TokenKind::Pipe, PrecedenceLevel::BitwiseOr) => Some(BinOp::BitOr),
+            (TokenKind::Caret, PrecedenceLevel::BitwiseXor) => Some(BinOp::BitXor),
+            (TokenKind::Amp, PrecedenceLevel::BitwiseAnd) => Some(BinOp::BitAnd),
+            (TokenKind::EqualEqual, PrecedenceLevel::Equality) => Some(BinOp::Eq),
+            (TokenKind::BangEqual, PrecedenceLevel::Equality) => Some(BinOp::Ne),
+            (TokenKind::Less, PrecedenceLevel::Relational) => Some(BinOp::Lt),
+            (TokenKind::LessEqual, PrecedenceLevel::Relational) => Some(BinOp::Le),
+            (TokenKind::Greater, PrecedenceLevel::Relational) => Some(BinOp::Gt),
+            (TokenKind::GreaterEqual, PrecedenceLevel::Relational) => Some(BinOp::Ge),
+            (TokenKind::LessLess, PrecedenceLevel::Shift) => Some(BinOp::Shl),
+            (TokenKind::GreaterGreater, PrecedenceLevel::Shift) => Some(BinOp::Shr),
+            (TokenKind::Plus, PrecedenceLevel::Additive) => Some(BinOp::Add),
+            (TokenKind::Minus, PrecedenceLevel::Additive) => Some(BinOp::Sub),
+            (TokenKind::Star, PrecedenceLevel::Multiplicative) => Some(BinOp::Mul),
+            (TokenKind::Slash, PrecedenceLevel::Multiplicative) => Some(BinOp::Div),
+            (TokenKind::Percent, PrecedenceLevel::Multiplicative) => Some(BinOp::Mod),
+            _ => None,
         }
-        lhs
     }
 
-    fn parse_logical_and_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_bitwise_or_expr();
-        while matches!(self.peek(), TokenKind::AmpAmp) {
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_bitwise_or_expr();
-            lhs = Expr::BinaryOp(BinOp::LogicalAnd, Box::new(lhs), Box::new(rhs), span);
-        }
-        lhs
-    }
-
-    fn parse_bitwise_or_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_bitwise_xor_expr();
-        while matches!(self.peek(), TokenKind::Pipe) {
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_bitwise_xor_expr();
-            lhs = Expr::BinaryOp(BinOp::BitOr, Box::new(lhs), Box::new(rhs), span);
-        }
-        lhs
-    }
-
-    fn parse_bitwise_xor_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_bitwise_and_expr();
-        while matches!(self.peek(), TokenKind::Caret) {
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_bitwise_and_expr();
-            lhs = Expr::BinaryOp(BinOp::BitXor, Box::new(lhs), Box::new(rhs), span);
-        }
-        lhs
-    }
-
-    fn parse_bitwise_and_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_equality_expr();
-        while matches!(self.peek(), TokenKind::Amp) {
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_equality_expr();
-            lhs = Expr::BinaryOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs), span);
-        }
-        lhs
-    }
-
-    fn parse_equality_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_relational_expr();
+    /// Parse a left-associative binary expression at the given precedence level.
+    /// This is the shared core that replaces 10 nearly-identical parsing functions.
+    fn parse_binary_expr(&mut self, level: PrecedenceLevel) -> Expr {
+        let mut lhs = self.parse_next_tighter(level);
         loop {
-            match self.peek() {
-                TokenKind::EqualEqual => {
-                    let span = self.peek_span(); self.advance();
-                    let rhs = self.parse_relational_expr();
-                    lhs = Expr::BinaryOp(BinOp::Eq, Box::new(lhs), Box::new(rhs), span);
-                }
-                TokenKind::BangEqual => {
-                    let span = self.peek_span(); self.advance();
-                    let rhs = self.parse_relational_expr();
-                    lhs = Expr::BinaryOp(BinOp::Ne, Box::new(lhs), Box::new(rhs), span);
-                }
-                _ => break,
-            }
-        }
-        lhs
-    }
-
-    fn parse_relational_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_shift_expr();
-        loop {
-            let (op, token) = match self.peek() {
-                TokenKind::Less => (BinOp::Lt, true),
-                TokenKind::LessEqual => (BinOp::Le, true),
-                TokenKind::Greater => (BinOp::Gt, true),
-                TokenKind::GreaterEqual => (BinOp::Ge, true),
-                _ => break,
-            };
-            if token {
-                let span = self.peek_span();
-                self.advance();
-                let rhs = self.parse_shift_expr();
-                lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
-            }
-        }
-        lhs
-    }
-
-    fn parse_shift_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_additive_expr();
-        loop {
-            let op = match self.peek() {
-                TokenKind::LessLess => BinOp::Shl,
-                TokenKind::GreaterGreater => BinOp::Shr,
-                _ => break,
+            let tok = self.peek().clone();
+            let op = match self.token_to_binop(&tok, level) {
+                Some(op) => op,
+                None => break,
             };
             let span = self.peek_span();
             self.advance();
-            let rhs = self.parse_additive_expr();
+            let rhs = self.parse_next_tighter(level);
             lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
         }
         lhs
     }
 
-    fn parse_additive_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_multiplicative_expr();
-        loop {
-            let op = match self.peek() {
-                TokenKind::Plus => BinOp::Add,
-                TokenKind::Minus => BinOp::Sub,
-                _ => break,
-            };
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_multiplicative_expr();
-            lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
+    /// Parse the next tighter precedence level.
+    fn parse_next_tighter(&mut self, level: PrecedenceLevel) -> Expr {
+        match level {
+            PrecedenceLevel::LogicalOr => self.parse_binary_expr(PrecedenceLevel::LogicalAnd),
+            PrecedenceLevel::LogicalAnd => self.parse_binary_expr(PrecedenceLevel::BitwiseOr),
+            PrecedenceLevel::BitwiseOr => self.parse_binary_expr(PrecedenceLevel::BitwiseXor),
+            PrecedenceLevel::BitwiseXor => self.parse_binary_expr(PrecedenceLevel::BitwiseAnd),
+            PrecedenceLevel::BitwiseAnd => self.parse_binary_expr(PrecedenceLevel::Equality),
+            PrecedenceLevel::Equality => self.parse_binary_expr(PrecedenceLevel::Relational),
+            PrecedenceLevel::Relational => self.parse_binary_expr(PrecedenceLevel::Shift),
+            PrecedenceLevel::Shift => self.parse_binary_expr(PrecedenceLevel::Additive),
+            PrecedenceLevel::Additive => self.parse_binary_expr(PrecedenceLevel::Multiplicative),
+            PrecedenceLevel::Multiplicative => self.parse_cast_expr(),
         }
-        lhs
-    }
-
-    fn parse_multiplicative_expr(&mut self) -> Expr {
-        let mut lhs = self.parse_cast_expr();
-        loop {
-            let op = match self.peek() {
-                TokenKind::Star => BinOp::Mul,
-                TokenKind::Slash => BinOp::Div,
-                TokenKind::Percent => BinOp::Mod,
-                _ => break,
-            };
-            let span = self.peek_span();
-            self.advance();
-            let rhs = self.parse_cast_expr();
-            lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
-        }
-        lhs
     }
 
     /// Parse a cast expression: (type-name)expr, compound literal (type-name){...},

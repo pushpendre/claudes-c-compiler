@@ -386,7 +386,7 @@ pub fn calculate_stack_space_common(
                 state.alloca_values.insert(dest.0);
                 state.alloca_types.insert(dest.0, *ty);
                 space = new_space;
-            } else if let Some(dest) = common::instruction_dest(inst) {
+            } else if let Some(dest) = inst.dest() {
                 let (slot, new_space) = assign_slot(space, 8);
                 state.value_locations.insert(dest.0, StackSlot(slot));
                 space = new_space;

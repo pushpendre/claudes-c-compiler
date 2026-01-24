@@ -19,6 +19,9 @@ Remaining opportunities:
    params as int-reg/float-reg/stack. A shared classify_params() helper could reduce this,
    but the three ABIs differ significantly (x86-64 SysV, AAPCS64, RISC-V LP64D), so the
    benefit is lower than items 1-2.
+   NOTE: RISC-V FP->GPR spill inconsistency was fixed - emit_store_params now correctly
+   routes excess FP args (beyond fa0-fa7) to integer registers before the stack,
+   matching emit_call's classification logic.
 
 5. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
    modes (ARM post-increment vs RISC-V explicit pointer advance). x86 uses rep movsb.

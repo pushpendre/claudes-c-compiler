@@ -252,6 +252,19 @@ pub enum IrConst {
     Zero,
 }
 
+/// Hashable representation of IR constants, using bit patterns for floats.
+/// This allows constants to be used as HashMap keys for value numbering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConstHashKey {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(u32),
+    F64(u64),
+    Zero,
+}
+
 /// Convert an f64 value to IEEE 754 binary128 (quad-precision) encoding (16 bytes, little-endian).
 /// Quad format: 1 sign bit, 15 exponent bits (bias 16383), 112 mantissa bits (implicit leading 1).
 /// This is used for long double on AArch64 and RISC-V.
@@ -361,18 +374,39 @@ pub fn f64_to_x87_bytes(val: f64) -> [u8; 10] {
 }
 
 impl IrConst {
-    /// Returns true if this constant is nonzero (for truthiness checks in const eval).
-    /// Returns None for Zero variant (which is always false).
-    pub fn is_nonzero(&self) -> bool {
+    /// Returns true if this constant is zero (integer or float).
+    pub fn is_zero(&self) -> bool {
         match self {
-            IrConst::I8(v) => *v != 0,
-            IrConst::I16(v) => *v != 0,
-            IrConst::I32(v) => *v != 0,
-            IrConst::I64(v) => *v != 0,
-            IrConst::F32(v) => *v != 0.0,
-            IrConst::F64(v) => *v != 0.0,
-            IrConst::LongDouble(v) => *v != 0.0,
-            IrConst::Zero => false,
+            IrConst::I8(0) | IrConst::I16(0) | IrConst::I32(0) | IrConst::I64(0) => true,
+            IrConst::F32(v) => *v == 0.0,
+            IrConst::F64(v) => *v == 0.0,
+            IrConst::LongDouble(v) => *v == 0.0,
+            IrConst::Zero => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this constant is one (integer only).
+    pub fn is_one(&self) -> bool {
+        matches!(self, IrConst::I8(1) | IrConst::I16(1) | IrConst::I32(1) | IrConst::I64(1))
+    }
+
+    /// Returns true if this constant is nonzero (for truthiness checks in const eval).
+    pub fn is_nonzero(&self) -> bool {
+        !self.is_zero()
+    }
+
+    /// Convert to a hashable key representation (using bit patterns for floats).
+    pub fn to_hash_key(&self) -> ConstHashKey {
+        match self {
+            IrConst::I8(v) => ConstHashKey::I8(*v),
+            IrConst::I16(v) => ConstHashKey::I16(*v),
+            IrConst::I32(v) => ConstHashKey::I32(*v),
+            IrConst::I64(v) => ConstHashKey::I64(*v),
+            IrConst::F32(v) => ConstHashKey::F32(v.to_bits()),
+            IrConst::F64(v) => ConstHashKey::F64(v.to_bits()),
+            IrConst::LongDouble(v) => ConstHashKey::F64(v.to_bits()),
+            IrConst::Zero => ConstHashKey::Zero,
         }
     }
 
@@ -566,6 +600,19 @@ impl IrConst {
             _ => IrConst::I64(0),
         }
     }
+
+    /// Get the one constant for a given IR type.
+    pub fn one(ty: IrType) -> IrConst {
+        match ty {
+            IrType::I8 | IrType::U8 => IrConst::I8(1),
+            IrType::I16 | IrType::U16 => IrConst::I16(1),
+            IrType::I32 | IrType::U32 => IrConst::I32(1),
+            IrType::F32 => IrConst::F32(1.0),
+            IrType::F64 => IrConst::F64(1.0),
+            IrType::F128 => IrConst::LongDouble(1.0),
+            _ => IrConst::I64(1),
+        }
+    }
 }
 
 /// Atomic read-modify-write operations.
@@ -600,7 +647,7 @@ pub enum AtomicOrdering {
 }
 
 /// Binary operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrBinOp {
     Add,
     Sub,
@@ -617,8 +664,15 @@ pub enum IrBinOp {
     LShr,
 }
 
+impl IrBinOp {
+    /// Returns true if this operation is commutative (a op b == b op a).
+    pub fn is_commutative(self) -> bool {
+        matches!(self, IrBinOp::Add | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or | IrBinOp::Xor)
+    }
+}
+
 /// Unary operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrUnaryOp {
     Neg,
     Not,
@@ -629,7 +683,7 @@ pub enum IrUnaryOp {
 }
 
 /// Comparison operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrCmpOp {
     Eq,
     Ne,
@@ -643,6 +697,41 @@ pub enum IrCmpOp {
     Uge,
 }
 
+impl Instruction {
+    /// Get the destination value defined by this instruction, if any.
+    /// Instructions like Store, Memcpy, VaStart, VaEnd, VaCopy, AtomicStore,
+    /// Fence, and InlineAsm produce no value.
+    pub fn dest(&self) -> Option<Value> {
+        match self {
+            Instruction::Alloca { dest, .. }
+            | Instruction::Load { dest, .. }
+            | Instruction::BinOp { dest, .. }
+            | Instruction::UnaryOp { dest, .. }
+            | Instruction::Cmp { dest, .. }
+            | Instruction::GetElementPtr { dest, .. }
+            | Instruction::Cast { dest, .. }
+            | Instruction::Copy { dest, .. }
+            | Instruction::GlobalAddr { dest, .. }
+            | Instruction::VaArg { dest, .. }
+            | Instruction::AtomicRmw { dest, .. }
+            | Instruction::AtomicCmpxchg { dest, .. }
+            | Instruction::AtomicLoad { dest, .. }
+            | Instruction::Phi { dest, .. }
+            | Instruction::LabelAddr { dest, .. } => Some(*dest),
+            Instruction::Call { dest, .. }
+            | Instruction::CallIndirect { dest, .. } => *dest,
+            Instruction::Store { .. }
+            | Instruction::Memcpy { .. }
+            | Instruction::VaStart { .. }
+            | Instruction::VaEnd { .. }
+            | Instruction::VaCopy { .. }
+            | Instruction::AtomicStore { .. }
+            | Instruction::Fence { .. }
+            | Instruction::InlineAsm { .. } => None,
+        }
+    }
+}
+
 impl IrModule {
     pub fn new() -> Self {
         Self {
@@ -650,6 +739,21 @@ impl IrModule {
             globals: Vec::new(),
             string_literals: Vec::new(),
         }
+    }
+
+    /// Run a transformation on each defined (non-declaration) function, returning
+    /// the total count of changes made. Used by optimization passes.
+    pub fn for_each_function<F>(&mut self, mut f: F) -> usize
+    where
+        F: FnMut(&mut IrFunction) -> usize,
+    {
+        let mut total = 0;
+        for func in &mut self.functions {
+            if !func.is_declaration {
+                total += f(func);
+            }
+        }
+        total
     }
 }
 

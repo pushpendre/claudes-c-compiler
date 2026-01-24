@@ -9,14 +9,7 @@ use crate::ir::ir::*;
 /// Run constant folding on the entire module.
 /// Returns the number of instructions folded.
 pub fn run(module: &mut IrModule) -> usize {
-    let mut total_folded = 0;
-    for func in &mut module.functions {
-        if func.is_declaration {
-            continue;
-        }
-        total_folded += fold_function(func);
-    }
-    total_folded
+    module.for_each_function(fold_function)
 }
 
 /// Fold constants within a single function.
@@ -67,7 +60,7 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             let result = fold_binop(*op, lhs_const, rhs_const)?;
             Some(Instruction::Copy {
                 dest: *dest,
-                src: Operand::Const(i64_to_irconst(result, *ty)),
+                src: Operand::Const(IrConst::from_i64(result, *ty)),
             })
         }
         Instruction::UnaryOp { dest, op, src, ty } => {
@@ -75,7 +68,7 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             let result = fold_unaryop(*op, src_const)?;
             Some(Instruction::Copy {
                 dest: *dest,
-                src: Operand::Const(i64_to_irconst(result, *ty)),
+                src: Operand::Const(IrConst::from_i64(result, *ty)),
             })
         }
         Instruction::Cmp { dest, op, lhs, rhs, .. } => {
@@ -92,7 +85,7 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             let result = fold_cast(src_const, *from_ty, *to_ty);
             Some(Instruction::Copy {
                 dest: *dest,
-                src: Operand::Const(i64_to_irconst(result, *to_ty)),
+                src: Operand::Const(IrConst::from_i64(result, *to_ty)),
             })
         }
         _ => None,
@@ -105,11 +98,6 @@ fn as_i64_const(op: &Operand) -> Option<i64> {
         Operand::Const(c) => c.to_i64(),
         Operand::Value(_) => None,
     }
-}
-
-/// Convert a result i64 back to an IrConst of the appropriate type.
-fn i64_to_irconst(val: i64, ty: crate::common::types::IrType) -> IrConst {
-    IrConst::from_i64(val, ty)
 }
 
 /// Evaluate a binary operation on two constant integers.

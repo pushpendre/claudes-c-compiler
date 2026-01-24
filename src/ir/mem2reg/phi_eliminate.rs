@@ -35,8 +35,8 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
     let mut max_value: u32 = 0;
     for block in &func.blocks {
         for inst in &block.instructions {
-            if let Some(v) = instruction_dest(inst) {
-                max_value = max_value.max(v);
+            if let Some(v) = inst.dest() {
+                max_value = max_value.max(v.0);
             }
         }
     }
@@ -154,25 +154,3 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
     }
 }
 
-/// Get dest value ID from an instruction.
-fn instruction_dest(inst: &Instruction) -> Option<u32> {
-    match inst {
-        Instruction::Alloca { dest, .. }
-        | Instruction::Load { dest, .. }
-        | Instruction::BinOp { dest, .. }
-        | Instruction::UnaryOp { dest, .. }
-        | Instruction::Cmp { dest, .. }
-        | Instruction::GetElementPtr { dest, .. }
-        | Instruction::Cast { dest, .. }
-        | Instruction::Copy { dest, .. }
-        | Instruction::GlobalAddr { dest, .. }
-        | Instruction::VaArg { dest, .. }
-        | Instruction::Phi { dest, .. } => Some(dest.0),
-        Instruction::Call { dest, .. }
-        | Instruction::CallIndirect { dest, .. } => dest.map(|v| v.0),
-        Instruction::AtomicRmw { dest, .. } => Some(dest.0),
-        Instruction::AtomicCmpxchg { dest, .. } => Some(dest.0),
-        Instruction::AtomicLoad { dest, .. } => Some(dest.0),
-        _ => None,
-    }
-}

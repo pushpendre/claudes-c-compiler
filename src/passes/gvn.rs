@@ -15,60 +15,22 @@ use crate::ir::ir::*;
 /// compute the same value (assuming their operands are equivalent).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ExprKey {
-    BinOp { op: BinOpKey, lhs: VNOperand, rhs: VNOperand },
-    UnaryOp { op: UnaryOpKey, src: VNOperand },
-    Cmp { op: CmpOpKey, lhs: VNOperand, rhs: VNOperand },
+    BinOp { op: IrBinOp, lhs: VNOperand, rhs: VNOperand },
+    UnaryOp { op: IrUnaryOp, src: VNOperand },
+    Cmp { op: IrCmpOp, lhs: VNOperand, rhs: VNOperand },
 }
 
 /// A value-numbered operand: either a constant or a value number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VNOperand {
-    Const(ConstKey),
+    Const(ConstHashKey),
     ValueNum(u32),
-}
-
-/// Hashable representation of constants.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ConstKey {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(u32),   // use bits for hashing
-    F64(u64),   // use bits for hashing
-    Zero,
-}
-
-/// Hashable binary operation identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BinOpKey {
-    Add, Sub, Mul, SDiv, UDiv, SRem, URem,
-    And, Or, Xor, Shl, AShr, LShr,
-}
-
-/// Hashable unary operation identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum UnaryOpKey {
-    Neg, Not, Clz, Ctz, Bswap, Popcount,
-}
-
-/// Hashable comparison operation identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CmpOpKey {
-    Eq, Ne, Slt, Sle, Sgt, Sge, Ult, Ule, Ugt, Uge,
 }
 
 /// Run GVN (local value numbering) on the entire module.
 /// Returns the number of instructions eliminated.
 pub fn run(module: &mut IrModule) -> usize {
-    let mut total = 0;
-    for func in &mut module.functions {
-        if func.is_declaration {
-            continue;
-        }
-        total += run_lvn_function(func);
-    }
-    total
+    module.for_each_function(run_lvn_function)
 }
 
 /// Run local value numbering on a function (per-block).
@@ -117,7 +79,7 @@ fn run_lvn_block(block: &mut BasicBlock) -> usize {
             None => {
                 // Not a numberable expression (store, call, alloca, etc.)
                 // Assign fresh value numbers to any dest
-                if let Some(dest) = get_inst_dest(&inst) {
+                if let Some(dest) = inst.dest() {
                     let vn = next_vn;
                     next_vn += 1;
                     value_numbers.insert(dest.0, vn);
@@ -139,27 +101,24 @@ fn make_expr_key(inst: &Instruction, value_numbers: &HashMap<u32, u32>) -> Optio
         Instruction::BinOp { dest, op, lhs, rhs, .. } => {
             let lhs_vn = operand_to_vn(lhs, value_numbers);
             let rhs_vn = operand_to_vn(rhs, value_numbers);
-            let op_key = binop_to_key(*op);
 
             // For commutative operations, canonicalize operand order
-            let (lhs_vn, rhs_vn) = if is_commutative(*op) {
+            let (lhs_vn, rhs_vn) = if op.is_commutative() {
                 canonical_order(lhs_vn, rhs_vn)
             } else {
                 (lhs_vn, rhs_vn)
             };
 
-            Some((ExprKey::BinOp { op: op_key, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+            Some((ExprKey::BinOp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
         }
         Instruction::UnaryOp { dest, op, src, .. } => {
             let src_vn = operand_to_vn(src, value_numbers);
-            let op_key = unaryop_to_key(*op);
-            Some((ExprKey::UnaryOp { op: op_key, src: src_vn }, *dest))
+            Some((ExprKey::UnaryOp { op: *op, src: src_vn }, *dest))
         }
         Instruction::Cmp { dest, op, lhs, rhs, .. } => {
             let lhs_vn = operand_to_vn(lhs, value_numbers);
             let rhs_vn = operand_to_vn(rhs, value_numbers);
-            let op_key = cmpop_to_key(*op);
-            Some((ExprKey::Cmp { op: op_key, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+            Some((ExprKey::Cmp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
         }
         // Other instructions are not eligible for simple value numbering
         _ => None,
@@ -169,7 +128,7 @@ fn make_expr_key(inst: &Instruction, value_numbers: &HashMap<u32, u32>) -> Optio
 /// Convert an Operand to a VNOperand for hashing.
 fn operand_to_vn(op: &Operand, value_numbers: &HashMap<u32, u32>) -> VNOperand {
     match op {
-        Operand::Const(c) => VNOperand::Const(const_to_key(c)),
+        Operand::Const(c) => VNOperand::Const(c.to_hash_key()),
         Operand::Value(v) => {
             let vn = value_numbers.get(&v.0).copied().unwrap_or(v.0);
             VNOperand::ValueNum(vn)
@@ -180,7 +139,6 @@ fn operand_to_vn(op: &Operand, value_numbers: &HashMap<u32, u32>) -> VNOperand {
 /// Canonicalize operand order for commutative operations.
 /// Ensures (a + b) and (b + a) hash to the same key.
 fn canonical_order(lhs: VNOperand, rhs: VNOperand) -> (VNOperand, VNOperand) {
-    // Simple ordering: constants before value numbers, lower numbers first
     if should_swap(&lhs, &rhs) {
         (rhs, lhs)
     } else {
@@ -192,101 +150,8 @@ fn should_swap(lhs: &VNOperand, rhs: &VNOperand) -> bool {
     match (lhs, rhs) {
         (VNOperand::ValueNum(_), VNOperand::Const(_)) => true,
         (VNOperand::ValueNum(a), VNOperand::ValueNum(b)) => a > b,
-        (VNOperand::Const(a), VNOperand::Const(b)) => format!("{:?}", a) > format!("{:?}", b),
+        (VNOperand::Const(a), VNOperand::Const(b)) => a > b,
         _ => false,
-    }
-}
-
-/// Check if a binary operation is commutative.
-fn is_commutative(op: IrBinOp) -> bool {
-    matches!(op, IrBinOp::Add | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or | IrBinOp::Xor)
-}
-
-/// Get dest of an instruction.
-fn get_inst_dest(inst: &Instruction) -> Option<Value> {
-    match inst {
-        Instruction::Alloca { dest, .. } => Some(*dest),
-        Instruction::Load { dest, .. } => Some(*dest),
-        Instruction::BinOp { dest, .. } => Some(*dest),
-        Instruction::UnaryOp { dest, .. } => Some(*dest),
-        Instruction::Cmp { dest, .. } => Some(*dest),
-        Instruction::Call { dest, .. } => *dest,
-        Instruction::CallIndirect { dest, .. } => *dest,
-        Instruction::GetElementPtr { dest, .. } => Some(*dest),
-        Instruction::Cast { dest, .. } => Some(*dest),
-        Instruction::Copy { dest, .. } => Some(*dest),
-        Instruction::GlobalAddr { dest, .. } => Some(*dest),
-        Instruction::VaArg { dest, .. } => Some(*dest),
-        Instruction::Store { .. } => None,
-        Instruction::Memcpy { .. } => None,
-        Instruction::VaStart { .. } => None,
-        Instruction::VaEnd { .. } => None,
-        Instruction::VaCopy { .. } => None,
-        Instruction::AtomicRmw { dest, .. } => Some(*dest),
-        Instruction::AtomicCmpxchg { dest, .. } => Some(*dest),
-        Instruction::AtomicLoad { dest, .. } => Some(*dest),
-        Instruction::AtomicStore { .. } => None,
-        Instruction::Fence { .. } => None,
-        Instruction::Phi { dest, .. } => Some(*dest),
-        Instruction::LabelAddr { dest, .. } => Some(*dest),
-        Instruction::InlineAsm { .. } => None,
-    }
-}
-
-fn const_to_key(c: &IrConst) -> ConstKey {
-    match c {
-        IrConst::I8(v) => ConstKey::I8(*v),
-        IrConst::I16(v) => ConstKey::I16(*v),
-        IrConst::I32(v) => ConstKey::I32(*v),
-        IrConst::I64(v) => ConstKey::I64(*v),
-        IrConst::F32(v) => ConstKey::F32(v.to_bits()),
-        IrConst::F64(v) => ConstKey::F64(v.to_bits()),
-        IrConst::LongDouble(v) => ConstKey::F64(v.to_bits()), // treat as F64 for GVN purposes
-        IrConst::Zero => ConstKey::Zero,
-    }
-}
-
-fn binop_to_key(op: IrBinOp) -> BinOpKey {
-    match op {
-        IrBinOp::Add => BinOpKey::Add,
-        IrBinOp::Sub => BinOpKey::Sub,
-        IrBinOp::Mul => BinOpKey::Mul,
-        IrBinOp::SDiv => BinOpKey::SDiv,
-        IrBinOp::UDiv => BinOpKey::UDiv,
-        IrBinOp::SRem => BinOpKey::SRem,
-        IrBinOp::URem => BinOpKey::URem,
-        IrBinOp::And => BinOpKey::And,
-        IrBinOp::Or => BinOpKey::Or,
-        IrBinOp::Xor => BinOpKey::Xor,
-        IrBinOp::Shl => BinOpKey::Shl,
-        IrBinOp::AShr => BinOpKey::AShr,
-        IrBinOp::LShr => BinOpKey::LShr,
-    }
-}
-
-fn unaryop_to_key(op: IrUnaryOp) -> UnaryOpKey {
-    match op {
-        IrUnaryOp::Neg => UnaryOpKey::Neg,
-        IrUnaryOp::Not => UnaryOpKey::Not,
-        IrUnaryOp::Clz => UnaryOpKey::Clz,
-        IrUnaryOp::Ctz => UnaryOpKey::Ctz,
-        IrUnaryOp::Bswap => UnaryOpKey::Bswap,
-        IrUnaryOp::Popcount => UnaryOpKey::Popcount,
-    }
-}
-
-fn cmpop_to_key(op: IrCmpOp) -> CmpOpKey {
-    match op {
-        IrCmpOp::Eq => CmpOpKey::Eq,
-        IrCmpOp::Ne => CmpOpKey::Ne,
-        IrCmpOp::Slt => CmpOpKey::Slt,
-        IrCmpOp::Sle => CmpOpKey::Sle,
-        IrCmpOp::Sgt => CmpOpKey::Sgt,
-        IrCmpOp::Sge => CmpOpKey::Sge,
-        IrCmpOp::Ult => CmpOpKey::Ult,
-        IrCmpOp::Ule => CmpOpKey::Ule,
-        IrCmpOp::Ugt => CmpOpKey::Ugt,
-        IrCmpOp::Uge => CmpOpKey::Uge,
     }
 }
 
@@ -392,9 +257,9 @@ mod tests {
 
     #[test]
     fn test_is_commutative() {
-        assert!(is_commutative(IrBinOp::Add));
-        assert!(is_commutative(IrBinOp::Mul));
-        assert!(!is_commutative(IrBinOp::Sub));
-        assert!(!is_commutative(IrBinOp::SDiv));
+        assert!(IrBinOp::Add.is_commutative());
+        assert!(IrBinOp::Mul.is_commutative());
+        assert!(!IrBinOp::Sub.is_commutative());
+        assert!(!IrBinOp::SDiv.is_commutative());
     }
 }

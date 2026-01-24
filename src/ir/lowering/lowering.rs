@@ -1778,38 +1778,9 @@ impl Lowerer {
         }
     }
 
+    /// Zero-initialize an entire alloca. Delegates to zero_init_region with offset 0.
     pub(super) fn zero_init_alloca(&mut self, alloca: Value, total_size: usize) {
-        let mut offset = 0usize;
-        while offset + 8 <= total_size {
-            let addr = self.fresh_value();
-            self.emit(Instruction::GetElementPtr {
-                dest: addr,
-                base: alloca,
-                offset: Operand::Const(IrConst::I64(offset as i64)),
-                ty: IrType::I64,
-            });
-            self.emit(Instruction::Store {
-                val: Operand::Const(IrConst::I64(0)),
-                ptr: addr,
-                ty: IrType::I64,
-            });
-            offset += 8;
-        }
-        while offset < total_size {
-            let addr = self.fresh_value();
-            self.emit(Instruction::GetElementPtr {
-                dest: addr,
-                base: alloca,
-                offset: Operand::Const(IrConst::I64(offset as i64)),
-                ty: IrType::I8,
-            });
-            self.emit(Instruction::Store {
-                val: Operand::Const(IrConst::I8(0)),
-                ptr: addr,
-                ty: IrType::I8,
-            });
-            offset += 1;
-        }
+        self.zero_init_region(alloca, 0, total_size);
     }
 }
 

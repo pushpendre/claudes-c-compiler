@@ -370,33 +370,3 @@ pub fn escape_string(s: &str) -> String {
     result
 }
 
-/// Extract destination Value from an IR instruction (shared across all backends).
-pub fn instruction_dest(inst: &Instruction) -> Option<Value> {
-    match inst {
-        Instruction::Alloca { dest, .. }
-        | Instruction::Load { dest, .. }
-        | Instruction::BinOp { dest, .. }
-        | Instruction::UnaryOp { dest, .. }
-        | Instruction::Cmp { dest, .. }
-        | Instruction::GetElementPtr { dest, .. }
-        | Instruction::Cast { dest, .. }
-        | Instruction::Copy { dest, .. }
-        | Instruction::GlobalAddr { dest, .. }
-        | Instruction::VaArg { dest, .. } => Some(*dest),
-        Instruction::Call { dest, .. }
-        | Instruction::CallIndirect { dest, .. } => *dest,
-        Instruction::Store { .. } => None,
-        Instruction::Memcpy { .. } => None,
-        Instruction::VaStart { .. } => None,
-        Instruction::VaEnd { .. } => None,
-        Instruction::VaCopy { .. } => None,
-        Instruction::AtomicRmw { dest, .. } => Some(*dest),
-        Instruction::AtomicCmpxchg { dest, .. } => Some(*dest),
-        Instruction::AtomicLoad { dest, .. } => Some(*dest),
-        Instruction::AtomicStore { .. } => None,
-        Instruction::Fence { .. } => None,
-        Instruction::Phi { dest, .. } => Some(*dest),
-        Instruction::LabelAddr { dest, .. } => Some(*dest),
-        Instruction::InlineAsm { .. } => None,
-    }
-}
