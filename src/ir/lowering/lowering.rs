@@ -261,6 +261,14 @@ pub(super) struct ScopeFrame {
     pub var_ctypes_added: Vec<String>,
     /// Keys that were overwritten in `var_ctypes`: (key, previous_value).
     pub var_ctypes_shadowed: Vec<(String, CType)>,
+    /// Keys newly inserted into `struct_layouts`.
+    pub struct_layouts_added: Vec<String>,
+    /// Keys that were overwritten in `struct_layouts`: (key, previous_value).
+    pub struct_layouts_shadowed: Vec<(String, StructLayout)>,
+    /// Keys newly inserted into `ctype_cache`.
+    pub ctype_cache_added: Vec<String>,
+    /// Keys that were overwritten in `ctype_cache`: (key, previous_value).
+    pub ctype_cache_shadowed: Vec<(String, CType)>,
 }
 
 impl ScopeFrame {
@@ -275,6 +283,10 @@ impl ScopeFrame {
             consts_shadowed: Vec::new(),
             var_ctypes_added: Vec::new(),
             var_ctypes_shadowed: Vec::new(),
+            struct_layouts_added: Vec::new(),
+            struct_layouts_shadowed: Vec::new(),
+            ctype_cache_added: Vec::new(),
+            ctype_cache_shadowed: Vec::new(),
         }
     }
 }
@@ -469,6 +481,25 @@ impl Lowerer {
             }
             for (key, val) in frame.var_ctypes_shadowed {
                 self.var_ctypes.insert(key, val);
+            }
+
+            // Undo struct_layouts: remove added keys, restore shadowed keys
+            for key in frame.struct_layouts_added {
+                self.struct_layouts.remove(&key);
+            }
+            for (key, val) in frame.struct_layouts_shadowed {
+                self.struct_layouts.insert(key, val);
+            }
+
+            // Undo ctype_cache: remove added keys, restore shadowed keys
+            {
+                let mut cache = self.ctype_cache.borrow_mut();
+                for key in frame.ctype_cache_added {
+                    cache.remove(&key);
+                }
+                for (key, val) in frame.ctype_cache_shadowed {
+                    cache.insert(key, val);
+                }
             }
         }
     }

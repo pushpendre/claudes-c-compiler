@@ -169,13 +169,25 @@ impl Parser {
             return result;
         }
 
-        // Check for pointer-to-array: inner is Pointer(s), outer is Array(s)
+        // Check for pointer-to-array: inner contains Pointer(s) with optional arrays,
+        // outer is all Array(s).
+        // For `int (*p)[3][6]`: inner=[Pointer], outer=[Array(3), Array(6)]
+        //   -> result: [Array(3), Array(6), Pointer]
+        // For `int ((*(p))[3])[6]`: inner=[Array(3), Pointer], outer=[Array(6)]
+        //   -> result: [Array(3), Array(6), Pointer]
+        // The rule: inner arrays first, then outer arrays, then pointer(s) last.
         let outer_only_arrays = outer_suffixes.iter().all(|d| matches!(d, DerivedDeclarator::Array(_)));
-        if inner_only_ptr_and_array && inner_has_pointer && outer_only_arrays
-            && !inner_derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)))
-        {
+        if inner_only_ptr_and_array && inner_has_pointer && outer_only_arrays {
             let mut result = outer_pointers;
+            // First: inner array dimensions (from deeper nesting levels)
+            for d in &inner_derived {
+                if matches!(d, DerivedDeclarator::Array(_)) {
+                    result.push(d.clone());
+                }
+            }
+            // Then: outer array dimensions (from current level)
             result.extend(outer_suffixes);
+            // Finally: pointer(s)
             for d in inner_derived {
                 if matches!(d, DerivedDeclarator::Pointer) {
                     result.push(d);

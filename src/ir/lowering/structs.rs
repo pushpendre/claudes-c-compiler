@@ -15,7 +15,12 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 let layout = self.compute_struct_union_layout_packed(fields, false, max_field_align);
                 let key = self.struct_layout_key(tag, false);
-                self.struct_layouts.insert(key, layout);
+                self.insert_struct_layout_scoped(key.clone(), layout);
+                // Also invalidate the ctype_cache for this tag so sizeof picks
+                // up the new definition
+                if tag.is_some() {
+                    self.invalidate_ctype_cache_scoped(&key);
+                }
             }
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Recursively register nested struct/union types in fields
@@ -23,9 +28,40 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 let layout = self.compute_struct_union_layout_packed(fields, true, max_field_align);
                 let key = self.struct_layout_key(tag, true);
-                self.struct_layouts.insert(key, layout);
+                self.insert_struct_layout_scoped(key.clone(), layout);
+                if tag.is_some() {
+                    self.invalidate_ctype_cache_scoped(&key);
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Insert a struct layout into the cache, tracking the change in the current
+    /// scope frame so it can be undone on scope exit.
+    fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.struct_layouts.get(&key) {
+                frame.struct_layouts_shadowed.push((key.clone(), prev.clone()));
+            } else {
+                frame.struct_layouts_added.push(key.clone());
+            }
+        }
+        self.struct_layouts.insert(key, layout);
+    }
+
+    /// Invalidate a ctype_cache entry for a struct/union tag, tracking the change
+    /// in the current scope frame so it can be restored on scope exit.
+    fn invalidate_ctype_cache_scoped(&mut self, key: &str) {
+        let mut cache = self.ctype_cache.borrow_mut();
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = cache.remove(key) {
+                frame.ctype_cache_shadowed.push((key.to_string(), prev));
+            } else {
+                frame.ctype_cache_added.push(key.to_string());
+            }
+        } else {
+            cache.remove(key);
         }
     }
 
