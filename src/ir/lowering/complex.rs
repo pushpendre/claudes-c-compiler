@@ -506,7 +506,7 @@ impl Lowerer {
     /// Get variable's CType from symbol table.
     pub(super) fn get_var_ctype(&self, name: &str) -> CType {
         // Check var_ctypes (explicit tracking for complex vars)
-        if let Some(ctype) = self.var_ctypes.get(name) {
+        if let Some(ctype) = self.func_state.as_ref().and_then(|fs| fs.var_ctypes.get(name)) {
             return ctype.clone();
         }
         // Check locals/globals shared VarInfo
@@ -665,11 +665,11 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 // Look up in locals
-                if let Some(info) = self.locals.get(name).cloned() {
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name).cloned()) {
                     return info.alloca;
                 }
                 // Check static locals
-                if let Some(mangled) = self.static_local_names.get(name).cloned() {
+                if let Some(mangled) = self.func_state.as_ref().and_then(|fs| fs.static_local_names.get(name).cloned()) {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
                     return addr;

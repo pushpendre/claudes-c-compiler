@@ -74,7 +74,7 @@ impl Lowerer {
     pub(super) fn is_bool_lvalue(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     return info.is_bool;
                 }
                 if let Some(vi) = self.lookup_var_info(name) {

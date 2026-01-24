@@ -15,7 +15,7 @@ impl Lowerer {
     /// and scalar returns with implicit casts.
     pub(super) fn lower_return_expr(&mut self, e: &Expr) -> Operand {
         // Try sret return first (large structs and complex types via hidden pointer)
-        if let Some(sret_alloca) = self.current_sret_ptr {
+        if let Some(sret_alloca) = self.func().sret_ptr {
             if let Some(op) = self.try_sret_return(e, sret_alloca) {
                 return op;
             }
@@ -43,9 +43,9 @@ impl Lowerer {
 
         // Default: scalar return with implicit cast
         let val = self.lower_expr(e);
-        let ret_ty = self.current_return_type;
+        let ret_ty = self.func_mut().return_type;
         let expr_ty = self.get_expr_type(e);
-        if self.current_return_is_bool {
+        if self.func_mut().return_is_bool {
             // For _Bool return, normalize at the source type before any truncation.
             self.emit_bool_normalize_typed(val, expr_ty)
         } else {
@@ -69,7 +69,7 @@ impl Lowerer {
 
         // Complex expression returned via sret
         let expr_ct = self.expr_ctype(e);
-        let ret_ct = self.func_return_ctypes.get(&self.current_function_name.clone()).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
         if expr_ct.is_complex() {
             let val = self.lower_expr(e);
             let src_addr = if let Some(ref rct) = ret_ct {
@@ -156,7 +156,7 @@ impl Lowerer {
             return None;
         }
 
-        let ret_ct = self.func_return_ctypes.get(&self.current_function_name.clone()).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
         if let Some(ref rct) = ret_ct {
             let val = self.lower_expr(e);
             let src_ptr = if rct.is_complex() && expr_ct != *rct {
@@ -168,7 +168,7 @@ impl Lowerer {
             };
 
             // _Complex double: return real in xmm0, imag in xmm1
-            if *rct == CType::ComplexDouble && !self.func_meta.sigs.get(&self.current_function_name).and_then(|s| s.sret_size).is_some() {
+            if *rct == CType::ComplexDouble && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
                 let real = self.load_complex_real(src_ptr, rct);
                 let imag = self.load_complex_imag(src_ptr, rct);
                 self.emit(Instruction::SetReturnF64Second { src: imag });
@@ -176,7 +176,7 @@ impl Lowerer {
             }
 
             // _Complex float: platform-specific return convention
-            if *rct == CType::ComplexFloat && !self.func_meta.sigs.get(&self.current_function_name).and_then(|s| s.sret_size).is_some() {
+            if *rct == CType::ComplexFloat && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
                 if self.uses_packed_complex_float() {
                     // x86-64: load packed 8 bytes as F64 for one XMM register return
                     let packed = self.fresh_value();
@@ -193,13 +193,13 @@ impl Lowerer {
         }
 
         // Complex expression returned from non-complex function: extract real part
-        let ret_ty = self.current_return_type;
+        let ret_ty = self.func_mut().return_type;
         if ret_ty != IrType::Ptr {
             let val2 = self.lower_expr(e);
             let ptr = self.operand_to_value(val2);
             let real_part = self.load_complex_real(ptr, &expr_ct);
             let from_ty = Self::complex_component_ir_type(&expr_ct);
-            let val2 = if self.current_return_is_bool {
+            let val2 = if self.func_mut().return_is_bool {
                 // For _Bool return, normalize at source type before truncation.
                 self.emit_bool_normalize_typed(real_part, from_ty)
             } else {
@@ -214,7 +214,7 @@ impl Lowerer {
     /// Try converting a non-complex scalar to complex for return from a complex function.
     fn try_scalar_to_complex_return(&mut self, e: &Expr) -> Option<Operand> {
         let expr_ct = self.expr_ctype(e);
-        let ret_ct = self.func_return_ctypes.get(&self.current_function_name.clone()).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
         let rct = ret_ct.as_ref()?;
         if !rct.is_complex() || expr_ct.is_complex() {
             return None;
@@ -226,7 +226,7 @@ impl Lowerer {
         let complex_val = self.scalar_to_complex(val, src_ir_ty, &rct_clone);
 
         // _Complex double: decompose into two FP return registers
-        if rct_clone == CType::ComplexDouble && !self.func_meta.sigs.get(&self.current_function_name).and_then(|s| s.sret_size).is_some() {
+        if rct_clone == CType::ComplexDouble && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
             let src_ptr = self.operand_to_value(complex_val);
             let real = self.load_complex_real(src_ptr, &rct_clone);
             let imag = self.load_complex_imag(src_ptr, &rct_clone);
@@ -235,7 +235,7 @@ impl Lowerer {
         }
 
         // For sret returns, copy to the hidden pointer
-        if let Some(sret_alloca) = self.current_sret_ptr {
+        if let Some(sret_alloca) = self.func().sret_ptr {
             let src_addr = self.operand_to_value(complex_val);
             let complex_size = rct_clone.size();
             let sret_ptr = self.fresh_value();
@@ -245,7 +245,7 @@ impl Lowerer {
         }
 
         // For non-sret complex float: platform-specific return convention
-        if rct_clone == CType::ComplexFloat && !self.func_meta.sigs.get(&self.current_function_name).and_then(|s| s.sret_size).is_some() {
+        if rct_clone == CType::ComplexFloat && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
             let ptr = self.operand_to_value(complex_val);
             if self.uses_packed_complex_float() {
                 // x86-64: pack into I64 for one XMM register return

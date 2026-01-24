@@ -136,14 +136,14 @@ impl Lowerer {
 
     fn lower_identifier(&mut self, name: &str) -> Operand {
         if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
-            return self.lower_string_literal(&self.current_function_name.clone());
+            let name = self.func().name.clone(); return self.lower_string_literal(&name);
         }
         if name == "NULL" {
             return Operand::Const(IrConst::I64(0));
         }
 
         // Check locals first (shadows enum constants)
-        if let Some(info) = self.locals.get(name).cloned() {
+        if let Some(info) = self.func_mut().locals.get(name).cloned() {
             if let Some(ref global_name) = info.static_global_name {
                 let addr = self.fresh_value();
                 self.emit(Instruction::GlobalAddr { dest: addr, name: global_name.clone() });
@@ -171,7 +171,7 @@ impl Lowerer {
             return Operand::Const(IrConst::I64(val));
         }
 
-        if let Some(mangled) = self.static_local_names.get(name).cloned() {
+        if let Some(mangled) = self.func_mut().static_local_names.get(name).cloned() {
             if let Some(ginfo) = self.globals.get(&mangled).cloned() {
                 return self.load_global_var(mangled, &ginfo);
             }
@@ -775,7 +775,7 @@ impl Lowerer {
 
     fn get_vla_sizeof(&self, arg: &SizeofArg) -> Option<Value> {
         if let SizeofArg::Expr(Expr::Identifier(name, _)) = arg {
-            if let Some(info) = self.locals.get(name) {
+            if let Some(info) = self.func().locals.get(name) {
                 return info.vla_size;
             }
         }

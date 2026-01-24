@@ -124,8 +124,10 @@ impl Lowerer {
                 }
                 // Look up const-qualified local variable values
                 // (e.g., const int len = 5000; int arr[len];)
-                if let Some(&val) = self.const_local_values.get(name) {
-                    return Some(IrConst::I64(val));
+                if let Some(ref fs) = self.func_state {
+                    if let Some(&val) = fs.const_local_values.get(name) {
+                        return Some(IrConst::I64(val));
+                    }
                 }
                 None
             }
@@ -295,9 +297,12 @@ impl Lowerer {
 
     /// Resolve a variable name to its global name, checking static local names first.
     fn resolve_to_global_name(&self, name: &str) -> Option<String> {
-        if let Some(mangled) = self.static_local_names.get(name) {
-            Some(mangled.clone())
-        } else if self.globals.contains_key(name) {
+        if let Some(ref fs) = self.func_state {
+            if let Some(mangled) = fs.static_local_names.get(name) {
+                return Some(mangled.clone());
+            }
+        }
+        if self.globals.contains_key(name) {
             Some(name.to_string())
         } else {
             None
@@ -320,8 +325,10 @@ impl Lowerer {
                 match inner.as_ref() {
                     Expr::Identifier(name, _) => {
                         // Check static local names first (local statics shadow globals)
-                        if let Some(mangled) = self.static_local_names.get(name) {
-                            return Some(GlobalInit::GlobalAddr(mangled.clone()));
+                        if let Some(ref fs) = self.func_state {
+                            if let Some(mangled) = fs.static_local_names.get(name) {
+                                return Some(GlobalInit::GlobalAddr(mangled.clone()));
+                            }
                         }
                         // Address of a global variable or function
                         if self.globals.contains_key(name) || self.known_functions.contains(name) {
@@ -363,10 +370,12 @@ impl Lowerer {
                     return Some(GlobalInit::GlobalAddr(name.clone()));
                 }
                 // Check static local array names first (they shadow globals)
-                if let Some(mangled) = self.static_local_names.get(name) {
-                    if let Some(ginfo) = self.globals.get(mangled) {
-                        if ginfo.is_array {
-                            return Some(GlobalInit::GlobalAddr(mangled.clone()));
+                if let Some(ref fs) = self.func_state {
+                    if let Some(mangled) = fs.static_local_names.get(name) {
+                        if let Some(ginfo) = self.globals.get(mangled) {
+                            if ginfo.is_array {
+                                return Some(GlobalInit::GlobalAddr(mangled.clone()));
+                            }
                         }
                     }
                 }

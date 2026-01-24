@@ -40,11 +40,14 @@ impl Lowerer {
     /// Insert a struct layout into the cache, tracking the change in the current
     /// scope frame so it can be undone on scope exit.
     fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.struct_layouts.get(&key) {
-                frame.struct_layouts_shadowed.push((key.clone(), prev.clone()));
-            } else {
-                frame.struct_layouts_added.push(key.clone());
+        let prev = self.struct_layouts.get(&key).cloned();
+        if let Some(ref mut fs) = self.func_state {
+            if let Some(frame) = fs.scope_stack.last_mut() {
+                if let Some(prev) = prev {
+                    frame.struct_layouts_shadowed.push((key.clone(), prev));
+                } else {
+                    frame.struct_layouts_added.push(key.clone());
+                }
             }
         }
         self.struct_layouts.insert(key, layout);
@@ -53,15 +56,18 @@ impl Lowerer {
     /// Invalidate a ctype_cache entry for a struct/union tag, tracking the change
     /// in the current scope frame so it can be restored on scope exit.
     fn invalidate_ctype_cache_scoped(&mut self, key: &str) {
-        let mut cache = self.ctype_cache.borrow_mut();
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = cache.remove(key) {
-                frame.ctype_cache_shadowed.push((key.to_string(), prev));
-            } else {
-                frame.ctype_cache_added.push(key.to_string());
+        let prev = {
+            let mut cache = self.ctype_cache.borrow_mut();
+            cache.remove(key)
+        };
+        if let Some(ref mut fs) = self.func_state {
+            if let Some(frame) = fs.scope_stack.last_mut() {
+                if let Some(prev) = prev {
+                    frame.ctype_cache_shadowed.push((key.to_string(), prev));
+                } else {
+                    frame.ctype_cache_added.push(key.to_string());
+                }
             }
-        } else {
-            cache.remove(key);
         }
     }
 
@@ -154,12 +160,12 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 // Static local variables: resolve via mangled global name
-                if let Some(mangled) = self.static_local_names.get(name).cloned() {
+                if let Some(mangled) = self.func_mut().static_local_names.get(name).cloned() {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
                     return addr;
                 }
-                if let Some(info) = self.locals.get(name).cloned() {
+                if let Some(info) = self.func_mut().locals.get(name).cloned() {
                     // Static locals: emit fresh GlobalAddr
                     if let Some(ref global_name) = info.static_global_name {
                         let addr = self.fresh_value();
@@ -252,8 +258,8 @@ impl Lowerer {
                 let returns_address = if let Expr::Identifier(name, _) = func_expr.as_ref() {
                     // Detect function pointer variables: identifiers that are
                     // local/global variables rather than known function names
-                    let is_fptr_var = (self.locals.contains_key(name) && !self.known_functions.contains(name))
-                        || (!self.locals.contains_key(name) && self.globals.contains_key(name) && !self.known_functions.contains(name));
+                    let is_fptr_var = (self.func_mut().locals.contains_key(name) && !self.known_functions.contains(name))
+                        || (!self.func_mut().locals.contains_key(name) && self.globals.contains_key(name) && !self.known_functions.contains(name));
                     if is_fptr_var {
                         // Indirect call through variable: use struct size to determine ABI
                         struct_size > 8
@@ -419,7 +425,7 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 // Check static locals first
-                if let Some(mangled) = self.static_local_names.get(name) {
+                if let Some(mangled) = self.func().static_local_names.get(name) {
                     if let Some(ginfo) = self.globals.get(mangled) {
                         if ginfo.struct_layout.is_some() {
                             return ginfo.struct_layout.clone();
@@ -624,7 +630,7 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 // Check static locals first (resolved via mangled name)
-                if let Some(mangled) = self.static_local_names.get(name) {
+                if let Some(mangled) = self.func().static_local_names.get(name) {
                     if let Some(ginfo) = self.globals.get(mangled) {
                         return ginfo.struct_layout.clone();
                     }

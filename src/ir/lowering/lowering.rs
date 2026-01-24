@@ -299,77 +299,107 @@ impl ScopeFrame {
     }
 }
 
+/// Per-function build state, extracted from Lowerer to make the function-vs-module
+/// state boundary explicit. Created fresh at the start of each function, replacing
+/// the old pattern of clearing individual fields.
+#[derive(Debug)]
+pub(super) struct FunctionBuildState {
+    /// Basic blocks accumulated for the current function
+    pub blocks: Vec<BasicBlock>,
+    /// Instructions for the current basic block being built
+    pub instrs: Vec<Instruction>,
+    /// Label of the current basic block
+    pub current_label: String,
+    /// Name of the function currently being lowered
+    pub name: String,
+    /// Return type of the function currently being lowered
+    pub return_type: IrType,
+    /// Whether the current function returns _Bool
+    pub return_is_bool: bool,
+    /// sret pointer alloca for current function (struct returns > 16 bytes)
+    pub sret_ptr: Option<Value>,
+    /// Variable -> alloca mapping with metadata
+    pub locals: HashMap<String, LocalInfo>,
+    /// Loop context: labels to jump to on `break`
+    pub break_labels: Vec<String>,
+    /// Loop context: labels to jump to on `continue`
+    pub continue_labels: Vec<String>,
+    /// Stack of switch statement contexts
+    pub switch_stack: Vec<SwitchFrame>,
+    /// User-defined goto labels -> unique IR labels
+    pub user_labels: HashMap<String, String>,
+    /// Scope stack for efficient scope-based variable management
+    pub scope_stack: Vec<ScopeFrame>,
+    /// Static local variable name -> mangled global name
+    pub static_local_names: HashMap<String, String>,
+    /// Const-qualified local variable values
+    pub const_local_values: HashMap<String, i64>,
+    /// CType for each local variable
+    pub var_ctypes: HashMap<String, CType>,
+    /// Per-function value counter (reset for each function)
+    pub next_value: u32,
+}
+
+impl FunctionBuildState {
+    /// Create a new function build state for the given function.
+    pub fn new(name: String, return_type: IrType, return_is_bool: bool) -> Self {
+        Self {
+            blocks: Vec::new(),
+            instrs: Vec::new(),
+            current_label: String::new(),
+            name,
+            return_type,
+            return_is_bool,
+            sret_ptr: None,
+            locals: HashMap::new(),
+            break_labels: Vec::new(),
+            continue_labels: Vec::new(),
+            switch_stack: Vec::new(),
+            user_labels: HashMap::new(),
+            scope_stack: Vec::new(),
+            static_local_names: HashMap::new(),
+            const_local_values: HashMap::new(),
+            var_ctypes: HashMap::new(),
+            next_value: 0,
+        }
+    }
+}
+
 /// Lowers AST to IR (alloca-based, not yet SSA).
 pub struct Lowerer {
     /// Target architecture, used for ABI-specific lowering decisions
-    /// (e.g., _Complex float parameter/return conventions differ between x86-64 and ARM/RISC-V).
     pub(super) target: Target,
-    pub(super) next_value: u32,
     pub(super) next_label: u32,
     pub(super) next_string: u32,
     pub(super) next_anon_struct: u32,
     /// Counter for unique static local variable names
     pub(super) next_static_local: u32,
     pub(super) module: IrModule,
-    // Current function state
-    pub(super) current_blocks: Vec<BasicBlock>,
-    pub(super) current_instrs: Vec<Instruction>,
-    pub(super) current_label: String,
-    /// Name of the function currently being lowered (for static local mangling and scoping user labels)
-    pub(super) current_function_name: String,
-    /// Return type of the function currently being lowered (for narrowing casts on return)
-    pub(super) current_return_type: IrType,
-    /// Whether the current function returns _Bool (for value clamping on return)
-    pub(super) current_return_is_bool: bool,
-    // Variable -> alloca mapping with metadata
-    pub(super) locals: HashMap<String, LocalInfo>,
-    // Global variable tracking (name -> info)
+    /// Per-function build state. None between functions, Some during lowering.
+    pub(super) func_state: Option<FunctionBuildState>,
+    // Global variable tracking
     pub(super) globals: HashMap<String, GlobalInfo>,
-    // Set of known function names (to distinguish globals from functions in Identifier)
+    // Set of known function names
     pub(super) known_functions: HashSet<String>,
-    // Set of already-defined function bodies (to avoid duplicate definitions)
+    // Set of already-defined function bodies
     pub(super) defined_functions: HashSet<String>,
-    // Set of function names declared with static (internal) linkage
+    // Set of function names declared with static linkage
     pub(super) static_functions: HashSet<String>,
-    // Loop context for break/continue
-    pub(super) break_labels: Vec<String>,
-    pub(super) continue_labels: Vec<String>,
-    /// Stack of switch statement contexts (one frame per nesting level).
-    pub(super) switch_stack: Vec<SwitchFrame>,
-    /// Struct/union layouts indexed by tag name (or anonymous id).
+    /// Struct/union layouts indexed by tag name
     pub(super) struct_layouts: HashMap<String, StructLayout>,
-    /// Enum constant values collected from enum definitions.
+    /// Enum constant values
     pub(super) enum_constants: HashMap<String, i64>,
-    /// Const-qualified local variable values for compile-time evaluation.
-    /// Maps variable name -> constant value (for `const int len = 5000;` etc.)
-    pub(super) const_local_values: HashMap<String, i64>,
-    /// User-defined goto labels mapped to unique IR labels (scoped per function).
-    pub(super) user_labels: HashMap<String, String>,
-    /// Typedef mappings (name -> underlying TypeSpecifier).
+    /// Typedef mappings
     pub(super) typedefs: HashMap<String, TypeSpecifier>,
-    /// Function typedef info (typedef name -> function signature).
-    /// Used to detect declarations like `func_t add;` as function declarations.
+    /// Function typedef info
     pub(super) function_typedefs: HashMap<String, FunctionTypedefInfo>,
-    /// Metadata about known functions (signatures, variadic status, etc.)
+    /// Metadata about known functions (consolidated FuncSig)
     pub(super) func_meta: FunctionMeta,
-    /// Mapping from bare static local variable names to their mangled global names.
-    /// e.g., "x" -> "main.x.0" for `static int x;` inside `main()`.
-    pub(super) static_local_names: HashMap<String, String>,
-    /// In the current function being lowered, the alloca holding the sret pointer
-    /// (hidden first parameter). None if the function does not use sret.
-    pub(super) current_sret_ptr: Option<Value>,
-    /// CType for each local variable (needed for complex number operations).
-    pub(super) var_ctypes: HashMap<String, CType>,
-    /// Return CType for known functions (needed for complex function calls).
+    /// Return CType for known functions
     pub(super) func_return_ctypes: HashMap<String, CType>,
-    /// Set of global variable names that have been emitted to module.globals.
-    /// Used for O(1) duplicate checking instead of linear scan.
+    /// Set of emitted global variable names (O(1) dedup)
     pub(super) emitted_global_names: HashSet<String>,
-    /// Scope stack for efficient scope-based variable management.
-    /// Each frame tracks what was added/shadowed in that scope, so we can undo
-    /// changes on scope exit without cloning entire HashMaps.
-    pub(super) scope_stack: Vec<ScopeFrame>,
-    /// Cache for CType of named struct/union types (tag -> CType).
+    /// Cache for CType of named struct/union types
     /// Uses RefCell because type_spec_to_ctype takes &self.
     pub(super) ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
 }
@@ -378,41 +408,37 @@ impl Lowerer {
     pub fn new(target: Target) -> Self {
         Self {
             target,
-            next_value: 0,
             next_label: 0,
             next_string: 0,
             next_anon_struct: 0,
             next_static_local: 0,
             module: IrModule::new(),
-            current_blocks: Vec::new(),
-            current_instrs: Vec::new(),
-            current_label: String::new(),
-            current_function_name: String::new(),
-            current_return_type: IrType::I64,
-            current_return_is_bool: false,
-            locals: HashMap::new(),
+            func_state: None,
             globals: HashMap::new(),
             known_functions: HashSet::new(),
             defined_functions: HashSet::new(),
-            break_labels: Vec::new(),
-            continue_labels: Vec::new(),
-            switch_stack: Vec::new(),
+            static_functions: HashSet::new(),
             struct_layouts: HashMap::new(),
             enum_constants: HashMap::new(),
-            const_local_values: HashMap::new(),
-            user_labels: HashMap::new(),
             typedefs: HashMap::new(),
             function_typedefs: HashMap::new(),
             func_meta: FunctionMeta::default(),
-            static_local_names: HashMap::new(),
-            static_functions: HashSet::new(),
-            current_sret_ptr: None,
-            var_ctypes: HashMap::new(),
             func_return_ctypes: HashMap::new(),
             emitted_global_names: HashSet::new(),
-            scope_stack: Vec::new(),
             ctype_cache: std::cell::RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Access the current function build state (panics if not inside a function).
+    #[inline]
+    pub(super) fn func(&self) -> &FunctionBuildState {
+        self.func_state.as_ref().expect("not inside a function")
+    }
+
+    /// Mutably access the current function build state (panics if not inside a function).
+    #[inline]
+    pub(super) fn func_mut(&mut self) -> &mut FunctionBuildState {
+        self.func_state.as_mut().expect("not inside a function")
     }
 
     /// Returns true if the target uses x86-64 style packed _Complex float ABI
@@ -428,12 +454,14 @@ impl Lowerer {
     /// access to the 8 shared fields (ty, elem_size, is_array, pointee_type,
     /// struct_layout, is_struct, array_dim_strides, c_type).
     ///
-    /// Use this instead of duplicating `if let Some(info) = self.locals.get(name)
+    /// Use this instead of duplicating `if let Some(info) = self.func_mut().locals.get(name)
     /// ... if let Some(ginfo) = self.globals.get(name)` when only shared fields
     /// are needed.
     pub(super) fn lookup_var_info(&self, name: &str) -> Option<&VarInfo> {
-        if let Some(info) = self.locals.get(name) {
-            return Some(&info.var);
+        if let Some(ref fs) = self.func_state {
+            if let Some(info) = fs.locals.get(name) {
+                return Some(&info.var);
+            }
         }
         if let Some(ginfo) = self.globals.get(name) {
             return Some(&ginfo.var);
@@ -458,48 +486,53 @@ impl Lowerer {
     /// Push a new scope frame onto the scope stack.
     /// Call this at the start of a compound statement or function body.
     pub(super) fn push_scope(&mut self) {
-        self.scope_stack.push(ScopeFrame::new());
+        self.func_mut().scope_stack.push(ScopeFrame::new());
     }
 
     /// Pop the top scope frame and undo all local variable/enum/const changes
     /// made in that scope, restoring the maps to their state at scope entry.
     pub(super) fn pop_scope(&mut self) {
-        if let Some(frame) = self.scope_stack.pop() {
+        let frame = {
+            let fs = self.func_mut();
+            fs.scope_stack.pop()
+        };
+        if let Some(frame) = frame {
+            let fs = self.func_mut();
             // Undo locals: remove added keys, restore shadowed keys
             for key in frame.locals_added {
-                self.locals.remove(&key);
+                fs.locals.remove(&key);
             }
             for (key, val) in frame.locals_shadowed {
-                self.locals.insert(key, val);
+                fs.locals.insert(key, val);
+            }
+
+            // Undo static_local_names: remove added keys, restore shadowed keys
+            for key in frame.statics_added {
+                fs.static_local_names.remove(&key);
+            }
+            for (key, val) in frame.statics_shadowed {
+                fs.static_local_names.insert(key, val);
+            }
+
+            // Undo const_local_values: remove added keys, restore shadowed keys
+            for key in frame.consts_added {
+                fs.const_local_values.remove(&key);
+            }
+            for (key, val) in frame.consts_shadowed {
+                fs.const_local_values.insert(key, val);
+            }
+
+            // Undo var_ctypes: remove added keys, restore shadowed keys
+            for key in frame.var_ctypes_added {
+                fs.var_ctypes.remove(&key);
+            }
+            for (key, val) in frame.var_ctypes_shadowed {
+                fs.var_ctypes.insert(key, val);
             }
 
             // Undo enum_constants: remove added keys
             for key in frame.enums_added {
                 self.enum_constants.remove(&key);
-            }
-
-            // Undo static_local_names: remove added keys, restore shadowed keys
-            for key in frame.statics_added {
-                self.static_local_names.remove(&key);
-            }
-            for (key, val) in frame.statics_shadowed {
-                self.static_local_names.insert(key, val);
-            }
-
-            // Undo const_local_values: remove added keys, restore shadowed keys
-            for key in frame.consts_added {
-                self.const_local_values.remove(&key);
-            }
-            for (key, val) in frame.consts_shadowed {
-                self.const_local_values.insert(key, val);
-            }
-
-            // Undo var_ctypes: remove added keys, restore shadowed keys
-            for key in frame.var_ctypes_added {
-                self.var_ctypes.remove(&key);
-            }
-            for (key, val) in frame.var_ctypes_shadowed {
-                self.var_ctypes.insert(key, val);
             }
 
             // Undo struct_layouts: remove added keys, restore shadowed keys
@@ -523,12 +556,13 @@ impl Lowerer {
         }
     }
 
-    /// Remove a local variable from `self.locals`, tracking the removal in the
+    /// Remove a local variable from `self.func_mut().locals`, tracking the removal in the
     /// current scope frame so `pop_scope()` restores it. Use this when a block-scope
     /// declaration (extern, function decl) needs to shadow a local variable.
     pub(super) fn shadow_local_for_scope(&mut self, name: &str) {
-        if let Some(prev_local) = self.locals.remove(name) {
-            if let Some(frame) = self.scope_stack.last_mut() {
+        let fs = self.func_mut();
+        if let Some(prev_local) = fs.locals.remove(name) {
+            if let Some(frame) = fs.scope_stack.last_mut() {
                 frame.locals_shadowed.push((name.to_string(), prev_local));
             }
         }
@@ -536,8 +570,9 @@ impl Lowerer {
 
     /// Remove a static local name, tracking the removal in the current scope frame.
     pub(super) fn shadow_static_for_scope(&mut self, name: &str) {
-        if let Some(prev_static) = self.static_local_names.remove(name) {
-            if let Some(frame) = self.scope_stack.last_mut() {
+        let fs = self.func_mut();
+        if let Some(prev_static) = fs.static_local_names.remove(name) {
+            if let Some(frame) = fs.scope_stack.last_mut() {
                 frame.statics_shadowed.push((name.to_string(), prev_static));
             }
         }
@@ -545,61 +580,67 @@ impl Lowerer {
 
     /// Insert a local variable, tracking the change in the current scope frame.
     pub(super) fn insert_local_scoped(&mut self, name: String, info: LocalInfo) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.locals.remove(&name) {
+        let fs = self.func_mut();
+        if let Some(frame) = fs.scope_stack.last_mut() {
+            if let Some(prev) = fs.locals.remove(&name) {
                 frame.locals_shadowed.push((name.clone(), prev));
             } else {
                 frame.locals_added.push(name.clone());
             }
         }
-        self.locals.insert(name, info);
+        fs.locals.insert(name, info);
     }
 
     /// Insert an enum constant, tracking the change in the current scope frame.
     pub(super) fn insert_enum_scoped(&mut self, name: String, value: i64) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if !self.enum_constants.contains_key(&name) {
-                frame.enums_added.push(name.clone());
+        let track = !self.enum_constants.contains_key(&name);
+        if track {
+            if let Some(ref mut fs) = self.func_state {
+                if let Some(frame) = fs.scope_stack.last_mut() {
+                    frame.enums_added.push(name.clone());
+                }
             }
-            // Enum constants don't get shadowed in C (redefinition is UB), so just add
         }
         self.enum_constants.insert(name, value);
     }
 
     /// Insert a static local name, tracking the change in the current scope frame.
     pub(super) fn insert_static_local_scoped(&mut self, name: String, mangled: String) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.static_local_names.remove(&name) {
+        let fs = self.func_mut();
+        if let Some(frame) = fs.scope_stack.last_mut() {
+            if let Some(prev) = fs.static_local_names.remove(&name) {
                 frame.statics_shadowed.push((name.clone(), prev));
             } else {
                 frame.statics_added.push(name.clone());
             }
         }
-        self.static_local_names.insert(name, mangled);
+        fs.static_local_names.insert(name, mangled);
     }
 
     /// Insert a const local value, tracking the change in the current scope frame.
     pub(super) fn insert_const_local_scoped(&mut self, name: String, value: i64) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.const_local_values.remove(&name) {
+        let fs = self.func_mut();
+        if let Some(frame) = fs.scope_stack.last_mut() {
+            if let Some(prev) = fs.const_local_values.remove(&name) {
                 frame.consts_shadowed.push((name.clone(), prev));
             } else {
                 frame.consts_added.push(name.clone());
             }
         }
-        self.const_local_values.insert(name, value);
+        fs.const_local_values.insert(name, value);
     }
 
     /// Insert a var ctype, tracking the change in the current scope frame.
     pub(super) fn insert_var_ctype_scoped(&mut self, name: String, ctype: CType) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.var_ctypes.remove(&name) {
+        let fs = self.func_mut();
+        if let Some(frame) = fs.scope_stack.last_mut() {
+            if let Some(prev) = fs.var_ctypes.remove(&name) {
                 frame.var_ctypes_shadowed.push((name.clone(), prev));
             } else {
                 frame.var_ctypes_added.push(name.clone());
             }
         }
-        self.var_ctypes.insert(name, ctype);
+        fs.var_ctypes.insert(name, ctype);
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> IrModule {
@@ -913,8 +954,8 @@ impl Lowerer {
     }
 
     pub(super) fn fresh_value(&mut self) -> Value {
-        let v = Value(self.next_value);
-        self.next_value += 1;
+        let v = Value(self.func_mut().next_value);
+        self.func_mut().next_value += 1;
         v
     }
 
@@ -946,7 +987,7 @@ impl Lowerer {
     }
 
     pub(super) fn emit(&mut self, inst: Instruction) {
-        self.current_instrs.push(inst);
+        self.func_mut().instrs.push(inst);
     }
 
     // --- IR emission helpers ---
@@ -1013,16 +1054,16 @@ impl Lowerer {
 
     pub(super) fn terminate(&mut self, term: Terminator) {
         let block = BasicBlock {
-            label: self.current_label.clone(),
-            instructions: std::mem::take(&mut self.current_instrs),
+            label: self.func_mut().current_label.clone(),
+            instructions: std::mem::take(&mut self.func_mut().instrs),
             terminator: term,
         };
-        self.current_blocks.push(block);
+        self.func_mut().blocks.push(block);
     }
 
     pub(super) fn start_block(&mut self, label: String) {
-        self.current_label = label;
-        self.current_instrs.clear();
+        self.func_mut().current_label = label;
+        self.func_mut().instrs.clear();
     }
 
     fn lower_function(&mut self, func: &FunctionDef) {
@@ -1032,23 +1073,18 @@ impl Lowerer {
         }
         self.defined_functions.insert(func.name.clone());
 
-        self.next_value = 0;
-        self.current_blocks.clear();
-        self.locals.clear();
-        self.static_local_names.clear();
-        self.const_local_values.clear();
-        self.var_ctypes.clear();
-        self.break_labels.clear();
-        self.continue_labels.clear();
-        self.user_labels.clear();
-        self.scope_stack.clear();
+        let mut return_type = self.type_spec_to_ir(&func.return_type);
+        let return_is_bool = matches!(self.resolve_type_spec(&func.return_type), TypeSpecifier::Bool);
+
+        // Create fresh per-function build state
+        self.func_state = Some(FunctionBuildState::new(
+            func.name.clone(),
+            return_type,
+            return_is_bool,
+        ));
         // Push a function-level scope to track enum constants declared inside
         // function bodies (they shouldn't leak to subsequent functions).
         self.push_scope();
-        self.current_function_name = func.name.clone();
-
-        let mut return_type = self.type_spec_to_ir(&func.return_type);
-        self.current_return_is_bool = matches!(self.resolve_type_spec(&func.return_type), TypeSpecifier::Bool);
 
         // Record return CType for complex-returning functions
         let ret_ctype = self.type_spec_to_ctype(&self.resolve_type_spec(&func.return_type).clone());
@@ -1083,7 +1119,7 @@ impl Lowerer {
                 }
             }
         }
-        self.current_return_type = return_type;
+        self.func_mut().return_type = return_type;
 
         let mut params: Vec<IrParam> = Vec::new();
         // If sret, prepend hidden pointer parameter
@@ -1146,7 +1182,7 @@ impl Lowerer {
 
         // Start entry block
         self.start_block("entry".to_string());
-        self.current_sret_ptr = None;
+        self.func_mut().sret_ptr = None;
 
         // Allocate params as local variables.
         //
@@ -1184,7 +1220,7 @@ impl Lowerer {
                 // Emit alloca for hidden sret pointer, don't register as local
                 let alloca = self.fresh_value();
                 self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
-                self.current_sret_ptr = Some(alloca);
+                self.func_mut().sret_ptr = Some(alloca);
                 continue;
             }
 
@@ -1479,7 +1515,7 @@ impl Lowerer {
             });
 
             // Register the complex alloca as the local variable
-            self.locals.insert(cdp.orig_name, LocalInfo {
+            self.func_mut().locals.insert(cdp.orig_name, LocalInfo {
                 var: VarInfo {
                     ty: IrType::Ptr,
                     elem_size: 0,
@@ -1510,7 +1546,7 @@ impl Lowerer {
                 let declared_ty = self.type_spec_to_ir(&param.type_spec);
                 if declared_ty == IrType::F32 {
                     // The param alloca currently holds an F64 (double) value
-                    if let Some(local_info) = self.locals.get(&param.name.clone().unwrap_or_default()).cloned() {
+                    if let Some(local_info) = self.func_mut().locals.get(&param.name.clone().unwrap_or_default()).cloned() {
                         let f64_alloca = local_info.alloca;
                         // Load the F64 value
                         let f64_val = self.fresh_value();
@@ -1537,7 +1573,7 @@ impl Lowerer {
                         });
                         // Update local to point to F32 alloca
                         let name = param.name.clone().unwrap_or_default();
-                        if let Some(local) = self.locals.get_mut(&name) {
+                        if let Some(local) = self.func_mut().locals.get_mut(&name) {
                             local.alloca = f32_alloca;
                             local.ty = IrType::F32;
                             local.alloc_size = 4;
@@ -1551,8 +1587,8 @@ impl Lowerer {
         self.lower_compound_stmt(&func.body);
 
         // If no terminator, add implicit return
-        if !self.current_instrs.is_empty() || self.current_blocks.is_empty()
-           || !matches!(self.current_blocks.last().map(|b| &b.terminator), Some(Terminator::Return(_)))
+        if !self.func_mut().instrs.is_empty() || self.func_mut().blocks.is_empty()
+           || !matches!(self.func_mut().blocks.last().map(|b| &b.terminator), Some(Terminator::Return(_)))
         {
             let ret_op = if return_type == IrType::Void {
                 None
@@ -1570,7 +1606,7 @@ impl Lowerer {
             name: func.name.clone(),
             return_type,
             params,
-            blocks: std::mem::take(&mut self.current_blocks),
+            blocks: std::mem::take(&mut self.func_mut().blocks),
             is_variadic: func.variadic,
             is_declaration: false,
             is_static,
@@ -1581,6 +1617,9 @@ impl Lowerer {
         // Pop function-level scope to remove function-body enum constants
         // and any other scoped additions.
         self.pop_scope();
+
+        // Clear function build state — we're between functions now.
+        self.func_state = None;
     }
 
     /// For pointer-to-array function parameters with VLA (runtime) dimensions,
@@ -1667,7 +1706,7 @@ impl Lowerer {
             }
 
             // Update the LocalInfo with VLA strides
-            if let Some(local) = self.locals.get_mut(&param_name) {
+            if let Some(local) = self.func_mut().locals.get_mut(&param_name) {
                 local.vla_strides = vla_strides;
             }
         }
@@ -1675,7 +1714,7 @@ impl Lowerer {
 
     /// Load the value of a VLA dimension variable (a function parameter).
     fn load_vla_dim_value(&mut self, dim_name: &str) -> Value {
-        if let Some(info) = self.locals.get(dim_name).cloned() {
+        if let Some(info) = self.func_mut().locals.get(dim_name).cloned() {
             let loaded = self.fresh_value();
             self.emit(Instruction::Load {
                 dest: loaded,
@@ -1960,12 +1999,12 @@ impl Lowerer {
 
     /// Get or create a unique IR label for a user-defined goto label.
     pub(super) fn get_or_create_user_label(&mut self, name: &str) -> String {
-        let key = format!("{}::{}", self.current_function_name, name);
-        if let Some(label) = self.user_labels.get(&key) {
+        let key = format!("{}::{}", self.func_mut().name, name);
+        if let Some(label) = self.func_mut().user_labels.get(&key) {
             label.clone()
         } else {
             let label = self.fresh_label(&format!("user_{}", name));
-            self.user_labels.insert(key, label.clone());
+            self.func_mut().user_labels.insert(key, label.clone());
             label
         }
     }

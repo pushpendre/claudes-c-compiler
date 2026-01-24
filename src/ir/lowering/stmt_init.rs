@@ -318,7 +318,7 @@ impl Lowerer {
 
     /// Struct initializer list with designated initializer support.
     fn lower_struct_init_list(&mut self, items: &[InitializerItem], alloca: Value, declarator_name: &str) {
-        if let Some(layout) = self.locals.get(declarator_name).and_then(|l| l.struct_layout.clone()) {
+        if let Some(layout) = self.func_mut().locals.get(declarator_name).and_then(|l| l.struct_layout.clone()) {
             let has_designators = items.iter().any(|item| !item.designators.is_empty());
             if has_designators || items.len() < layout.fields.len() {
                 self.zero_init_alloca(alloca, layout.size);
@@ -337,7 +337,7 @@ impl Lowerer {
         decl: &Declaration,
         declarator_name: &str,
     ) {
-        let elem_struct_layout = self.locals.get(declarator_name)
+        let elem_struct_layout = self.func_mut().locals.get(declarator_name)
             .and_then(|l| l.struct_layout.clone());
 
         if let Some(ref cplx_ctype) = complex_elem_ctype {

@@ -27,8 +27,8 @@ impl Lowerer {
 
     /// Check if an identifier is a function pointer variable rather than a direct function.
     fn is_func_ptr_variable(&self, name: &str) -> bool {
-        (self.locals.contains_key(name) && !self.known_functions.contains(name))
-            || (!self.locals.contains_key(name) && self.globals.contains_key(name)
+        (self.func().locals.contains_key(name) && !self.known_functions.contains(name))
+            || (!self.func().locals.contains_key(name) && self.globals.contains_key(name)
                 && !self.known_functions.contains(name))
     }
 
@@ -375,18 +375,7 @@ impl Lowerer {
                     ret_ty
                 }
             }
-            Expr::Deref(inner, _) => {
-                let n = arg_vals.len();
-                let sas = struct_arg_sizes;
-                let func_ptr = self.lower_expr(inner);
-                self.emit(Instruction::CallIndirect {
-                    dest: Some(dest), func_ptr, args: arg_vals, arg_types,
-                    return_type: indirect_ret_ty, is_variadic: false, num_fixed_args: n,
-                    struct_arg_sizes: sas,
-                });
-                indirect_ret_ty
-            }
-            _ => {
+            Expr::Deref(_, _) | _ => {
                 let n = arg_vals.len();
                 let sas = struct_arg_sizes;
                 let func_ptr = self.lower_expr(func);
@@ -402,7 +391,7 @@ impl Lowerer {
 
     /// Load a function pointer from a local or global variable.
     fn load_func_ptr_variable(&mut self, name: &str) -> Value {
-        let base_addr = if let Some(info) = self.locals.get(name).cloned() {
+        let base_addr = if let Some(info) = self.func_mut().locals.get(name).cloned() {
             if let Some(ref global_name) = info.static_global_name {
                 let addr = self.fresh_value();
                 self.emit(Instruction::GlobalAddr { dest: addr, name: global_name.clone() });

@@ -1,6 +1,0 @@
-Extract FunctionBuildState from Lowerer (Commit 2 of lowerer decomposition)
-
-Pull per-function-being-compiled fields into a sub-struct FunctionBuildState.
-The Lowerer holds Option<FunctionBuildState> — None between functions, Some during lowering.
-All self.current_blocks accesses become self.func().blocks, etc.
-This makes the function-vs-module state boundary explicit.

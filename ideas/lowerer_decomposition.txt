@@ -6,20 +6,14 @@ Goal: Break up the ~30-field Lowerer god struct into focused sub-structs.
 COMPLETED:
 - Commit 1: Consolidate FunctionMeta parallel HashMaps into FuncSig struct
   (10 parallel HashMaps replaced with HashMap<String, FuncSig> + ptr_sigs)
+- Commit 2: Extract FunctionBuildState from Lowerer
+  (17 per-function fields moved into FunctionBuildState sub-struct,
+   Lowerer holds Option<FunctionBuildState> — None between functions,
+   ~150 access sites updated, func()/func_mut() accessors added)
 
 REMAINING (in order):
 
-1. Extract FunctionBuildState from Lowerer
-   - Pull per-function fields (current_blocks, current_instrs, current_label,
-     current_function_name, current_return_type, current_return_is_bool,
-     current_sret_ptr, locals, break_labels, continue_labels, switch_stack,
-     user_labels, scope_stack, static_local_names, const_local_values,
-     var_ctypes, next_value) into sub-struct
-   - Lowerer holds Option<FunctionBuildState> (None between functions)
-   - ~150 access sites to update mechanically
-   - Risk: Low-medium (identical fields, just namespaced)
-
-2. Extract TypeContext from Lowerer
+1. Extract TypeContext from Lowerer
    - Pull type-system state (struct_layouts, typedefs, function_typedefs,
      enum_constants, ctype_cache, var_ctypes, func_return_ctypes, const_local_values)
    - Methods like resolve_ctype_size, type_spec_to_ctype, get_struct_layout

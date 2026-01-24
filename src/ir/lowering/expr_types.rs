@@ -74,7 +74,7 @@ impl Lowerer {
     pub(super) fn struct_value_size(&self, expr: &Expr) -> Option<usize> {
         match expr {
             Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     if info.is_struct { return Some(info.alloc_size); }
                 }
                 if let Some(ginfo) = self.globals.get(name) {
@@ -556,7 +556,7 @@ impl Lowerer {
 
     /// Get the sizeof for an identifier expression.
     fn sizeof_identifier(&self, name: &str) -> usize {
-        if let Some(info) = self.locals.get(name) {
+        if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
             if info.is_array || info.is_struct {
                 return info.alloc_size;
             }

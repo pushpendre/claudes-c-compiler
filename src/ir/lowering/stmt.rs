@@ -180,7 +180,7 @@ impl Lowerer {
     /// not at every function call.
     fn lower_local_static_decl(&mut self, decl: &Declaration, declarator: &InitDeclarator, da: &DeclAnalysis) {
         let static_id = self.next_static_local;
-        let static_name = format!("{}.{}.{}", self.current_function_name, declarator.name, static_id);
+        let static_name = format!("{}.{}.{}", self.func_mut().name, declarator.name, static_id);
 
         // Register the bare name -> mangled name mapping before processing the initializer
         // so that &x in another static's initializer can resolve to the mangled name.
@@ -692,8 +692,8 @@ impl Lowerer {
                 let body_label = self.fresh_label("while_body");
                 let end_label = self.fresh_label("while_end");
 
-                self.break_labels.push(end_label.clone());
-                self.continue_labels.push(cond_label.clone());
+                self.func_mut().break_labels.push(end_label.clone());
+                self.func_mut().continue_labels.push(cond_label.clone());
 
                 self.terminate(Terminator::Branch(cond_label.clone()));
 
@@ -707,10 +707,10 @@ impl Lowerer {
 
                 self.start_block(body_label);
                 self.lower_stmt(body);
-                self.terminate(Terminator::Branch(self.continue_labels.last().unwrap().clone()));
+                let label = self.func().continue_labels.last().unwrap().clone(); self.terminate(Terminator::Branch(label));
 
-                self.break_labels.pop();
-                self.continue_labels.pop();
+                self.func_mut().break_labels.pop();
+                self.func_mut().continue_labels.pop();
 
                 self.start_block(end_label);
             }
@@ -737,8 +737,8 @@ impl Lowerer {
                 let inc_label = self.fresh_label("for_inc");
                 let end_label = self.fresh_label("for_end");
 
-                self.break_labels.push(end_label.clone());
-                self.continue_labels.push(inc_label.clone());
+                self.func_mut().break_labels.push(end_label.clone());
+                self.func_mut().continue_labels.push(inc_label.clone());
 
                 self.terminate(Terminator::Branch(cond_label.clone()));
 
@@ -767,8 +767,8 @@ impl Lowerer {
                 }
                 self.terminate(Terminator::Branch(cond_label));
 
-                self.break_labels.pop();
-                self.continue_labels.pop();
+                self.func_mut().break_labels.pop();
+                self.func_mut().continue_labels.pop();
 
                 self.start_block(end_label);
 
@@ -782,8 +782,8 @@ impl Lowerer {
                 let cond_label = self.fresh_label("do_cond");
                 let end_label = self.fresh_label("do_end");
 
-                self.break_labels.push(end_label.clone());
-                self.continue_labels.push(cond_label.clone());
+                self.func_mut().break_labels.push(end_label.clone());
+                self.func_mut().continue_labels.push(cond_label.clone());
 
                 self.terminate(Terminator::Branch(body_label.clone()));
 
@@ -799,20 +799,20 @@ impl Lowerer {
                     false_label: end_label.clone(),
                 });
 
-                self.break_labels.pop();
-                self.continue_labels.pop();
+                self.func_mut().break_labels.pop();
+                self.func_mut().continue_labels.pop();
 
                 self.start_block(end_label);
             }
             Stmt::Break(_span) => {
-                if let Some(label) = self.break_labels.last().cloned() {
+                if let Some(label) = self.func_mut().break_labels.last().cloned() {
                     self.terminate(Terminator::Branch(label));
                     let dead = self.fresh_label("post_break");
                     self.start_block(dead);
                 }
             }
             Stmt::Continue(_span) => {
-                if let Some(label) = self.continue_labels.last().cloned() {
+                if let Some(label) = self.func_mut().continue_labels.last().cloned() {
                     self.terminate(Terminator::Branch(label));
                     let dead = self.fresh_label("post_continue");
                     self.start_block(dead);
@@ -852,12 +852,12 @@ impl Lowerer {
                 let body_label = self.fresh_label("switch_body");
 
                 // Push switch context
-                self.switch_stack.push(SwitchFrame {
+                self.func_mut().switch_stack.push(SwitchFrame {
                     cases: Vec::new(),
                     default_label: None,
                     expr_type: switch_expr_ty,
                 });
-                self.break_labels.push(end_label.clone());
+                self.func_mut().break_labels.push(end_label.clone());
 
                 // Jump to dispatch (which will be emitted after the body)
                 self.terminate(Terminator::Branch(dispatch_label.clone()));
@@ -870,8 +870,8 @@ impl Lowerer {
                 self.terminate(Terminator::Branch(end_label.clone()));
 
                 // Pop switch context and collect the case/default info
-                let switch_frame = self.switch_stack.pop();
-                self.break_labels.pop();
+                let switch_frame = self.func_mut().switch_stack.pop();
+                self.func_mut().break_labels.pop();
                 let cases = switch_frame.as_ref().map(|f| f.cases.clone()).unwrap_or_default();
                 let default_label = switch_frame.as_ref().and_then(|f| f.default_label.clone());
 
@@ -928,7 +928,7 @@ impl Lowerer {
                 // Truncate case value to the switch controlling expression type.
                 // C requires case constants to be converted to the promoted type
                 // of the controlling expression (e.g., case 2^33 in switch(int) -> 0).
-                if let Some(switch_ty) = self.switch_stack.last().map(|f| &f.expr_type) {
+                if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
                     case_val = match switch_ty {
                         IrType::I8 => case_val as i8 as i64,
                         IrType::U8 => case_val as u8 as i64,
@@ -944,7 +944,7 @@ impl Lowerer {
                 let label = self.fresh_label("case");
 
                 // Register this case with the enclosing switch
-                if let Some(frame) = self.switch_stack.last_mut() {
+                if let Some(frame) = self.func_mut().switch_stack.last_mut() {
                     frame.cases.push((case_val, label.clone()));
                 }
 
@@ -958,7 +958,7 @@ impl Lowerer {
                 let label = self.fresh_label("default");
 
                 // Register as default with enclosing switch
-                if let Some(frame) = self.switch_stack.last_mut() {
+                if let Some(frame) = self.func_mut().switch_stack.last_mut() {
                     frame.default_label = Some(label.clone());
                 }
 
@@ -976,7 +976,7 @@ impl Lowerer {
             Stmt::GotoIndirect(expr, _span) => {
                 let target = self.lower_expr(expr);
                 // Collect all known user labels as possible targets
-                let possible_targets: Vec<String> = self.user_labels.values().cloned().collect();
+                let possible_targets: Vec<String> = self.func_mut().user_labels.values().cloned().collect();
                 self.terminate(Terminator::IndirectBranch { target, possible_targets });
                 let dead = self.fresh_label("post_indirect_goto");
                 self.start_block(dead);

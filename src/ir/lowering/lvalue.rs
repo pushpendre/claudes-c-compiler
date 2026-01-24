@@ -10,7 +10,7 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 // Check locals first so inner-scope locals shadow outer static locals
-                if let Some(info) = self.locals.get(name).cloned() {
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name).cloned()) {
                     // Static locals: emit fresh GlobalAddr at point of use
                     if let Some(ref global_name) = info.static_global_name {
                         let addr = self.fresh_value();
@@ -20,7 +20,7 @@ impl Lowerer {
                     return Some(LValue::Variable(info.alloca));
                 }
                 // Static local variables: resolve through mangled name
-                if let Some(mangled) = self.static_local_names.get(name).cloned() {
+                if let Some(mangled) = self.func_state.as_ref().and_then(|fs| fs.static_local_names.get(name).cloned()) {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
                     return Some(LValue::Address(addr));
@@ -210,7 +210,7 @@ impl Lowerer {
         let root_name = self.get_array_root_name_from_base(base)?;
         let depth = self.count_subscript_depth(base);
 
-        if let Some(info) = self.locals.get(&root_name) {
+        if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(&root_name)) {
             if !info.vla_strides.is_empty() && depth < info.vla_strides.len() {
                 return info.vla_strides[depth];
             }
@@ -226,7 +226,7 @@ impl Lowerer {
         match base {
             Expr::Identifier(name, _) => {
                 // Check locals first so inner-scope locals shadow statics
-                if let Some(info) = self.locals.get(name).cloned() {
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name).cloned()) {
                     // Static locals: emit fresh GlobalAddr at point of use
                     if let Some(ref global_name) = info.static_global_name {
                         let addr = self.fresh_value();
@@ -248,7 +248,7 @@ impl Lowerer {
                     }
                 }
                 // Static locals: resolve via mangled name from globals
-                if let Some(mangled) = self.static_local_names.get(name).cloned() {
+                if let Some(mangled) = self.func_state.as_ref().and_then(|fs| fs.static_local_names.get(name).cloned()) {
                     if let Some(ginfo) = self.globals.get(&mangled).cloned() {
                         let addr = self.fresh_value();
                         self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
