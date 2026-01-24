@@ -411,10 +411,34 @@ impl Preprocessor {
                 is_predefined: true,
             });
 
-            // Directive handling: top-level files process directives even during
-            // multi-line accumulation; included files only when no pending line.
+            // Directive handling: #if/#ifdef/#ifndef/#elif/#else/#endif must always
+            // be processed regardless of pending multi-line accumulation. Other
+            // directives (#include, #define, etc.) are only processed when there's
+            // no pending line in included files.
             let is_directive = trimmed.starts_with('#');
-            let process_directive = is_directive && (!is_include || pending_line.is_empty());
+            let is_conditional_directive = if is_directive {
+                let after_hash = trimmed[1..].trim_start();
+                after_hash.starts_with("if")
+                    || after_hash.starts_with("elif")
+                    || after_hash.starts_with("else")
+                    || after_hash.starts_with("endif")
+            } else {
+                false
+            };
+            let process_directive = is_directive
+                && (!is_include || pending_line.is_empty() || is_conditional_directive);
+
+            // If we're in an included file with a pending line and hit a conditional
+            // directive, flush the pending line first so it doesn't get lost.
+            if process_directive && is_include && !pending_line.is_empty() && is_conditional_directive {
+                let expanded = self.macros.expand_line(&pending_line);
+                output.push_str(&expanded);
+                for _ in 0..pending_newlines {
+                    output.push('\n');
+                }
+                pending_line.clear();
+                pending_newlines = 0;
+            }
 
             if process_directive {
                 let include_result = self.process_directive(trimmed, line_num + 1);
