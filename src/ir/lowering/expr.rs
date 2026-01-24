@@ -887,6 +887,8 @@ impl Lowerer {
                     || pointee.is_complex()
             } else { false }
         };
+        // Check if dereferencing yields an aggregate (array/struct/union/complex).
+        // In that case, the result is an address (no Load needed).
         if self.get_expr_ctype(inner).map_or(false, |ct| pointee_is_aggregate(&ct)) {
             return self.lower_expr(inner);
         }
@@ -895,8 +897,14 @@ impl Lowerer {
             if pointee_is_aggregate(&inner_ct) {
                 return self.lower_expr(inner);
             }
+            // Handle *array where array is a multi-dimensional array:
+            // e.g., *x where x is int[2][3] has inner CType = Array(Array(Int,3), 2).
+            // Dereferencing peels off the outer dimension, yielding Array(Int,3) which
+            // is an aggregate — so no Load is needed, just return the base address.
             if let CType::Array(ref elem, _) = inner_ct {
-                if elem.is_complex() || matches!(elem.as_ref(), CType::Struct(_) | CType::Union(_)) {
+                if elem.is_complex()
+                    || matches!(elem.as_ref(), CType::Struct(_) | CType::Union(_) | CType::Array(_, _))
+                {
                     return self.lower_expr(inner);
                 }
             }

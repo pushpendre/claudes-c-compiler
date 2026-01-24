@@ -336,6 +336,21 @@ impl Lowerer {
                 // Not an array field - load the pointer value
                 self.lower_expr(base)
             }
+            Expr::Deref(inner, _) => {
+                // Handle *arr where arr is a multi-dimensional array.
+                // e.g., (*x)[i] where x is int[2][3]: *x yields int[3] (sub-array),
+                // which decays to a pointer = the base address of x.
+                let deref_yields_array = self.get_expr_ctype(base)
+                    .map(|ct| matches!(ct, CType::Array(_, _)))
+                    .unwrap_or(false);
+                if deref_yields_array {
+                    // The dereference yields a sub-array, so the address is just
+                    // the value of the inner expression (the array base address).
+                    return self.lower_expr(inner);
+                }
+                // Otherwise, it's a normal pointer dereference - evaluate to get address
+                self.lower_expr(base)
+            }
             _ => {
                 self.lower_expr(base)
             }
@@ -484,9 +499,16 @@ impl Lowerer {
     /// For Identifier: depth = 0
     /// For ArraySubscript(Identifier, _): depth = 1
     /// For ArraySubscript(ArraySubscript(Identifier, _), _): depth = 2
+    /// For Deref(Identifier): depth = 1 (deref peels one array dimension)
     pub(super) fn count_subscript_depth(&self, base: &Expr) -> usize {
         match base {
             Expr::ArraySubscript(inner, _, _) => 1 + self.count_subscript_depth(inner),
+            Expr::Deref(inner, _) => {
+                // Dereferencing a multi-dimensional array peels one dimension,
+                // equivalent to one level of subscripting.
+                // Recurse into inner to handle chained derefs like **x.
+                1 + self.count_subscript_depth(inner)
+            }
             _ => 0,
         }
     }
@@ -523,10 +545,12 @@ impl Lowerer {
     /// Get the root array name from the base of a subscript expression.
     /// For Identifier("a"): returns Some("a")
     /// For ArraySubscript(Identifier("a"), _): returns Some("a")
+    /// For Deref(Identifier("a")): returns Some("a") (for *arr patterns on multi-dim arrays)
     pub(super) fn get_array_root_name_from_base(&self, base: &Expr) -> Option<String> {
         match base {
             Expr::Identifier(name, _) => Some(name.clone()),
             Expr::ArraySubscript(inner, _, _) => self.get_array_root_name_from_base(inner),
+            Expr::Deref(inner, _) => self.get_array_root_name_from_base(inner),
             _ => None,
         }
     }

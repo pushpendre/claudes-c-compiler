@@ -221,13 +221,27 @@ impl Preprocessor {
             }
         }
 
-        // If we didn't find the current path in search paths, search all paths
-        // (this handles the case where the file was found relative to the source)
+        // If we didn't find the current directory in search paths, the file was
+        // included via relative-to-source resolution. For #include_next semantics,
+        // search all include paths but skip any candidate that resolves to the same
+        // file as the one currently being processed (to avoid infinite self-inclusion).
         if !found_current {
+            let current_file_canon = current_file_dir
+                .and_then(|d| {
+                    let current_candidate = d.join(include_path);
+                    std::fs::canonicalize(&current_candidate).ok()
+                });
             for search_path in &all_paths {
                 let candidate = search_path.join(include_path);
                 if candidate.is_file() {
-                    return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                    let candidate_canon = std::fs::canonicalize(&candidate).ok();
+                    // Skip if this resolves to the same file we're currently in
+                    if let (Some(ref cur), Some(ref cand)) = (&current_file_canon, &candidate_canon) {
+                        if cur == cand {
+                            continue;
+                        }
+                    }
+                    return candidate_canon.or(Some(candidate));
                 }
             }
         }
