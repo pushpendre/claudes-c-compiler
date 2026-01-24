@@ -1,0 +1,16 @@
+Fix designated initializers for anonymous struct/union members
+
+Designated initializers like { .x = 10, .y = 20, .z = 30 } silently produce
+all-zero values when the target fields belong to anonymous struct or union
+members. For example:
+
+  struct point {
+      struct { int x; int y; };  // anonymous struct
+      int z;
+  };
+  struct point p = { .x = 10, .y = 20, .z = 30 };
+  // CCC: x=0 y=0 z=0 (wrong)
+  // GCC: x=10 y=20 z=30 (correct)
+
+The issue is in the initializer lowering code which doesn't resolve designated
+field names through anonymous struct/union members to find the correct offset.
