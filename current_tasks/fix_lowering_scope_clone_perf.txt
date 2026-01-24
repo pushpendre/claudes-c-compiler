@@ -1,0 +1,16 @@
+Fix O(n^2) performance in IR lowering due to scope clone/restore pattern
+
+The lowering phase clones the entire locals HashMap, enum_constants HashMap,
+static_local_names HashMap, and const_local_values HashMap on every compound
+statement entry (lower_compound_stmt) and on every function entry (lower_function).
+
+For mbedtls with ~250 enum constants and many inline functions from headers,
+this causes 2+ second compilation times for small files (debug.c: 261 lines).
+
+Fix approach:
+1. Replace clone/restore with scope-stack pattern for locals and enum_constants:
+   - Track which keys were added in the current scope
+   - On scope exit, remove only those keys (O(scope_additions) instead of O(total_map_size))
+2. Skip lowering unused static inline functions (dead code from headers)
+
+Status: In progress
