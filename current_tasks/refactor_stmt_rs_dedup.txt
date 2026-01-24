@@ -1,0 +1,15 @@
+Refactor stmt.rs: extract repeated init/store patterns into helpers
+
+Goal: Reduce the 2228-line stmt.rs by extracting frequently repeated code patterns.
+
+Changes:
+1. Extract emit_store_at_offset(base, byte_offset, val, ty) - replaces 7-line
+   GEP+Store pattern repeated 10+ times across emit_struct_init and lower_local_decl
+2. Extract emit_init_expr_to_offset(expr, base, offset, target_ty) - combines
+   lower_expr + cast + GEP + store, repeated 6+ times
+3. Extract emit_complex_init_list(sub_items, dest_addr, complex_ctype) - replaces
+   ~40 line pattern repeated 4 times for complex {real, imag} init lists
+
+Expected net reduction: ~150-200 lines from stmt.rs.
+
+Status: in progress

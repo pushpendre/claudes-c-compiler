@@ -369,31 +369,45 @@ impl Lowerer {
                             // Check if this is an array of structs
                             let elem_struct_layout = self.locals.get(&declarator.name)
                                 .and_then(|l| l.struct_layout.clone());
-                            if da.array_dim_strides.len() > 1 {
-                                // Multi-dimensional array init: zero first, then fill
+                            if da.array_dim_strides.len() > 1 && elem_struct_layout.is_none() {
+                                // Multi-dimensional array of scalars: zero first, then fill
                                 self.zero_init_alloca(alloca, da.alloc_size);
                                 // For pointer arrays (elem_size=8 but elem_ir_ty=I8),
                                 // use I64 as the element type for stores.
                                 let md_elem_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::I64 } else { da.elem_ir_ty };
                                 self.lower_array_init_list(items, alloca, md_elem_ty, &da.array_dim_strides);
                             } else if let Some(ref s_layout) = elem_struct_layout {
-                                // Array of structs: init each element using struct layout
+                                // Array of structs: init each element using struct layout.
+                                // For multi-dimensional arrays (e.g., struct s arr[2][2]),
+                                // da.elem_size is the row stride, but we need the actual struct
+                                // size for per-element indexing in flat init.
+                                let struct_size = s_layout.size;
+                                // For multi-dim arrays, the number of struct elements is
+                                // alloc_size / struct_size (total flattened count).
+                                let is_multidim = da.array_dim_strides.len() > 1;
+                                // row_size: number of struct elements per outer dimension
+                                let row_size = if is_multidim && struct_size > 0 {
+                                    da.elem_size / struct_size
+                                } else {
+                                    0
+                                };
                                 self.zero_init_alloca(alloca, da.alloc_size);
-                                let mut current_idx = 0usize;
-                                for item in items.iter() {
+                                let mut flat_struct_idx = 0usize;
+                                let mut item_idx = 0usize;
+                                while item_idx < items.len() {
+                                    let item = &items[item_idx];
+                                    // Handle designators for index positioning
                                     if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
                                         if let Some(idx_val) = self.eval_const_expr_for_designator(idx_expr) {
-                                            current_idx = idx_val;
+                                            if is_multidim {
+                                                // For 2D arrays, [idx] designates the outer dimension
+                                                flat_struct_idx = idx_val * row_size;
+                                            } else {
+                                                flat_struct_idx = idx_val;
+                                            }
                                         }
                                     }
-                                    let base_byte_offset = current_idx * da.elem_size;
-                                    let elem_base = self.fresh_value();
-                                    self.emit(Instruction::GetElementPtr {
-                                        dest: elem_base,
-                                        base: alloca,
-                                        offset: Operand::Const(IrConst::I64(base_byte_offset as i64)),
-                                        ty: IrType::I8,
-                                    });
+                                    let base_byte_offset = flat_struct_idx * struct_size;
                                     // Check for field designator after index designator: [idx].field = val
                                     let field_designator_name = item.designators.iter().find_map(|d| {
                                         if let Designator::Field(ref name) = d {
@@ -404,34 +418,74 @@ impl Lowerer {
                                     });
                                     match &item.init {
                                         Initializer::List(sub_items) => {
-                                            // Initialize struct fields from sub-list
-                                            self.lower_local_struct_init(sub_items, elem_base, s_layout);
+                                            if is_multidim {
+                                                // Multi-dim braced sub-list: {1,2,3,4} fills one row
+                                                // of structs. Consume sub_items across struct elements.
+                                                let mut sub_idx = 0usize;
+                                                let mut row_elem = 0usize;
+                                                while sub_idx < sub_items.len() && row_elem < row_size {
+                                                    let row_offset = (flat_struct_idx + row_elem) * struct_size;
+                                                    match &sub_items[sub_idx].init {
+                                                        Initializer::List(inner) => {
+                                                            // Braced struct init: {a, b}
+                                                            let elem_base = self.fresh_value();
+                                                            self.emit(Instruction::GetElementPtr {
+                                                                dest: elem_base,
+                                                                base: alloca,
+                                                                offset: Operand::Const(IrConst::I64(row_offset as i64)),
+                                                                ty: IrType::I8,
+                                                            });
+                                                            self.lower_local_struct_init(inner, elem_base, s_layout);
+                                                            sub_idx += 1;
+                                                            row_elem += 1;
+                                                        }
+                                                        Initializer::Expr(_) => {
+                                                            // Flat scalars filling struct fields
+                                                            let consumed = self.emit_struct_init(&sub_items[sub_idx..], alloca, s_layout, row_offset);
+                                                            sub_idx += consumed.max(1);
+                                                            row_elem += 1;
+                                                        }
+                                                    }
+                                                }
+                                                flat_struct_idx += row_size;
+                                            } else {
+                                                // 1D: Initialize struct fields from sub-list
+                                                let elem_base = self.fresh_value();
+                                                self.emit(Instruction::GetElementPtr {
+                                                    dest: elem_base,
+                                                    base: alloca,
+                                                    offset: Operand::Const(IrConst::I64(base_byte_offset as i64)),
+                                                    ty: IrType::I8,
+                                                });
+                                                self.lower_local_struct_init(sub_items, elem_base, s_layout);
+                                                flat_struct_idx += 1;
+                                            }
+                                            item_idx += 1;
                                         }
                                         Initializer::Expr(e) => {
-                                            if !s_layout.fields.is_empty() {
-                                                // Use designated field if specified, otherwise first field
-                                                let field = if let Some(ref fname) = field_designator_name {
-                                                    s_layout.fields.iter().find(|f| &f.name == fname)
-                                                        .unwrap_or(&s_layout.fields[0])
-                                                } else {
-                                                    &s_layout.fields[0]
-                                                };
-                                                let field_ty = IrType::from_ctype(&field.ty);
-                                                let val = self.lower_and_cast_init_expr(e, field_ty);
-                                                let field_addr = self.fresh_value();
-                                                self.emit(Instruction::GetElementPtr {
-                                                    dest: field_addr,
-                                                    base: elem_base,
-                                                    offset: Operand::Const(IrConst::I64(field.offset as i64)),
-                                                    ty: field_ty,
-                                                });
-                                                self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                                            if let Some(ref fname) = field_designator_name {
+                                                // Designated field: [idx].field = val
+                                                if let Some(field) = s_layout.fields.iter().find(|f| &f.name == fname) {
+                                                    let field_ty = IrType::from_ctype(&field.ty);
+                                                    let val = self.lower_and_cast_init_expr(e, field_ty);
+                                                    let field_addr = self.fresh_value();
+                                                    self.emit(Instruction::GetElementPtr {
+                                                        dest: field_addr,
+                                                        base: alloca,
+                                                        offset: Operand::Const(IrConst::I64(base_byte_offset as i64 + field.offset as i64)),
+                                                        ty: field_ty,
+                                                    });
+                                                    self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                                                }
+                                                item_idx += 1;
+                                            } else {
+                                                // Flat init: consume items for all fields of this struct
+                                                let consumed = self.emit_struct_init(&items[item_idx..], alloca, s_layout, base_byte_offset);
+                                                item_idx += consumed.max(1);
+                                                flat_struct_idx += 1;
+                                                continue; // skip the increment below
                                             }
                                         }
-                                    }
-                                    // Only advance current_idx if no field designator
-                                    if field_designator_name.is_none() {
-                                        current_idx += 1;
                                     }
                                 }
                             } else if let Some(ref cplx_ctype) = complex_elem_ctype {

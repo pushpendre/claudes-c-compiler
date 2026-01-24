@@ -217,8 +217,10 @@ impl Lowerer {
                         }
                         let struct_size = layout.size;
                         // For multi-dimensional arrays, elem_size > struct_size (row stride).
-                        // Use elem_size as the stride for the outer dimension.
-                        let outer_stride = if elem_size > struct_size { elem_size } else { struct_size };
+                        let is_multidim = elem_size > struct_size;
+                        let outer_stride = if is_multidim { elem_size } else { struct_size };
+                        // row_count: number of struct elements per outer dimension
+                        let row_count = if is_multidim && struct_size > 0 { elem_size / struct_size } else { 1 };
                         let mut bytes = vec![0u8; total_size];
                         let mut current_idx = 0usize;
                         let mut item_idx = 0usize;
@@ -244,35 +246,34 @@ impl Lowerer {
                             });
                             match &item.init {
                                 Initializer::List(sub_items) => {
-                                    // Check if this is a sub-array (multi-dim array of structs).
-                                    // A sub-array means outer_stride > struct_size (multi-dim array)
-                                    // AND all sub_items are Lists (each representing a full struct init).
-                                    // For 1D arrays where struct fields include sub-struct braces,
-                                    // outer_stride == struct_size, so we don't misidentify them.
-                                    let is_subarray = outer_stride > struct_size
-                                        && !sub_items.is_empty()
-                                        && sub_items.iter().all(|si| matches!(&si.init, Initializer::List(_)));
-                                    if is_subarray {
-                                        // Multi-dimensional: sub_items are struct elements in a row.
-                                        // base_offset is the start of this row in the byte buffer.
-                                        for (si, sub_item) in sub_items.iter().enumerate() {
-                                            let sub_offset = base_offset + si * struct_size;
-                                            if sub_offset + struct_size > bytes.len() { break; }
-                                            match &sub_item.init {
+                                    if is_multidim {
+                                        // Multi-dim braced sub-list: fills one row of structs.
+                                        // Sub-items can be Lists (braced struct inits) or
+                                        // flat Exprs filling struct fields across the row.
+                                        let mut sub_idx = 0usize;
+                                        let mut row_elem = 0usize;
+                                        while sub_idx < sub_items.len() && row_elem < row_count {
+                                            let row_offset = base_offset + row_elem * struct_size;
+                                            if row_offset + struct_size > bytes.len() { break; }
+                                            match &sub_items[sub_idx].init {
                                                 Initializer::List(inner) => {
-                                                    self.write_struct_init_to_bytes(&mut bytes, sub_offset, inner, layout);
+                                                    self.write_struct_init_to_bytes(&mut bytes, row_offset, inner, layout);
+                                                    sub_idx += 1;
+                                                    row_elem += 1;
                                                 }
                                                 Initializer::Expr(_) => {
-                                                    self.fill_struct_global_bytes(&[sub_item.clone()], layout, &mut bytes, sub_offset);
+                                                    // Flat scalars filling struct fields
+                                                    let consumed = self.fill_struct_global_bytes(&sub_items[sub_idx..], layout, &mut bytes, row_offset);
+                                                    sub_idx += consumed.max(1);
+                                                    row_elem += 1;
                                                 }
                                             }
                                         }
-                                        item_idx += 1;
                                     } else {
-                                        // Single struct initializer
+                                        // 1D: Single struct initializer
                                         self.write_struct_init_to_bytes(&mut bytes, base_offset, sub_items, layout);
-                                        item_idx += 1;
                                     }
+                                    item_idx += 1;
                                 }
                                 Initializer::Expr(expr) => {
                                     if let Some(ref fname) = field_designator_name {
@@ -285,8 +286,32 @@ impl Lowerer {
                                         }
                                         item_idx += 1;
                                     } else {
-                                        // Flat init: consume items for all fields of this struct
-                                        let consumed = self.fill_struct_global_bytes(&items[item_idx..], layout, &mut bytes, base_offset);
+                                        // Flat init: consume items for all fields of this struct.
+                                        // For multi-dim arrays, fill structs sequentially across
+                                        // rows using struct_size stride, not outer_stride.
+                                        let flat_offset = if is_multidim {
+                                            // current_idx counts outer rows; compute flat struct offset
+                                            // We need to track flat struct position. Use item consumption
+                                            // to fill structs at sequential byte offsets.
+                                            // Recompute: for each outer row, fill row_count structs.
+                                            // But in flat init, we just fill structs sequentially.
+                                            // Compute the flat byte offset from how many structs we've placed.
+                                            // Since we're entering flat mode, switch to struct-by-struct filling.
+                                            let flat_struct_idx = current_idx * row_count;
+                                            let mut fi = flat_struct_idx;
+                                            let max_structs = if struct_size > 0 { total_size / struct_size } else { 0 };
+                                            while item_idx < items.len() && fi < max_structs {
+                                                let byte_off = fi * struct_size;
+                                                let consumed = self.fill_struct_global_bytes(&items[item_idx..], layout, &mut bytes, byte_off);
+                                                item_idx += consumed.max(1);
+                                                fi += 1;
+                                            }
+                                            // Skip the normal current_idx increment
+                                            continue;
+                                        } else {
+                                            base_offset
+                                        };
+                                        let consumed = self.fill_struct_global_bytes(&items[item_idx..], layout, &mut bytes, flat_offset);
                                         item_idx += consumed;
                                     }
                                 }
