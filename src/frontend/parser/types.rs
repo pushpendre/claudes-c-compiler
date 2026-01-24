@@ -450,10 +450,12 @@ impl Parser {
         fields: &mut Vec<StructFieldDecl>,
     ) {
         loop {
-            // Handle unnamed bitfield: `: expr`
+            // Handle unnamed bitfield: `: constant-expr`
             if matches!(self.peek(), TokenKind::Colon) {
                 self.advance();
-                let bit_width = Some(Box::new(self.parse_expr()));
+                // Use parse_assignment_expr to avoid consuming comma as comma-operator.
+                // Bitfield width is a constant expression (no comma operator at top level).
+                let bit_width = Some(Box::new(self.parse_assignment_expr()));
                 fields.push(StructFieldDecl {
                     type_spec: type_spec.clone(),
                     name: None,
@@ -469,9 +471,9 @@ impl Parser {
             // pointer declarators of arbitrary depth.
             let (name, derived) = self.parse_declarator();
 
-            // Parse optional bitfield width
+            // Parse optional bitfield width (constant-expression, not full expr with comma)
             let bit_width = if self.consume_if(&TokenKind::Colon) {
-                Some(Box::new(self.parse_expr()))
+                Some(Box::new(self.parse_assignment_expr()))
             } else {
                 None
             };
