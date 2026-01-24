@@ -933,9 +933,15 @@ impl ArchCodegen for X86Codegen {
             if return_type == IrType::F32 {
                 // F32 return value is in xmm0 (low 32 bits)
                 self.state.emit("    movd %xmm0, %eax");
-            } else if return_type == IrType::F64 || return_type == IrType::F128 {
-                // F64/F128 return value is in xmm0 (full 64 bits)
-                // F128 internally uses f64 bit pattern
+            } else if return_type == IrType::F128 {
+                // F128 (long double) return value is in x87 st(0) per SysV ABI.
+                // Convert from 80-bit extended to f64 bit pattern in rax.
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    movq (%rsp), %rax");
+                self.state.emit("    addq $8, %rsp");
+            } else if return_type == IrType::F64 {
+                // F64 return value is in xmm0 (full 64 bits)
                 self.state.emit("    movq %xmm0, %rax");
             }
             self.store_rax_to(&dest);
@@ -1174,8 +1180,14 @@ impl ArchCodegen for X86Codegen {
             self.operand_to_rax(val);
             if self.current_return_type == IrType::F32 {
                 self.state.emit("    movd %eax, %xmm0");
-            } else if self.current_return_type == IrType::F64 || self.current_return_type == IrType::F128 {
-                // F128 internally uses f64 bit pattern, return in xmm0
+            } else if self.current_return_type == IrType::F128 {
+                // F128 (long double) must be returned in x87 st(0) per SysV ABI.
+                // rax has f64 bit pattern; push to stack, load with fldl.
+                self.state.emit("    pushq %rax");
+                self.state.emit("    fldl (%rsp)");
+                self.state.emit("    addq $8, %rsp");
+            } else if self.current_return_type == IrType::F64 {
+                // F64 return value goes in xmm0
                 self.state.emit("    movq %rax, %xmm0");
             }
         }
