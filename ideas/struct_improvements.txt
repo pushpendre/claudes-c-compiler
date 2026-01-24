@@ -10,10 +10,12 @@ Struct/union feature improvements needed:
 3. Struct return values: Functions returning structs need the hidden first
    parameter (sret) ABI handling.
 
-4. Designated initializers: Basic field designators work. Complex cases still failing:
+4. Designated initializers: Most cases now work including:
+   - .a[1]=1, 7 (continuation after nested designator into array field)
    - .t.a[1] = {1,2,3} (nested struct + array index + brace-list value)
    - Compound literal with designators: (struct s){ {.a[1]=2,8} }
-   Note: Array-of-pointer fields with designated init (.a[1]="abc") now work.
+   - Compound literals now use full emit_struct_init path
+   Still needs work: very deep nesting edge cases.
 
 5. Nested struct initialization: Basic cases work. Multi-dimensional arrays of
    char * pointers (e.g., char *c[2][1][1][1][3]) need more work.
