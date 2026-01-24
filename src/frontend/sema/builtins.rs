@@ -142,6 +142,32 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     m.insert("__builtin_parityl", BuiltinInfo::intrinsic(BuiltinIntrinsic::Parity));
     m.insert("__builtin_parityll", BuiltinInfo::intrinsic(BuiltinIntrinsic::Parity));
 
+    // Overflow-checking arithmetic builtins
+    // Generic (type-deduced from arguments):
+    m.insert("__builtin_add_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_sub_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_mul_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    // Signed int variants:
+    m.insert("__builtin_sadd_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_saddl_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_saddll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_ssub_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_ssubl_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_ssubll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_smul_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    m.insert("__builtin_smull_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    m.insert("__builtin_smulll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    // Unsigned int variants:
+    m.insert("__builtin_uadd_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_uaddl_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_uaddll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflow));
+    m.insert("__builtin_usub_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_usubl_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_usubll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflow));
+    m.insert("__builtin_umul_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    m.insert("__builtin_umull_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+    m.insert("__builtin_umulll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
+
     // Atomics (map to libc atomic helpers for now)
     m.insert("__sync_synchronize", BuiltinInfo::intrinsic(BuiltinIntrinsic::Fence));
 
@@ -304,6 +330,12 @@ pub enum BuiltinIntrinsic {
     VaCopy,
     /// No-op builtin (evaluates args, returns 0)
     Nop,
+    /// __builtin_add_overflow(a, b, result_ptr) -> bool (1 if overflow)
+    AddOverflow,
+    /// __builtin_sub_overflow(a, b, result_ptr) -> bool (1 if overflow)
+    SubOverflow,
+    /// __builtin_mul_overflow(a, b, result_ptr) -> bool (1 if overflow)
+    MulOverflow,
     // X86 SSE intrinsics
     X86Lfence,
     X86Mfence,
@@ -377,6 +409,10 @@ pub fn builtin_to_libc_name(name: &str) -> Option<&str> {
 /// sema does not emit "implicit declaration" warnings for them.
 pub fn is_builtin(name: &str) -> bool {
     if BUILTIN_MAP.contains_key(name) {
+        return true;
+    }
+    // Builtins handled by name in try_lower_builtin_call (before map lookup)
+    if name == "__builtin_choose_expr" {
         return true;
     }
     // Atomic builtins handled by pattern matching in expr_atomics.rs

@@ -11,7 +11,7 @@
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins::{self, BuiltinKind, BuiltinIntrinsic};
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -26,6 +26,36 @@ impl Lowerer {
 
     /// Try to lower a __builtin_* call. Returns Some(result) if handled.
     pub(super) fn try_lower_builtin_call(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // Handle __builtin_choose_expr(const_expr, expr1, expr2)
+        // This is a compile-time selection: if const_expr is nonzero, returns expr1, else expr2.
+        if name == "__builtin_choose_expr" {
+            if args.len() >= 3 {
+                let condition = self.eval_const_expr(&args[0]);
+                let is_nonzero = match condition {
+                    Some(IrConst::I64(v)) => v != 0,
+                    Some(IrConst::I32(v)) => v != 0,
+                    Some(IrConst::I128(v)) => v != 0,
+                    Some(IrConst::F64(v)) => v != 0.0,
+                    Some(IrConst::F32(v)) => v != 0.0,
+                    _ => {
+                        // Try lowering to get a constant
+                        let cond_val = self.lower_expr(&args[0]);
+                        match cond_val {
+                            Operand::Const(IrConst::I64(v)) => v != 0,
+                            Operand::Const(IrConst::I32(v)) => v != 0,
+                            _ => true, // default to first expr if indeterminate
+                        }
+                    }
+                };
+                return Some(if is_nonzero {
+                    self.lower_expr(&args[1])
+                } else {
+                    self.lower_expr(&args[2])
+                });
+            }
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
         // Handle alloca specially - it needs dynamic stack allocation
         match name {
             "__builtin_alloca" | "__builtin_alloca_with_align" => {
@@ -169,6 +199,9 @@ impl Lowerer {
                 }
                 Some(Operand::Const(IrConst::I64(0)))
             }
+            BuiltinIntrinsic::AddOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Add),
+            BuiltinIntrinsic::SubOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Sub),
+            BuiltinIntrinsic::MulOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Mul),
             BuiltinIntrinsic::Clz => self.lower_unary_intrinsic(name, args, IrUnaryOp::Clz),
             BuiltinIntrinsic::Ctz => self.lower_unary_intrinsic(name, args, IrUnaryOp::Ctz),
             BuiltinIntrinsic::Bswap => self.lower_bswap_intrinsic(name, args),
@@ -442,6 +475,207 @@ impl Lowerer {
         self.emit(Instruction::UnaryOp { dest: pop, op: IrUnaryOp::Popcount, src: arg, ty });
         let dest = self.emit_binop_val(IrBinOp::And, Operand::Value(pop), Operand::Const(IrConst::I64(1)), ty);
         Some(Operand::Value(dest))
+    }
+
+    // =========================================================================
+    // Overflow-checking arithmetic builtins
+    // =========================================================================
+
+    /// Lower __builtin_{add,sub,mul}_overflow(a, b, result_ptr) and type-specific variants.
+    ///
+    /// These builtins perform an arithmetic operation, store the result through
+    /// the pointer, and return 1 (bool true) if the operation overflowed.
+    fn lower_overflow_builtin(&mut self, name: &str, args: &[Expr], op: IrBinOp) -> Option<Operand> {
+        if args.len() < 3 {
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
+        // Determine the result type from the builtin name or from the pointer argument type.
+        // Type-specific variants: __builtin_sadd_overflow (signed int), __builtin_uaddll_overflow (unsigned long long)
+        // Generic variants: __builtin_add_overflow - type from pointer arg
+        let (result_ir_ty, is_signed) = self.overflow_result_type(name, &args[2]);
+
+        // Lower the two operands
+        let lhs_val = self.lower_expr(&args[0]);
+        let rhs_val = self.lower_expr(&args[1]);
+
+        // Get the result pointer
+        let result_ptr_val = self.lower_expr(&args[2]);
+        let result_ptr = self.operand_to_value(result_ptr_val);
+
+        // Perform the operation in the result type
+        let result = self.emit_binop_val(op, lhs_val.clone(), rhs_val.clone(), result_ir_ty);
+
+        // Store the (possibly truncated/wrapped) result
+        self.emit(Instruction::Store {
+            val: Operand::Value(result),
+            ptr: result_ptr,
+            ty: result_ir_ty,
+        });
+
+        // Compute the overflow flag
+        let overflow = if is_signed {
+            self.compute_signed_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+        } else {
+            self.compute_unsigned_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+        };
+
+        Some(Operand::Value(overflow))
+    }
+
+    /// Determine the result IrType and signedness for an overflow builtin.
+    fn overflow_result_type(&self, name: &str, result_ptr_expr: &Expr) -> (IrType, bool) {
+        // Check type-specific variants first
+        // __builtin_sadd_overflow -> signed int
+        // __builtin_saddl_overflow -> signed long
+        // __builtin_saddll_overflow -> signed long long
+        // __builtin_uadd_overflow -> unsigned int
+        // etc.
+        if name.starts_with("__builtin_s") && name != "__builtin_sub_overflow" {
+            // Signed type-specific variant
+            let is_signed = true;
+            let ty = if name.ends_with("ll_overflow") {
+                IrType::I64
+            } else if name.ends_with("l_overflow") {
+                IrType::I64  // long = i64 on 64-bit
+            } else {
+                IrType::I32
+            };
+            return (ty, is_signed);
+        }
+        if name.starts_with("__builtin_u") {
+            // Unsigned type-specific variant
+            let is_signed = false;
+            let ty = if name.ends_with("ll_overflow") {
+                IrType::U64
+            } else if name.ends_with("l_overflow") {
+                IrType::U64
+            } else {
+                IrType::U32
+            };
+            return (ty, is_signed);
+        }
+
+        // Generic variant: determine type from the pointer argument's pointee type
+        let result_ctype = self.expr_ctype(result_ptr_expr);
+        if let CType::Pointer(pointee) = &result_ctype {
+            let is_signed = pointee.is_signed();
+            let ir_ty = IrType::from_ctype(pointee);
+            return (ir_ty, is_signed);
+        }
+
+        // If we can't determine the type (e.g., &local), try to get the
+        // pointee from the expression structure
+        if let Expr::AddressOf(inner, _) = result_ptr_expr {
+            let inner_ctype = self.expr_ctype(inner);
+            let is_signed = inner_ctype.is_signed();
+            let ir_ty = IrType::from_ctype(&inner_ctype);
+            return (ir_ty, is_signed);
+        }
+
+        // Default to signed long (i64) if we can't determine
+        (IrType::I64, true)
+    }
+
+    /// Compute signed overflow flag for add/sub/mul.
+    fn compute_signed_overflow(
+        &mut self,
+        op: IrBinOp,
+        lhs: Operand,
+        rhs: Operand,
+        result: Value,
+        ty: IrType,
+    ) -> Value {
+        let bits = (ty.size() * 8) as i64;
+        match op {
+            IrBinOp::Add => {
+                // Signed add overflow: ((result ^ lhs) & (result ^ rhs)) < 0
+                // i.e., overflow if both operands have same sign and result has different sign
+                let xor_lhs = self.emit_binop_val(IrBinOp::Xor, Operand::Value(result), lhs, ty);
+                let xor_rhs = self.emit_binop_val(IrBinOp::Xor, Operand::Value(result), rhs, ty);
+                let and_val = self.emit_binop_val(IrBinOp::And, Operand::Value(xor_lhs), Operand::Value(xor_rhs), ty);
+                // Check sign bit: shift right by (bits-1) and check if non-zero
+                let shifted = self.emit_binop_val(IrBinOp::AShr, Operand::Value(and_val), Operand::Const(IrConst::I64(bits - 1)), ty);
+                // The shifted value is all-ones (-1) if overflow, all-zeros (0) if not
+                // Convert to 0/1 by AND with 1
+                self.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), ty)
+            }
+            IrBinOp::Sub => {
+                // Signed sub overflow: ((lhs ^ rhs) & (result ^ lhs)) < 0
+                // overflow if operands have different signs and result sign differs from lhs
+                let xor_ops = self.emit_binop_val(IrBinOp::Xor, lhs.clone(), rhs, ty);
+                let xor_res = self.emit_binop_val(IrBinOp::Xor, Operand::Value(result), lhs, ty);
+                let and_val = self.emit_binop_val(IrBinOp::And, Operand::Value(xor_ops), Operand::Value(xor_res), ty);
+                let shifted = self.emit_binop_val(IrBinOp::AShr, Operand::Value(and_val), Operand::Const(IrConst::I64(bits - 1)), ty);
+                self.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), ty)
+            }
+            IrBinOp::Mul => {
+                // For signed multiply overflow, we widen to double width, multiply, then
+                // check if the result fits in the original width by checking that
+                // sign-extending the truncated result gives back the full result.
+                let wide_ty = Self::double_width_type(ty, true);
+                let lhs_wide = self.emit_cast_val(lhs, ty, wide_ty);
+                let rhs_wide = self.emit_cast_val(rhs, ty, wide_ty);
+                let wide_result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(lhs_wide), Operand::Value(rhs_wide), wide_ty);
+                // Truncate back to original width
+                let truncated = self.emit_cast_val(Operand::Value(wide_result), wide_ty, ty);
+                // Sign-extend truncated back to wide type
+                let sign_extended = self.emit_cast_val(Operand::Value(truncated), ty, wide_ty);
+                // Overflow if wide_result != sign_extended
+                self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(wide_result), Operand::Value(sign_extended), wide_ty)
+            }
+            _ => unreachable!("overflow only for add/sub/mul"),
+        }
+    }
+
+    /// Compute unsigned overflow flag for add/sub/mul.
+    fn compute_unsigned_overflow(
+        &mut self,
+        op: IrBinOp,
+        lhs: Operand,
+        rhs: Operand,
+        result: Value,
+        ty: IrType,
+    ) -> Value {
+        // Make sure we're comparing in unsigned type
+        let unsigned_ty = ty.to_unsigned();
+        match op {
+            IrBinOp::Add => {
+                // Unsigned add overflow: result < lhs (wrapping means the sum is smaller)
+                self.emit_cmp_val(IrCmpOp::Ult, Operand::Value(result), lhs, unsigned_ty)
+            }
+            IrBinOp::Sub => {
+                // Unsigned sub overflow: lhs < rhs (borrow occurred)
+                self.emit_cmp_val(IrCmpOp::Ult, lhs, rhs, unsigned_ty)
+            }
+            IrBinOp::Mul => {
+                // Unsigned multiply overflow: widen to double width, multiply, check upper half is zero
+                let wide_ty = Self::double_width_type(ty, false);
+                let lhs_wide = self.emit_cast_val(lhs, unsigned_ty, wide_ty);
+                let rhs_wide = self.emit_cast_val(rhs, unsigned_ty, wide_ty);
+                let wide_result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(lhs_wide), Operand::Value(rhs_wide), wide_ty);
+                // Truncate back to original width
+                let truncated = self.emit_cast_val(Operand::Value(wide_result), wide_ty, unsigned_ty);
+                // Zero-extend truncated back to wide type
+                let zero_extended = self.emit_cast_val(Operand::Value(truncated), unsigned_ty, wide_ty);
+                // Overflow if wide_result != zero_extended
+                self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(wide_result), Operand::Value(zero_extended), wide_ty)
+            }
+            _ => unreachable!("overflow only for add/sub/mul"),
+        }
+    }
+
+    /// Get the double-width integer type for overflow multiply detection.
+    fn double_width_type(ty: IrType, signed: bool) -> IrType {
+        match ty {
+            IrType::I8 | IrType::U8 => if signed { IrType::I16 } else { IrType::U16 },
+            IrType::I16 | IrType::U16 => if signed { IrType::I32 } else { IrType::U32 },
+            IrType::I32 | IrType::U32 => if signed { IrType::I64 } else { IrType::U64 },
+            IrType::I64 | IrType::U64 => if signed { IrType::I128 } else { IrType::U128 },
+            // For 128-bit, we can't widen further; use a different strategy
+            // (but this is extremely rare in practice)
+            _ => if signed { IrType::I128 } else { IrType::U128 },
+        }
     }
 
     // =========================================================================
