@@ -994,6 +994,34 @@ impl Lowerer {
             | CType::ULong | CType::ULongLong | CType::UInt128)
     }
 
+    /// Resolve a potentially stale (forward-declared) struct/union CType by looking
+    /// up the latest complete definition from the ctype_cache.
+    /// If the struct has no fields but has a name, the cache may have the full definition.
+    fn resolve_forward_declared_ctype(&self, ctype: CType) -> CType {
+        match &ctype {
+            CType::Struct(st) | CType::Union(st) if st.fields.is_empty() => {
+                if let Some(ref tag) = st.name {
+                    let is_union = matches!(&ctype, CType::Union(_));
+                    let prefix = if is_union { "union" } else { "struct" };
+                    let cache_key = format!("{}.{}", prefix, tag);
+                    if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+                        // Only use cached version if it actually has fields (is complete)
+                        match cached {
+                            CType::Struct(cached_st) | CType::Union(cached_st)
+                                if !cached_st.fields.is_empty() =>
+                            {
+                                return cached.clone();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ctype
+            }
+            _ => ctype,
+        }
+    }
+
     /// Get the CType of a struct/union field.
     fn get_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
         let base_ctype = if is_pointer_access {
@@ -1005,6 +1033,9 @@ impl Lowerer {
         } else {
             self.get_expr_ctype(base_expr)?
         };
+        // Resolve forward-declared (incomplete) struct/union types that may have
+        // been cached before the full definition was available.
+        let base_ctype = self.resolve_forward_declared_ctype(base_ctype);
         // Look up field in the struct/union type
         match &base_ctype {
             CType::Struct(st) | CType::Union(st) => {

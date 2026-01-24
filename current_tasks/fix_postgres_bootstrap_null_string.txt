@@ -1,0 +1,13 @@
+Fix PostgreSQL bootstrap NULL string argument crash
+
+After fixing the typedef pointer array init and struct string literal init bugs,
+postgres initdb's bootstrap phase now crashes with a different error:
+pg_strtoint16_safe() receives a NULL string argument during BKI parsing.
+
+The root cause is likely an uninitialized memory issue (confirmed by valgrind
+producing no errors when zeroing memory). The NULL string comes from the
+yacc parser value stack in bootparse.c, suggesting incorrect handling of
+the YYSTYPE union or stack variable initialization by the compiler.
+
+Debugging has shown the crash occurs in the boot_yyparse -> InsertOneValue
+-> OidInputFunctionCall -> int2in -> pg_strtoint16_safe(NULL) path.

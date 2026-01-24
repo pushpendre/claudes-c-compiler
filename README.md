@@ -56,72 +56,14 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
-- **Fix typedef pointer array global initialization**: Fixed a critical bug where
-  global arrays of typedef'd pointer types (e.g., `typedef const struct S *SPtr;
-  static const SPtr arr[] = { NULL, &s1, &s2 };`) had all address-of initializers
-  silently dropped, resulting in all-NULL arrays. The issue was in `analyze_declaration`:
-  `is_array_of_pointers` only checked for `DerivedDeclarator::Pointer` in the derived
-  declarator list, missing cases where the pointer is embedded in a typedef. This
-  caused the global to be treated as an array of structs (byte-serialized) instead of
-  an array of pointers (needing `.quad` relocations for addresses). Added detection of
-  typedef'd pointer types via `resolve_type_spec`. This directly fixed PostgreSQL's
-  `initdb` "unrecognized lock method: 1" crash (the `LockMethods[]` array typed via
-  `LockMethod` typedef was not initialized).
-- **Fix ARM indirect call crash (x17 clobber)**: Fixed SIGSEGV in ARM-compiled code making
-  indirect function calls (through function pointers) in functions with large stack frames
-  (offsets > 4095 bytes). The ARM backend stored the function pointer in x17 for `blr x17`,
-  but x17 is also the scratch register for `emit_load_from_sp`/`emit_store_to_sp`/
-  `emit_add_sp_offset` when handling large stack offsets. During argument setup, x17 would be
-  overwritten with a stack address computation, causing `blr x17` to jump to the stack. Fixed
-  by spilling the function pointer to a dedicated stack slot and reloading before the call.
-  This fixed sqlite3's VDBE interpreter crash on ARM and all 291 previously-crashing
-  sqllogictest cases (they were timing out under QEMU, not producing wrong results).
-- **Fix inline assembly typed operand loads/stores and memory indirection**: Fixed inline
-  assembly operand handling to use correctly-sized load/store instructions based on operand
-  type. Previously, all inline asm load/store operations used 64-bit `movq` regardless of
-  the actual operand type. For byte-sized types (e.g., PostgreSQL's `slock_t` used in
-  spinlocks with `+q` constraint), this read garbage from adjacent stack bytes and wrote
-  too many bytes back. Also fixed memory operands (`+m`) for dereferenced pointers (`*ptr`)
-  to use register-indirect addressing instead of the stack slot of the pointer value.
-  Added `operand_type` field to `AsmOperand` and `resolve_memory_operand` trait method.
-  This fixed the PostgreSQL `initdb` hang where spinlocks (using `lock xchgb`) never
-  succeeded because the exchange byte register contained garbage instead of the expected value.
-- **Fix _Bool conversion normalization (truncate-before-normalize bug)**: Fixed implicit
-  conversions to `_Bool` in initialization, assignment, return, and parameter passing.
-  Previously `emit_implicit_cast` truncated to U8 (IntNarrow) *before* `emit_bool_normalize`
-  compared to zero, so values like 256 (0x100) with a zero low byte were incorrectly converted
-  to `false`. Added `emit_bool_normalize_typed()` that compares at the source type width, and
-  restructured all four Bool conversion sites (stmt_init, expr_assign, stmt_return, expr_calls)
-  to normalize before any truncation. This was the root cause of 49 sqlite sqllogictest failures
-  — the CASE WHEN sort order corruption was actually `_Bool` flag variables being set from
-  comparison results that happened to have zero in the low byte, causing sort direction flags
-  to be silently zeroed. SQLite now passes 622/622 tests (was 573/622).
-- **Position-independent code (-fPIC) support**: Added `-fPIC`/`-fpic`/`-fPIE`/`-fpie` flag
-  parsing and x86-64 PIC codegen. In PIC mode, function calls emit `@PLT` suffix and global
-  variable accesses use `@GOTPCREL` (load address through GOT). Local symbols (`.L*` prefixed)
-  and labels retain direct `%rip`-relative addressing. This fixes PostgreSQL's shared library
-  modules (`dict_snowball.so` etc.) which failed with "relocation R_X86_64_PC32 against undefined
-  symbol cannot be used when making a shared object; recompile with -fPIC". PostgreSQL now builds
-  successfully (configure + full build including shared libraries).
-- **Atomic builtin sema registration**: Registered all `__sync_*` and `__atomic_*` builtin
-  function names in the semantic analysis pass. Previously these were handled by pattern matching
-  in the IR lowering code but not recognized by sema, causing "implicit declaration of function"
-  warnings. These warnings broke PostgreSQL's configure and compilation. Added `is_atomic_builtin()`
-  to check for all 33 atomic/sync builtin names.
-- **SSE/SSE2/SSE4.2 intrinsic support**: Bundled compiler include headers (`emmintrin.h`,
-  `xmmintrin.h`, `smmintrin.h`, `nmmintrin.h`) with `__m128i`/`__m128d` types represented as
-  16-byte aligned structs. Registered all `__builtin_ia32_*` and `_mm_*` names as compiler
-  builtins with direct SSE codegen (bypassing wrapper function ABI issues). Supports:
-  load/store (`movdqu`), compare (`pcmpeqb`, `pcmpeqd`), arithmetic (`psubusb`), logical
-  (`por`, `pand`, `pxor`), mask extraction (`pmovmskb`), byte/dword splat (`set1_epi8/32`),
-  non-temporal stores (`movnti`, `movntdq`, `movntpd`), fences (`lfence`, `mfence`, `sfence`),
-  and CRC32 (`crc32b/w/l/q`). Adds `X86SseOp` IR instruction that carries target-specific ops
-  through optimization passes. Fixes PostgreSQL build's SSE-related link errors.
-- **RISC-V far jump for large functions**: Fixed R_RISCV_JAL relocation overflow that prevented
-  building large functions (like oniguruma's `match_at` in jq). The `j` pseudo-instruction
-  (JAL with rd=x0) has only ±1MB range, which overflows in large functions. Replaced inter-block
-  unconditional branches with `jump <label>, t6` pseudo which generates `auipc + jr` with ±2GB range.
-  This fixed jq RISC-V build failure (relocation truncated to fit: R_RISCV_JAL).
+- **Fix forward-declared struct type resolution in pointer chains**: Fixed a bug where
+  struct types captured from forward declarations (e.g., `struct B;` used as a pointer
+  member before `struct B` was fully defined) retained empty field lists in the CType
+  cache. When resolving field accesses through pointer chains like `pC->pB->pA->flags[0]`,
+  the empty struct caused `get_field_ctype` to fail, falling back to an 8-byte (I64) load
+  instead of the correct 1-byte load for `unsigned char`. Fixed by adding
+  `resolve_forward_declared_ctype()` which looks up the complete struct definition from
+  the ctype_cache when encountering an empty forward-declared type.
 - **Fix union pointer arithmetic with stale CType sizes**: Fixed pointer arithmetic on union
   members accessed through forward-declared union pointers (e.g., `(&obj->ts) + 1`). The
   `AddressOf` handler in `get_pointer_elem_size_from_expr` was using `get_expr_type().size()`
@@ -279,7 +221,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | mbedtls | PASS | All 7 selftests pass (md5, sha256, sha512, aes, rsa, ecp) |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PASS | All 12 tests pass |
-| sqlite | PASS | All 622 sqllogictest pass |
+| sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
 | postgres | PARTIAL | Build succeeds; initdb progresses past spinlock init and lock method init (fixed typedef ptr array global init); bootstrap script hits invalid memory alloc request |
