@@ -1,0 +1,10 @@
+Lock: ctype_struct_arc_to_string (commit 5 of lowerer decomposition)
+
+Change CType::Struct(Arc<StructType>) → CType::Struct(String) and
+CType::Union(Arc<StructType>) → CType::Union(String).
+
+TypeContext becomes the sole owner of struct/union definitions.
+CType::size() and CType::align() take &TypeContext and resolve through it.
+All Arc<StructType> construction becomes TypeContext insertion + returning the key.
+
+This eliminates the entire class of forward-declaration staleness bugs.
