@@ -1,0 +1,23 @@
+Task: Fix atomic ordering consistency across all three backends
+
+Problem:
+The IR correctly represents AtomicOrdering (Relaxed, Acquire, Release, AcqRel, SeqCst)
+for all atomic operations, but x86 and ARM backends completely ignore the ordering
+parameter (all parameters named _ordering), always emitting the strongest semantics.
+RISC-V correctly handles ordering for RMW/CmpXchg/Store but ignores it for Load and Fence.
+
+Issues:
+1. x86 emit_atomic_store always emits mfence (even for Relaxed stores on TSO - unnecessary)
+2. x86 emit_fence always emits mfence (should be nop for Relaxed, nothing for Acquire)
+3. ARM emit_atomic_rmw uses ldxr/stxr (no ordering) instead of ldaxr/stlxr for SeqCst/AcqRel
+4. ARM emit_atomic_cmpxchg uses ldxr/stxr (no ordering) instead of ldaxr/stlxr
+5. ARM emit_atomic_load always uses ldar (acquire) even for Relaxed
+6. ARM emit_atomic_store always uses stlr (release) even for Relaxed
+7. ARM emit_fence always emits dmb ish regardless of ordering
+8. RISC-V emit_atomic_load ignores ordering (always .aq for word/dword, always full fence for sub-word)
+9. RISC-V emit_fence always emits fence rw, rw regardless of ordering
+
+Fix: Make all three backends respect the AtomicOrdering parameter appropriately
+for each architecture's memory model.
+
+Status: IN PROGRESS
