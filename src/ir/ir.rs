@@ -27,6 +27,8 @@ pub struct IrGlobal {
     pub is_static: bool,
     /// Whether this is an extern declaration (no storage emitted).
     pub is_extern: bool,
+    /// Whether this has __attribute__((common)) - use COMMON linkage.
+    pub is_common: bool,
 }
 
 /// Initializer for a global variable.

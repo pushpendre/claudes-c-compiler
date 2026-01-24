@@ -70,6 +70,7 @@ impl Parser {
                 is_extern: self.parsing_extern,
                 is_typedef: self.parsing_typedef,
                 is_const: self.parsing_const,
+                is_common: false,
                 span: start,
             }));
         }
@@ -77,9 +78,10 @@ impl Parser {
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
         self.consume_post_type_qualifiers();
 
-        let (name, derived, decl_mode_ti) = self.parse_declarator_with_attrs();
-        let (post_ctor, post_dtor, post_mode_ti) = self.parse_asm_and_attributes();
+        let (name, derived, decl_mode_ti, decl_common) = self.parse_declarator_with_attrs();
+        let (post_ctor, post_dtor, post_mode_ti, post_common) = self.parse_asm_and_attributes();
         let mode_ti = decl_mode_ti || post_mode_ti;
+        let is_common = decl_common || post_common;
         // Merge all sources of constructor/destructor: type-level attrs, declarator-level attrs, post-declarator attrs
         let is_constructor = type_level_ctor || self.parsing_constructor || post_ctor;
         let is_destructor = type_level_dtor || self.parsing_destructor || post_dtor;
@@ -99,7 +101,7 @@ impl Parser {
         if is_funcdef {
             self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common)
         }
     }
 
@@ -294,6 +296,7 @@ impl Parser {
         start: crate::common::source::Span,
         is_constructor: bool,
         is_destructor: bool,
+        mut is_common: bool,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
         let init = if self.consume_if(&TokenKind::Assign) {
@@ -310,18 +313,20 @@ impl Parser {
             span: start,
         });
 
-        let (extra_ctor, extra_dtor, _) = self.parse_asm_and_attributes();
+        let (extra_ctor, extra_dtor, _, extra_common) = self.parse_asm_and_attributes();
         if extra_ctor {
             declarators.last_mut().unwrap().is_constructor = true;
         }
         if extra_dtor {
             declarators.last_mut().unwrap().is_destructor = true;
         }
+        is_common = is_common || extra_common;
 
         // Parse additional declarators separated by commas
         while self.consume_if(&TokenKind::Comma) {
             let (dname, dderived) = self.parse_declarator();
-            let (d_ctor, d_dtor, _) = self.parse_asm_and_attributes();
+            let (d_ctor, d_dtor, _, d_common) = self.parse_asm_and_attributes();
+            is_common = is_common || d_common;
             let dinit = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
             } else {
@@ -350,6 +355,7 @@ impl Parser {
             is_extern: self.parsing_extern,
             is_typedef,
             is_const: self.parsing_const,
+            is_common,
             span: start,
         }))
     }
@@ -373,12 +379,12 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, span: start });
         }
 
         let mut mode_ti = false;
         loop {
-            let (name, derived, decl_mode_ti) = self.parse_declarator_with_attrs();
+            let (name, derived, decl_mode_ti, _) = self.parse_declarator_with_attrs();
             mode_ti = decl_mode_ti || self.skip_asm_and_attributes() || mode_ti;
             let init = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
@@ -427,7 +433,7 @@ impl Parser {
         }
 
         self.expect(&TokenKind::Semicolon);
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.

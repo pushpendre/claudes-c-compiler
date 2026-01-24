@@ -49,6 +49,7 @@ pub struct Declaration {
     pub is_extern: bool,
     pub is_typedef: bool,
     pub is_const: bool,
+    pub is_common: bool,
     pub span: Span,
 }
 
@@ -62,6 +63,7 @@ impl Declaration {
             is_extern: false,
             is_typedef: false,
             is_const: false,
+            is_common: false,
             span: Span::dummy(),
         }
     }

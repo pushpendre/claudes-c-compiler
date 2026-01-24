@@ -948,6 +948,15 @@ impl Lowerer {
             _ => {}
         }
 
+        // __builtin_prefetch(addr, [rw], [locality]) - no-op performance hint
+        if name == "__builtin_prefetch" {
+            // Evaluate args for side effects, then discard
+            for arg in args {
+                self.lower_expr(arg);
+            }
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
         // Handle atomic builtins
         if let Some(result) = self.try_lower_atomic_builtin(name, args) {
             return Some(result);

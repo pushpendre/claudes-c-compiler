@@ -77,7 +77,7 @@ impl Parser {
                 }
                 // GNU extensions
                 TokenKind::Attribute => {
-                    let (_, _, mode_ti) = self.parse_gcc_attributes();
+                    let (_, _, mode_ti, _) = self.parse_gcc_attributes();
                     has_mode_ti = has_mode_ti || mode_ti;
                     // parse_gcc_attributes already sets self.parsing_constructor/destructor
                 }
@@ -254,7 +254,7 @@ impl Parser {
                     TokenKind::Register | TokenKind::Noreturn => { self.advance(); }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Attribute => {
-                        let (_, _, mode_ti) = self.parse_gcc_attributes();
+                        let (_, _, mode_ti, _) = self.parse_gcc_attributes();
                         *has_mode_ti = *has_mode_ti || mode_ti;
                         // parse_gcc_attributes already sets self.parsing_constructor/destructor
                     }
@@ -338,21 +338,21 @@ impl Parser {
 
     /// Parse a struct or union definition/reference.
     fn parse_struct_or_union(&mut self, is_struct: bool) -> TypeSpecifier {
-        let (mut is_packed, _aligned, _) = self.parse_gcc_attributes();
+        let (mut is_packed, _aligned, _, _) = self.parse_gcc_attributes();
         let name = if let TokenKind::Identifier(n) = self.peek().clone() {
             self.advance();
             Some(n)
         } else {
             None
         };
-        let (packed2, _, _) = self.parse_gcc_attributes();
+        let (packed2, _, _, _) = self.parse_gcc_attributes();
         is_packed = is_packed || packed2;
         let fields = if matches!(self.peek(), TokenKind::LBrace) {
             Some(self.parse_struct_fields())
         } else {
             None
         };
-        let (packed3, _, _) = self.parse_gcc_attributes();
+        let (packed3, _, _, _) = self.parse_gcc_attributes();
         is_packed = is_packed || packed3;
         // Apply current #pragma pack alignment to struct definition
         let max_field_align = self.pragma_pack_align;

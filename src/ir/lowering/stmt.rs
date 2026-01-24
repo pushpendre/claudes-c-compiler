@@ -47,6 +47,7 @@ impl Lowerer {
                 is_static: decl.is_static,
                 is_extern: decl.is_extern,
                 is_const: decl.is_const,
+                is_common: decl.is_common,
                 span: decl.span,
             };
             &resolved_decl
@@ -629,6 +630,7 @@ impl Lowerer {
             init,
             is_static: true,
             is_extern: false,
+            is_common: false,
         });
 
         // Track as a global for access via GlobalAddr

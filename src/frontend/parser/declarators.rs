@@ -12,12 +12,12 @@ use super::parser::Parser;
 
 impl Parser {
     pub(super) fn parse_declarator(&mut self) -> (Option<String>, Vec<DerivedDeclarator>) {
-        let (name, derived, _) = self.parse_declarator_with_attrs();
+        let (name, derived, _, _) = self.parse_declarator_with_attrs();
         (name, derived)
     }
 
-    /// Parse a declarator, also returning whether __attribute__((mode(TI))) was found.
-    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, bool) {
+    /// Parse a declarator, also returning whether __attribute__((mode(TI))) and __attribute__((common)) were found.
+    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, bool, bool) {
         let mut derived = Vec::new();
 
         self.skip_gcc_extensions();
@@ -76,9 +76,9 @@ impl Parser {
         // Combine using inside-out rule
         let combined = self.combine_declarator_parts(derived, inner_derived, outer_suffixes);
 
-        let (_, _, has_mode_ti) = self.parse_gcc_attributes();
+        let (_, _, has_mode_ti, has_common) = self.parse_gcc_attributes();
 
-        (name, combined, has_mode_ti)
+        (name, combined, has_mode_ti, has_common)
     }
 
     /// Determine if a '(' starts a parenthesized declarator vs. a parameter list.

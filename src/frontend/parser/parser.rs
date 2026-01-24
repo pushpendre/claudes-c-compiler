@@ -260,10 +260,11 @@ impl Parser {
 
     /// Parse __attribute__((...)) and __extension__, returning struct attribute flags.
     /// Returns (is_packed, aligned_value).
-    pub(super) fn parse_gcc_attributes(&mut self) -> (bool, Option<usize>, bool) {
+    pub(super) fn parse_gcc_attributes(&mut self) -> (bool, Option<usize>, bool, bool) {
         let mut is_packed = false;
         let mut _aligned = None;
         let mut has_mode_ti = false;
+        let mut is_common = false;
         loop {
             match self.peek() {
                 TokenKind::Extension => { self.advance(); }
@@ -324,6 +325,10 @@ impl Parser {
                                             }
                                         }
                                     }
+                                    TokenKind::Identifier(name) if name == "common" || name == "__common__" => {
+                                        is_common = true;
+                                        self.advance();
+                                    }
                                     TokenKind::Identifier(name) if name == "mode" || name == "__mode__" => {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
@@ -378,22 +383,23 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_packed, _aligned, has_mode_ti)
+        (is_packed, _aligned, has_mode_ti, is_common)
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.
     /// Returns true if __attribute__((mode(TI))) was found (128-bit integer mode).
     pub(super) fn skip_asm_and_attributes(&mut self) -> bool {
-        let (_, _, mode_ti) = self.parse_asm_and_attributes();
+        let (_, _, mode_ti, _) = self.parse_asm_and_attributes();
         mode_ti
     }
 
     /// Parse __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (is_constructor, is_destructor, has_mode_ti).
-    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, bool) {
+    /// Returns (is_constructor, is_destructor, has_mode_ti, is_common).
+    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, bool, bool) {
         let mut is_constructor = false;
         let mut is_destructor = false;
         let mut has_mode_ti = false;
+        let mut has_common = false;
         loop {
             match self.peek() {
                 TokenKind::Asm => {
@@ -404,8 +410,9 @@ impl Parser {
                     }
                 }
                 TokenKind::Attribute => {
-                    let (_, _, mode_ti) = self.parse_gcc_attributes();
+                    let (_, _, mode_ti, common) = self.parse_gcc_attributes();
                     has_mode_ti = has_mode_ti || mode_ti;
+                    has_common = has_common || common;
                     if self.parsing_constructor { is_constructor = true; }
                     if self.parsing_destructor { is_destructor = true; }
                 }
@@ -415,7 +422,7 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_constructor, is_destructor, has_mode_ti)
+        (is_constructor, is_destructor, has_mode_ti, has_common)
     }
 
     /// Parse the ((...)) parameter list of __attribute__.

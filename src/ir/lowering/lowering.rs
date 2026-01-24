@@ -1587,6 +1587,7 @@ impl Lowerer {
                 init,
                 is_static,
                 is_extern: is_extern_decl,
+                is_common: decl.is_common,
             });
         }
     }

@@ -517,6 +517,7 @@ impl Lowerer {
             init: global_init,
             is_static: true, // compound literal globals are local to translation unit
             is_extern: false,
+            is_common: false,
         });
 
         GlobalInit::GlobalAddr(label)

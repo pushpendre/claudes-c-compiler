@@ -194,6 +194,17 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         out.emit("");
     }
 
+    // Common globals -> .comm directive (weak linkage, linker merges duplicates)
+    for g in globals {
+        if g.is_extern {
+            continue;
+        }
+        if !g.is_common || !matches!(g.init, GlobalInit::Zero) {
+            continue;
+        }
+        out.emit(&format!(".comm {},{},{}", g.name, g.size, g.align));
+    }
+
     // Zero-initialized globals -> .bss
     for g in globals {
         if g.is_extern {
@@ -201,6 +212,9 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         }
         if !matches!(g.init, GlobalInit::Zero) {
             continue;
+        }
+        if g.is_common {
+            continue; // already emitted as .comm
         }
         if !has_bss {
             out.emit(".section .bss");
