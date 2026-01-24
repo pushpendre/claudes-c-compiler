@@ -1,0 +1,9 @@
+Fix 128-bit integer call return values and compound assignment operations.
+
+Two bugs:
+1. maybe_narrow_call_result incorrectly casts I128/U128 return values from I64,
+   destroying the high 64 bits. This breaks mbedtls bignum division.
+2. usual_arithmetic_conversions forces op_ty to I64 for all integer compound
+   assignments, causing 128-bit |=, &=, etc. to only operate on low 64 bits.
+
+Also adds missing __SIZEOF_INT128__ and __SIZEOF_WINT_T__ predefined macros.
