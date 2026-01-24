@@ -1717,7 +1717,9 @@ impl Lowerer {
     }
 
     /// Collect enum constants from a type specifier.
-    pub(super) fn collect_enum_constants(&mut self, ts: &TypeSpecifier) {
+    /// When `scoped` is true, uses scope-tracked insertion (for block-scoped enums
+    /// that need undo on scope exit). When false, inserts directly (for file-scope).
+    fn collect_enum_constants_impl(&mut self, ts: &TypeSpecifier, scoped: bool) {
         match ts {
             TypeSpecifier::Enum(_, Some(variants)) => {
                 let mut next_val: i64 = 0;
@@ -1729,54 +1731,39 @@ impl Lowerer {
                             }
                         }
                     }
-                    self.enum_constants.insert(variant.name.clone(), next_val);
+                    if scoped {
+                        self.insert_enum_scoped(variant.name.clone(), next_val);
+                    } else {
+                        self.enum_constants.insert(variant.name.clone(), next_val);
+                    }
                     next_val += 1;
                 }
             }
             // Recurse into struct/union fields to find enum definitions within them
             TypeSpecifier::Struct(_, Some(fields), _, _) | TypeSpecifier::Union(_, Some(fields), _, _) => {
                 for field in fields {
-                    self.collect_enum_constants(&field.type_spec);
+                    self.collect_enum_constants_impl(&field.type_spec, scoped);
                 }
             }
             // Unwrap Array and Pointer wrappers to find nested enum definitions.
             // This handles cases like: enum { A, B } volatile arr[2][2]; inside structs,
             // where the field type becomes Array(Array(Enum(...))).
             TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner) => {
-                self.collect_enum_constants(inner);
+                self.collect_enum_constants_impl(inner, scoped);
             }
             _ => {}
         }
     }
 
+    /// Collect enum constants from a type specifier (file-scope, direct insertion).
+    pub(super) fn collect_enum_constants(&mut self, ts: &TypeSpecifier) {
+        self.collect_enum_constants_impl(ts, false);
+    }
+
     /// Collect enum constants from a type specifier, using scoped insertion
     /// so that constants are tracked in the current scope frame for undo on scope exit.
     pub(super) fn collect_enum_constants_scoped(&mut self, ts: &TypeSpecifier) {
-        match ts {
-            TypeSpecifier::Enum(_, Some(variants)) => {
-                let mut next_val: i64 = 0;
-                for variant in variants {
-                    if let Some(ref expr) = variant.value {
-                        if let Some(val) = self.eval_const_expr(expr) {
-                            if let Some(v) = self.const_to_i64(&val) {
-                                next_val = v;
-                            }
-                        }
-                    }
-                    self.insert_enum_scoped(variant.name.clone(), next_val);
-                    next_val += 1;
-                }
-            }
-            TypeSpecifier::Struct(_, Some(fields), _, _) | TypeSpecifier::Union(_, Some(fields), _, _) => {
-                for field in fields {
-                    self.collect_enum_constants_scoped(&field.type_spec);
-                }
-            }
-            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner) => {
-                self.collect_enum_constants_scoped(inner);
-            }
-            _ => {}
-        }
+        self.collect_enum_constants_impl(ts, true);
     }
 
     // NOTE: collect_enum_constants_from_compound and collect_enum_constants_from_stmt

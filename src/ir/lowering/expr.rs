@@ -685,7 +685,7 @@ impl Lowerer {
 
         // Perform the operation
         let is_unsigned = storage_ty.is_unsigned();
-        let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
+        let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
         let result = self.emit_binop_val(ir_op, current_val, rhs_val, IrType::I64);
 
         // Store back via read-modify-write
@@ -1345,97 +1345,88 @@ impl Lowerer {
         Some(Operand::Value(result))
     }
 
-    /// Lower __builtin_isnan(x) -> 1 if x is NaN, 0 otherwise.
-    /// NaN: abs(bits) > exp_only (exponent all 1s AND mantissa non-zero).
-    fn lower_builtin_isnan(&mut self, args: &[Expr]) -> Option<Operand> {
+    /// Shared setup for FP classification builtins: validates args, lowers the
+    /// float argument, bitcasts to integer bits, and retrieves the FP masks.
+    /// The closure receives (self, bits, int_ty, masks) and emits the
+    /// classification-specific IR, returning the result Value.
+    ///
+    /// Masks tuple: (abs_mask, exp_only, exp_shift, exp_field_max, mant_mask)
+    fn lower_fp_classify_with<F>(&mut self, args: &[Expr], classify: F) -> Option<Operand>
+    where
+        F: FnOnce(&mut Self, Operand, IrType, IrType, (i64, i64, i64, i64, i64)) -> Value,
+    {
         if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
-
-        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
-        let result = self.emit_cmp_val(IrCmpOp::Ugt, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty);
+        let masks = Self::fp_masks(arg_ty);
+        let result = classify(self, bits, arg_ty, int_ty, masks);
         Some(Operand::Value(result))
+    }
+
+    /// Lower __builtin_isnan(x) -> 1 if x is NaN, 0 otherwise.
+    /// NaN: abs(bits) > exp_only (exponent all 1s AND mantissa non-zero).
+    fn lower_builtin_isnan(&mut self, args: &[Expr]) -> Option<Operand> {
+        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (abs_mask, exp_only, _, _, _)| {
+            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
+            s.emit_cmp_val(IrCmpOp::Ugt, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty)
+        })
     }
 
     /// Lower __builtin_isinf(x) -> nonzero if x is +/-infinity.
     /// Inf: abs(bits) == exp_only.
     fn lower_builtin_isinf(&mut self, args: &[Expr]) -> Option<Operand> {
-        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
-        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
-        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
-
-        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
-        let result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty);
-        Some(Operand::Value(result))
+        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (abs_mask, exp_only, _, _, _)| {
+            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
+            s.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty)
+        })
     }
 
     /// Lower __builtin_isfinite(x) -> 1 if x is finite (not inf or nan).
     /// Finite: (bits & exp_only) != exp_only.
     fn lower_builtin_isfinite(&mut self, args: &[Expr]) -> Option<Operand> {
-        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
-        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
-        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let (_, exp_only, _, _, _) = Self::fp_masks(arg_ty);
-
-        let exp_bits = self.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
-        let result = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_only)), int_ty);
-        Some(Operand::Value(result))
+        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (_, exp_only, _, _, _)| {
+            let exp_bits = s.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
+            s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_only)), int_ty)
+        })
     }
 
     /// Lower __builtin_isnormal(x) -> 1 if x is a normal number.
     /// Normal: exponent != 0 AND exponent != max.
     fn lower_builtin_isnormal(&mut self, args: &[Expr]) -> Option<Operand> {
-        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
-        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
-        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let (_, exp_only, exp_shift, exp_field_max, _) = Self::fp_masks(arg_ty);
-
-        let exp_bits = self.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
-        let exponent = self.emit_binop_val(IrBinOp::LShr, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_shift)), int_ty);
-
-        let exp_nonzero = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(0)), int_ty);
-        let exp_not_max = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(exp_field_max)), int_ty);
-        let result = self.emit_binop_val(IrBinOp::And, Operand::Value(exp_nonzero), Operand::Value(exp_not_max), IrType::I32);
-        Some(Operand::Value(result))
+        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (_, exp_only, exp_shift, exp_field_max, _)| {
+            let exp_bits = s.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
+            let exponent = s.emit_binop_val(IrBinOp::LShr, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_shift)), int_ty);
+            let exp_nonzero = s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(0)), int_ty);
+            let exp_not_max = s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(exp_field_max)), int_ty);
+            s.emit_binop_val(IrBinOp::And, Operand::Value(exp_nonzero), Operand::Value(exp_not_max), IrType::I32)
+        })
     }
 
     /// Lower __builtin_signbit(x) -> nonzero if the sign bit of x is set.
     fn lower_builtin_signbit(&mut self, args: &[Expr]) -> Option<Operand> {
-        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
-        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
-        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
-
-        let shifted = self.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
-        let result = self.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), int_ty);
-        Some(Operand::Value(result))
+        self.lower_fp_classify_with(args, |s, bits, arg_ty, int_ty, _| {
+            let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
+            let shifted = s.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
+            s.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), int_ty)
+        })
     }
 
     /// Lower __builtin_isinf_sign(x) -> -1 if -inf, +1 if +inf, 0 otherwise.
     fn lower_builtin_isinf_sign(&mut self, args: &[Expr]) -> Option<Operand> {
-        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
-        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
-        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
-        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
-
-        // Check if infinite: abs(bits) == exp_only
-        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
-        let is_inf = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty);
-
-        // sign = (bits >> sign_shift) & 1
-        let sign_shifted = self.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
-        let sign_bit = self.emit_binop_val(IrBinOp::And, Operand::Value(sign_shifted), Operand::Const(IrConst::I64(1)), int_ty);
-
-        // direction = 1 - 2*sign_bit  (+1 for positive, -1 for negative)
-        let sign_x2 = self.emit_binop_val(IrBinOp::Mul, Operand::Value(sign_bit), Operand::Const(IrConst::I64(2)), IrType::I64);
-        let direction = self.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(sign_x2), IrType::I64);
-
-        // result = is_inf * direction
-        let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(is_inf), Operand::Value(direction), IrType::I64);
-        Some(Operand::Value(result))
+        self.lower_fp_classify_with(args, |s, bits, arg_ty, int_ty, (abs_mask, exp_only, _, _, _)| {
+            let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
+            // Check if infinite: abs(bits) == exp_only
+            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
+            let is_inf = s.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty);
+            // sign = (bits >> sign_shift) & 1
+            let sign_shifted = s.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
+            let sign_bit = s.emit_binop_val(IrBinOp::And, Operand::Value(sign_shifted), Operand::Const(IrConst::I64(1)), int_ty);
+            // direction = 1 - 2*sign_bit  (+1 for positive, -1 for negative)
+            let sign_x2 = s.emit_binop_val(IrBinOp::Mul, Operand::Value(sign_bit), Operand::Const(IrConst::I64(2)), IrType::I64);
+            let direction = s.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(sign_x2), IrType::I64);
+            // result = is_inf * direction
+            s.emit_binop_val(IrBinOp::Mul, Operand::Value(is_inf), Operand::Value(direction), IrType::I64)
+        })
     }
 
     /// Try to lower a GCC atomic builtin (__atomic_* or __sync_*).
@@ -2763,7 +2754,7 @@ impl Lowerer {
                 let loaded = self.load_lvalue_typed(&lv, ty);
                 let loaded_promoted = self.emit_implicit_cast(loaded, ty, op_ty);
                 let is_unsigned = self.infer_expr_type(lhs).is_unsigned();
-                let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
+                let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
                 let result = self.emit_binop_val(ir_op, loaded_promoted, rhs_promoted, op_ty);
                 // Convert result back to LHS type
                 let result_cast = self.emit_implicit_cast(Operand::Value(result), op_ty, ty);
@@ -2783,77 +2774,23 @@ impl Lowerer {
         let rhs_ir_ty = self.infer_expr_type(rhs);
         let rhs_ty = self.get_expr_type(rhs);
 
-        // Compute the common type for the operation using usual arithmetic conversions.
-        // This determines both the signedness of the operation and the type conversions needed.
-        let common_ty = if ty.is_float() || rhs_ty.is_float() {
-            if ty == IrType::F128 || rhs_ty == IrType::F128 { IrType::F128 }
-            else if ty == IrType::F64 || rhs_ty == IrType::F64 { IrType::F64 }
-            else { IrType::F32 }
-        } else {
-            Self::common_type(
-                Self::integer_promote(lhs_ir_ty),
-                Self::integer_promote(rhs_ir_ty),
-            )
-        };
-
-        // The operation type is the common type widened to at least 64 bits for integers
-        let op_ty = if common_ty.is_float() {
-            common_ty
-        } else {
-            IrType::I64
-        };
+        let (common_ty, op_ty) = Self::usual_arithmetic_conversions(ty, rhs_ty, lhs_ir_ty, rhs_ir_ty);
 
         let rhs_val = self.lower_expr_with_type(rhs, op_ty);
         if let Some(lv) = self.lower_lvalue(lhs) {
             let loaded = self.load_lvalue_typed(&lv, ty);
-            // Cast loaded value to op_ty if needed, respecting the common type's signedness
-            let loaded_promoted = if ty != op_ty && op_ty.is_float() && !ty.is_float() {
-                // int -> float promotion: use actual LHS IR type so codegen knows if unsigned
-                let cast_from = if lhs_ir_ty.size() <= 4 && lhs_ir_ty.is_unsigned() {
-                    IrType::U64
-                } else if lhs_ir_ty == IrType::U64 {
-                    IrType::U64
-                } else {
-                    IrType::I64
-                };
-                let dest = self.emit_cast_val(loaded, cast_from, op_ty);
-                Operand::Value(dest)
-            } else if ty != op_ty && ty.is_float() && op_ty.is_float() {
-                // float width promotion (e.g., F32 -> F64)
-                let dest = self.emit_cast_val(loaded, ty, op_ty);
-                Operand::Value(dest)
-            } else if !op_ty.is_float() && lhs_ir_ty.size() < 8 {
-                // Integer promotion to 64-bit for the operation.
-                let extend_unsigned = if matches!(op, BinOp::Shl | BinOp::Shr) {
-                    lhs_ir_ty.is_unsigned()
-                } else {
-                    common_ty.is_unsigned() || lhs_ir_ty.is_unsigned()
-                };
-                let from_ty = if extend_unsigned {
-                    match lhs_ir_ty {
-                        IrType::I32 => IrType::U32,
-                        IrType::I16 => IrType::U16,
-                        IrType::I8 => IrType::U8,
-                        _ => lhs_ir_ty,
-                    }
-                } else {
-                    lhs_ir_ty
-                };
-                let dest = self.emit_cast_val(loaded, from_ty, IrType::I64);
-                Operand::Value(dest)
-            } else {
-                loaded
-            };
+            let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+            let loaded_promoted = self.promote_for_op(loaded, ty, lhs_ir_ty, op_ty, common_ty, is_shift);
 
             // Use the common type's signedness for the operation,
             // EXCEPT for shift operators where C standard says the result type
             // is the promoted type of the left operand (not the common type).
-            let is_unsigned = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let is_unsigned = if is_shift {
                 Self::integer_promote(lhs_ir_ty).is_unsigned()
             } else {
                 common_ty.is_unsigned()
             };
-            let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
+            let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
 
             // Scale RHS for pointer += and -=
             let actual_rhs = if ty == IrType::Ptr && matches!(op, BinOp::Add | BinOp::Sub) {
@@ -2865,34 +2802,7 @@ impl Lowerer {
 
             let result = self.emit_binop_val(ir_op, loaded_promoted, actual_rhs, op_ty);
 
-            // Cast result back to lhs type if needed
-            let store_val = if op_ty.is_float() && !ty.is_float() {
-                // Float -> int cast
-                let cast_to = if lhs_ir_ty == IrType::U64 || (lhs_ir_ty.is_unsigned() && lhs_ir_ty.size() <= 4) {
-                    IrType::U64
-                } else {
-                    IrType::I64
-                };
-                let dest = self.emit_cast_val(Operand::Value(result), op_ty, cast_to);
-                if lhs_ir_ty.size() < 8 {
-                    let narrowed = self.emit_cast_val(Operand::Value(dest), cast_to, lhs_ir_ty);
-                    Operand::Value(narrowed)
-                } else {
-                    Operand::Value(dest)
-                }
-            } else if op_ty.is_float() && ty.is_float() && op_ty != ty {
-                // Float narrowing (e.g., F64 -> F32)
-                let dest = self.emit_cast_val(Operand::Value(result), op_ty, ty);
-                Operand::Value(dest)
-            } else if !op_ty.is_float() && (lhs_ir_ty == IrType::I32 || lhs_ir_ty == IrType::U32
-                || lhs_ir_ty == IrType::I16 || lhs_ir_ty == IrType::U16
-                || lhs_ir_ty == IrType::I8 || lhs_ir_ty == IrType::U8) {
-                // Truncate result back to narrower LHS type
-                let narrowed = self.emit_cast_val(Operand::Value(result), IrType::I64, lhs_ir_ty);
-                Operand::Value(narrowed)
-            } else {
-                Operand::Value(result)
-            };
+            let store_val = self.narrow_from_op(Operand::Value(result), ty, lhs_ir_ty, op_ty);
             // _Bool lvalues normalize the result to 0 or 1
             let store_val = if self.is_bool_lvalue(lhs) {
                 self.emit_bool_normalize(store_val)
@@ -2905,10 +2815,83 @@ impl Lowerer {
         rhs_val
     }
 
-    /// Map a compound assignment operator to the corresponding IrBinOp.
-    /// Delegates to binop_to_ir for all known operators, defaults to Add for unknown.
-    fn compound_assign_to_ir(op: &BinOp, is_unsigned: bool) -> IrBinOp {
-        Self::binop_to_ir(op.clone(), is_unsigned)
+    // -----------------------------------------------------------------------
+    // Usual arithmetic conversions helpers
+    // -----------------------------------------------------------------------
+
+    /// Compute the common type and operation type for a binary operation
+    /// using C's "usual arithmetic conversions". Returns (common_ty, op_ty)
+    /// where op_ty is common_ty widened to I64 for integers.
+    fn usual_arithmetic_conversions(lhs_ty: IrType, rhs_ty: IrType, lhs_ir_ty: IrType, rhs_ir_ty: IrType) -> (IrType, IrType) {
+        let common_ty = if lhs_ty.is_float() || rhs_ty.is_float() {
+            if lhs_ty == IrType::F128 || rhs_ty == IrType::F128 { IrType::F128 }
+            else if lhs_ty == IrType::F64 || rhs_ty == IrType::F64 { IrType::F64 }
+            else { IrType::F32 }
+        } else {
+            Self::common_type(
+                Self::integer_promote(lhs_ir_ty),
+                Self::integer_promote(rhs_ir_ty),
+            )
+        };
+        let op_ty = if common_ty.is_float() { common_ty } else { IrType::I64 };
+        (common_ty, op_ty)
+    }
+
+    /// Promote a loaded value to the operation type for compound assignment.
+    /// Handles int->float, float widening, and integer promotion.
+    fn promote_for_op(&mut self, loaded: Operand, val_ty: IrType, ir_ty: IrType, op_ty: IrType, common_ty: IrType, is_shift: bool) -> Operand {
+        if val_ty != op_ty && op_ty.is_float() && !val_ty.is_float() {
+            // int -> float: use actual IR type so codegen knows if unsigned
+            let cast_from = if ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
+            Operand::Value(self.emit_cast_val(loaded, cast_from, op_ty))
+        } else if val_ty != op_ty && val_ty.is_float() && op_ty.is_float() {
+            // float width promotion (e.g., F32 -> F64)
+            Operand::Value(self.emit_cast_val(loaded, val_ty, op_ty))
+        } else if !op_ty.is_float() && ir_ty.size() < 8 {
+            // Integer promotion to 64-bit
+            let extend_unsigned = if is_shift {
+                ir_ty.is_unsigned()
+            } else {
+                common_ty.is_unsigned() || ir_ty.is_unsigned()
+            };
+            let from_ty = if extend_unsigned {
+                match ir_ty {
+                    IrType::I32 => IrType::U32,
+                    IrType::I16 => IrType::U16,
+                    IrType::I8 => IrType::U8,
+                    _ => ir_ty,
+                }
+            } else {
+                ir_ty
+            };
+            Operand::Value(self.emit_cast_val(loaded, from_ty, IrType::I64))
+        } else {
+            loaded
+        }
+    }
+
+    /// Narrow a result from operation type back to the target type after
+    /// a compound assignment. Handles float->int, float narrowing, and
+    /// integer truncation.
+    fn narrow_from_op(&mut self, result: Operand, target_ty: IrType, target_ir_ty: IrType, op_ty: IrType) -> Operand {
+        if op_ty.is_float() && !target_ty.is_float() {
+            // Float -> int cast
+            let cast_to = if target_ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
+            let dest = self.emit_cast_val(result, op_ty, cast_to);
+            if target_ir_ty.size() < 8 {
+                Operand::Value(self.emit_cast_val(Operand::Value(dest), cast_to, target_ir_ty))
+            } else {
+                Operand::Value(dest)
+            }
+        } else if op_ty.is_float() && target_ty.is_float() && op_ty != target_ty {
+            // Float narrowing (e.g., F64 -> F32)
+            Operand::Value(self.emit_cast_val(result, op_ty, target_ty))
+        } else if !op_ty.is_float() && target_ir_ty.size() < 8 {
+            // Truncate result back to narrower type
+            Operand::Value(self.emit_cast_val(result, IrType::I64, target_ir_ty))
+        } else {
+            result
+        }
     }
 
     // -----------------------------------------------------------------------
