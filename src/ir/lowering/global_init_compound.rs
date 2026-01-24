@@ -681,23 +681,72 @@ impl Lowerer {
         } else if let Initializer::List(ref sub_items) = item.init {
             // The init is a list for a struct/union - scan its fields for pointers
             if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
-                let mut current_fi = 0usize;
-                for si in sub_items {
-                    let si_fi = self.resolve_struct_init_field_idx(si, &sub_layout, current_fi);
-                    if si_fi >= sub_layout.fields.len() { continue; }
-                    let si_field = &sub_layout.fields[si_fi];
-                    let si_offset = field_offset + si_field.offset;
-                    let si_is_ptr = matches!(si_field.ty, CType::Pointer(_) | CType::Function(_));
-                    if si_is_ptr {
-                        if let Initializer::Expr(ref expr) = si.init {
+                self.collect_ptr_ranges_from_struct_init_list(
+                    sub_items, &sub_layout, field_offset, ptr_ranges);
+            }
+        }
+    }
+
+    /// Scan a braced init list for a struct and collect pointer/function-pointer
+    /// relocations. This handles the case where a nested struct field is initialized
+    /// with `{ .fn1 = hello, .fn2 = world }` and needs address relocations collected
+    /// for its pointer-typed sub-fields. Recurses into further nested structs.
+    fn collect_ptr_ranges_from_struct_init_list(
+        &mut self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        base_offset: usize,
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let mut current_fi = 0usize;
+        for si in items {
+            // Handle nested designators (e.g., .config.i = &server.field)
+            // by following the designator chain to the actual target field
+            let has_nested_desig = si.designators.len() > 1
+                && matches!(si.designators.first(), Some(Designator::Field(_)));
+            if has_nested_desig {
+                self.collect_ptr_ranges_from_nested_init(si, layout, base_offset, ptr_ranges);
+                let si_fi = self.resolve_struct_init_field_idx(si, layout, current_fi);
+                current_fi = si_fi + 1;
+                continue;
+            }
+
+            let si_fi = self.resolve_struct_init_field_idx(si, layout, current_fi);
+            if si_fi >= layout.fields.len() { continue; }
+            let si_field = &layout.fields[si_fi];
+            let si_offset = base_offset + si_field.offset;
+            let si_is_ptr = matches!(si_field.ty, CType::Pointer(_) | CType::Function(_));
+
+            if si_is_ptr {
+                if let Initializer::Expr(ref expr) = si.init {
+                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                        ptr_ranges.push((si_offset, addr_init));
+                    }
+                }
+            } else if let Initializer::List(ref nested_items) = si.init {
+                // Recurse into nested structs/unions that may also contain pointers
+                if let Some(sub_layout) = self.get_struct_layout_for_ctype(&si_field.ty) {
+                    self.collect_ptr_ranges_from_struct_init_list(
+                        nested_items, &sub_layout, si_offset, ptr_ranges);
+                }
+                // Handle arrays of pointers within nested struct
+                if Self::type_has_pointer_elements(&si_field.ty) && matches!(si_field.ty, CType::Array(..)) {
+                    let arr_size = match &si_field.ty {
+                        CType::Array(_, Some(s)) => *s,
+                        _ => nested_items.len(),
+                    };
+                    for (ai, inner_item) in nested_items.iter().enumerate() {
+                        if ai >= arr_size { break; }
+                        let elem_offset = si_offset + ai * 8;
+                        if let Initializer::Expr(ref expr) = inner_item.init {
                             if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
-                                ptr_ranges.push((si_offset, addr_init));
+                                ptr_ranges.push((elem_offset, addr_init));
                             }
                         }
                     }
-                    current_fi = si_fi + 1;
                 }
             }
+            current_fi = si_fi + 1;
         }
     }
 
@@ -880,6 +929,9 @@ impl Lowerer {
                                 } else if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
                                     // Nested struct with braced init
                                     self.fill_struct_global_bytes(inner_items, &sub_layout, &mut bytes, field_offset);
+                                    // Also collect pointer/function-pointer relocations from nested struct fields
+                                    self.collect_ptr_ranges_from_struct_init_list(
+                                        inner_items, &sub_layout, field_offset, &mut ptr_ranges);
                                 } else {
                                     // Array of scalars with braced init
                                     let elem_size = match &field.ty {
