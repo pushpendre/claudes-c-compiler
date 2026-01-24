@@ -1,0 +1,25 @@
+Task: Clean up stale ideas, remove completed current_tasks, add prioritized idea files
+
+1. Remove completed/stale ideas (diminishing returns or fully done):
+   - lowerer_decomposition.txt (all 10 commits complete)
+   - refactor_large_lowering_functions.txt (diminishing returns)
+   - unify_global_init_struct_walk.txt (diminishing returns)
+   - dedup_backend_codegen.txt (diminishing returns)
+
+2. Remove completed current_tasks:
+   - fix_flex_array_member_subscript_size.txt (DONE)
+   - fix_ptr_to_struct_array_init_stride.txt (DONE)
+   - fix_struct_copy_size_zero.txt (fixed in commit 2303d85)
+   - fix_typedef_fptr_return_signedness.txt (completed fix)
+
+3. Add 8 new prioritized idea files based on codebase investigation:
+   - high_use_def_chains.txt
+   - high_value_location_abstraction.txt
+   - medium_block_index_ir.txt
+   - medium_extract_domtree_and_cfg.txt
+   - medium_global_gvn.txt
+   - medium_mem2reg_rerunnable_for_inlining.txt
+   - medium_type_spec_to_ctype_unification.txt
+   - low_structured_error_infrastructure.txt
+
+Status: IN PROGRESS
