@@ -1,0 +1,14 @@
+Fix designated initializer bugs
+
+Issues being fixed:
+1. Compound literals (e.g., (struct a){1,2}) not recognized as struct values
+   in struct initialization, causing .a=(struct a){1,2} to fail
+2. String literals in designated array init for global vars (e.g., .a[1]="abc")
+   not written correctly to the global data section
+3. String literals in designated array init for local vars similarly broken
+4. Flat struct initializer array size calculation counting scalars instead of
+   struct members (e.g., struct {int m; char ch;} x[] = {1,'b'} creating
+   2-element array instead of 1-element)
+
+These affect many compiler_suite_0030_*, 0031_*, 0032_* tests as well as
+array-of-structs and designated-initializer tagged tests.
