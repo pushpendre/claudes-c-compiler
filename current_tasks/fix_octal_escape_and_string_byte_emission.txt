@@ -1,0 +1,16 @@
+Task: Fix octal escape parsing and string byte emission
+Status: In progress
+Description:
+  Bug 1: Octal escape \0 was parsed as a special case returning null,
+  preventing \040, \007 etc. from being correctly parsed as multi-digit
+  octal escapes. The \0 arm consumed only one digit, leaving remaining
+  digits as literal characters. This broke sqlite's memcmp check:
+    memcmp(&page[21], "\100\040\040", 3)  -- \040 was parsed as \0 + literal "40"
+
+  Bug 2: String literals containing chars > 127 (e.g., \377 = 0xFF) were
+  stored as Unicode chars in Rust's String type, which caused multi-byte
+  UTF-8 encoding when emitted as bytes via .as_bytes() or .bytes().
+
+Fix: Remove dedicated b'0' => '\0' arm in lex_escape_char, let the
+b'0'..=b'7' range handle all octal escapes. Also fix all string byte
+emission to use .chars().map(|c| c as u8) instead of .as_bytes().

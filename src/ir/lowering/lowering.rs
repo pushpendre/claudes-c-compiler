@@ -535,6 +535,12 @@ impl Lowerer {
         // Seed known libc math function signatures for correct calling convention
         self.seed_libc_math_functions();
 
+        // Collect all enum constants FIRST, before struct registration.
+        // This is critical because struct fields may use enum constants as array sizes
+        // (e.g., TString *tmname[TM_N] in Lua's global_State). Without enum constants,
+        // such arrays are treated as incomplete and get wrong sizes.
+        self.collect_all_enum_constants(tu);
+
         // Pass 0: Collect all global typedef declarations so that function return
         // types and parameter types that use typedefs can be resolved in pass 1.
         for decl in &tu.decls {
@@ -629,8 +635,7 @@ impl Lowerer {
             }
         }
 
-        // Second pass: collect all enum constants from the entire AST
-        self.collect_all_enum_constants(tu);
+        // (Enum constants already collected before Pass 0 above.)
 
         // Collect constructor/destructor attributes from function definitions and declarations
         for decl in &tu.decls {

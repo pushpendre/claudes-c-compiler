@@ -2184,11 +2184,18 @@ impl Lowerer {
         let max_field_align = if is_packed { Some(1) } else { pragma_pack };
 
         if let Some(fs) = fields {
-            // Inline definition with fields: check cache first for named types
+            // Inline definition with fields: check cache first for named types.
+            // Only return cached if it has a non-zero size (not a forward-declaration stub).
+            // Forward-declared structs get cached with size 0 and must be recomputed
+            // when the full definition becomes available.
             if let Some(tag) = name {
                 let cache_key = format!("{}.{}", prefix, tag);
                 if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
-                    return cached.clone();
+                    let cached_size = cached.size();
+                    if cached_size > 0 {
+                        return cached.clone();
+                    }
+                    // Cached entry has size 0 (forward-declaration stub) - recompute below
                 }
             }
             let struct_fields: Vec<StructField> = fs.iter().map(|f| {
