@@ -1,0 +1,21 @@
+Fix parser errors to cause non-zero exit code
+
+Problem:
+- The parser prints errors via eprintln! but never tracks them
+- The driver doesn't check for parser errors after parsing
+- This causes compilation to succeed (exit 0) even when parse errors occur
+- This breaks autoconf configure scripts which check exit codes to detect:
+  - Byte ordering (bigendian check)
+  - Undeclared functions
+  - Missing struct members
+  - Feature availability
+
+Also adding implicit function declaration warnings so configure scripts
+can detect undeclared functions (needed for PostgreSQL and other projects).
+
+Fix:
+1. Add error_count field to Parser struct
+2. Increment on parse errors in expect(), expressions.rs, types.rs
+3. Return error count from parse() or add method to check
+4. Check in driver after parsing, return Err if errors > 0
+5. Add warning for implicit function declarations in sema/lowering
