@@ -19,6 +19,32 @@ fn promote_integer(ty: IrType) -> IrType {
     }
 }
 
+/// Apply C11 6.3.1.1p2 integer promotion for bitfield types.
+/// A bitfield of type unsigned int with width < 32 promotes to int (I32),
+/// because int can represent all values of the bitfield.
+/// Non-bitfield types or full-width bitfields are returned unchanged.
+fn bitfield_promoted_type(field_ty: IrType, bf_info: Option<(u32, u32)>) -> IrType {
+    if let Some((_bit_offset, bit_width)) = bf_info {
+        // Per C11 6.3.1.1p2: if int can represent all values of the bitfield,
+        // it promotes to int; otherwise unsigned int.
+        // For signed bitfields with width <= 32, int can always represent the values.
+        // For unsigned bitfields with width < 32 (i.e., fewer bits than int),
+        // int can represent all values (0..2^width-1 fits in signed 32-bit).
+        // For unsigned bitfields with width == 32, int cannot represent all values,
+        // so it stays unsigned int.
+        match field_ty {
+            IrType::U32 if bit_width < 32 => IrType::I32,
+            IrType::I32 | IrType::U32 if bit_width <= 16 => IrType::I32,
+            IrType::U16 if bit_width < 16 => IrType::I32,
+            IrType::I16 | IrType::U16 => IrType::I32,
+            IrType::U8 | IrType::I8 => IrType::I32,
+            _ => field_ty,
+        }
+    } else {
+        field_ty
+    }
+}
+
 impl Lowerer {
 
     /// Check if a TypeSpecifier resolves to long double.
@@ -64,7 +90,8 @@ impl Lowerer {
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
             }
             Expr::ArraySubscript(_, _, _) | Expr::Deref(_, _)
-            | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _) => {
+            | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _)
+            | Expr::GnuConditional(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
             }
@@ -450,6 +477,11 @@ impl Lowerer {
                 let else_ty = self.get_expr_type(else_expr);
                 Self::common_type(then_ty, else_ty)
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                let cond_ty = self.get_expr_type(cond);
+                let else_ty = self.get_expr_type(else_expr);
+                Self::common_type(cond_ty, else_ty)
+            }
             Expr::Comma(_, rhs, _) => self.get_expr_type(rhs),
             Expr::PostfixOp(_, inner, _) => self.get_expr_type(inner),
             Expr::AddressOf(_, _) => IrType::Ptr,
@@ -493,12 +525,12 @@ impl Lowerer {
                 IrType::I64
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
-                let (_, field_ty) = self.resolve_member_access(base_expr, field_name);
-                field_ty
+                let (_, field_ty, bf_info) = self.resolve_member_access_full(base_expr, field_name);
+                bitfield_promoted_type(field_ty, bf_info)
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                let (_, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
-                field_ty
+                let (_, field_ty, bf_info) = self.resolve_pointer_member_access_full(base_expr, field_name);
+                bitfield_promoted_type(field_ty, bf_info)
             }
             _ => IrType::I64,
         }
@@ -755,6 +787,11 @@ impl Lowerer {
                 let es = self.sizeof_expr(else_e);
                 ts.max(es)
             }
+            Expr::GnuConditional(cond, else_e, _) => {
+                let cs = self.sizeof_expr(cond);
+                let es = self.sizeof_expr(else_e);
+                cs.max(es)
+            }
 
             // Assignment: type of the left-hand side
             Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
@@ -942,6 +979,7 @@ impl Lowerer {
                 self.get_expr_ctype(lhs)
             }
             Expr::Conditional(_, then_expr, _, _) => self.get_expr_ctype(then_expr),
+            Expr::GnuConditional(cond, _, _) => self.get_expr_ctype(cond),
             Expr::Comma(_, last, _) => self.get_expr_ctype(last),
             Expr::StringLiteral(_, _) => {
                 // String literals have type char[] which decays to char*

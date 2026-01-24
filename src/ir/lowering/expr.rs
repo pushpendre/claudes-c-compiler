@@ -69,6 +69,9 @@ impl Lowerer {
             Expr::Conditional(cond, then_expr, else_expr, _) => {
                 self.lower_conditional(cond, then_expr, else_expr)
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                self.lower_gnu_conditional(cond, else_expr)
+            }
             Expr::Cast(ref target_type, inner, _) => self.lower_cast(target_type, inner),
             Expr::CompoundLiteral(ref type_spec, ref init, _) => {
                 self.lower_compound_literal(type_spec, init)
@@ -2115,6 +2118,58 @@ impl Lowerer {
         Operand::Value(result)
     }
 
+    /// Lower GNU conditional expression: `cond ? : else_expr`
+    /// The condition is evaluated once and used as both the condition and the
+    /// then-value if truthy. This avoids double-evaluation of side effects.
+    fn lower_gnu_conditional(&mut self, cond: &Expr, else_expr: &Expr) -> Operand {
+        // Evaluate cond once and store its value
+        let cond_val = self.lower_expr(cond);
+        let result_alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
+
+        let cond_ty = self.get_expr_type(cond);
+        let else_ty = self.get_expr_type(else_expr);
+        let common_ty = Self::common_type(cond_ty, else_ty);
+
+        // Convert cond value to boolean for branching
+        let zero = Operand::Const(IrConst::I64(0));
+        let cond_bool = self.fresh_value();
+        self.emit(Instruction::Cmp {
+            dest: cond_bool,
+            op: IrCmpOp::Ne,
+            lhs: cond_val.clone(),
+            rhs: zero,
+            ty: IrType::I64,
+        });
+
+        let then_label = self.fresh_label("gnu_cond_then");
+        let else_label = self.fresh_label("gnu_cond_else");
+        let end_label = self.fresh_label("gnu_cond_end");
+
+        self.terminate(Terminator::CondBranch {
+            cond: Operand::Value(cond_bool),
+            true_label: then_label.clone(),
+            false_label: else_label.clone(),
+        });
+
+        // Then branch: use the already-evaluated condition value
+        self.start_block(then_label);
+        let then_val = self.emit_implicit_cast(cond_val, cond_ty, common_ty);
+        self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
+        self.terminate(Terminator::Branch(end_label.clone()));
+
+        // Else branch: evaluate else_expr
+        self.start_block(else_label);
+        let else_val = self.lower_expr(else_expr);
+        let else_val = self.emit_implicit_cast(else_val, else_ty, common_ty);
+        self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
+        self.terminate(Terminator::Branch(end_label.clone()));
+
+        self.start_block(end_label);
+        let result = self.fresh_value();
+        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 });
+        Operand::Value(result)
+    }
 
     // -----------------------------------------------------------------------
     // Cast expressions
@@ -3136,6 +3191,9 @@ impl Lowerer {
             }
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 Self::common_type(self.infer_expr_type(then_expr), self.infer_expr_type(else_expr))
+            }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                Self::common_type(self.infer_expr_type(cond), self.infer_expr_type(else_expr))
             }
             Expr::Comma(_, rhs, _) => self.infer_expr_type(rhs),
             Expr::AddressOf(_, _) => IrType::Ptr,

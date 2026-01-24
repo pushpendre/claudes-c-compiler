@@ -145,6 +145,9 @@ impl Lowerer {
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 self.expr_is_pointer(then_expr) || self.expr_is_pointer(else_expr)
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                self.expr_is_pointer(cond) || self.expr_is_pointer(else_expr)
+            }
             Expr::Comma(_, rhs, _) => self.expr_is_pointer(rhs),
             Expr::FunctionCall(func, _, _) => {
                 // Check CType for function call return
@@ -274,6 +277,7 @@ impl Lowerer {
                 }
             }
             Expr::Conditional(_, then_expr, _, _) => self.get_pointer_elem_size_from_expr(then_expr),
+            Expr::GnuConditional(cond, _, _) => self.get_pointer_elem_size_from_expr(cond),
             Expr::Comma(_, rhs, _) => self.get_pointer_elem_size_from_expr(rhs),
             Expr::FunctionCall(_, _, _) => {
                 if let Some(ctype) = self.get_expr_ctype(expr) {
@@ -359,6 +363,12 @@ impl Lowerer {
             }
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 if let Some(pt) = self.get_pointee_type_of_expr(then_expr) {
+                    return Some(pt);
+                }
+                self.get_pointee_type_of_expr(else_expr)
+            }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                if let Some(pt) = self.get_pointee_type_of_expr(cond) {
                     return Some(pt);
                 }
                 self.get_pointee_type_of_expr(else_expr)

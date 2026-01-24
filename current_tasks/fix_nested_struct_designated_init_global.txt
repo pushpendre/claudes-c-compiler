@@ -1,0 +1,13 @@
+Fix nested struct designated initializers in global/static array initializers.
+
+Bug: When a global array uses designated initializers with nested struct fields
+(e.g., .interface = { .init = stringInit }), the nested struct's members are
+not correctly emitted - function pointers end up as NULL.
+
+This causes Redis to crash on startup because the config initialization table
+uses this pattern: each standardConfig entry has .interface = { .init = fn }
+and the function pointer is lost, so initConfigValues() doesn't initialize
+server.logfile, causing a NULL dereference in serverLogRaw.
+
+Root cause is likely in ir/lowering/global_init.rs where compound initializers
+for nested structs inside global arrays are processed.

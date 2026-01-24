@@ -258,6 +258,9 @@ pub enum Expr {
     Assign(Box<Expr>, Box<Expr>, Span),
     CompoundAssign(BinOp, Box<Expr>, Box<Expr>, Span),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+    /// GNU extension: `cond ? : else_expr` - condition is evaluated once and used as the
+    /// then-value if truthy. Semantically: `({ auto __tmp = cond; __tmp ? __tmp : else_expr; })`
+    GnuConditional(Box<Expr>, Box<Expr>, Span),
     FunctionCall(Box<Expr>, Vec<Expr>, Span),
     ArraySubscript(Box<Expr>, Box<Expr>, Span),
     MemberAccess(Box<Expr>, String, Span),
@@ -356,6 +359,7 @@ impl Expr {
             | Expr::CharLiteral(_, s) | Expr::Identifier(_, s)
             | Expr::BinaryOp(_, _, _, s) | Expr::UnaryOp(_, _, s) | Expr::PostfixOp(_, _, s)
             | Expr::Assign(_, _, s) | Expr::CompoundAssign(_, _, _, s) | Expr::Conditional(_, _, _, s)
+            | Expr::GnuConditional(_, _, s)
             | Expr::FunctionCall(_, _, s) | Expr::ArraySubscript(_, _, s)
             | Expr::MemberAccess(_, _, s) | Expr::PointerMemberAccess(_, _, s)
             | Expr::Cast(_, _, s) | Expr::CompoundLiteral(_, _, s) | Expr::StmtExpr(_, s)

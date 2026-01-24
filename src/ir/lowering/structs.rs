@@ -304,6 +304,10 @@ impl Lowerer {
                 self.expr_produces_packed_struct_data(then_expr)
                     || self.expr_produces_packed_struct_data(else_expr)
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                self.expr_produces_packed_struct_data(cond)
+                    || self.expr_produces_packed_struct_data(else_expr)
+            }
             Expr::Comma(_, last, _) => {
                 self.expr_produces_packed_struct_data(last)
             }
@@ -516,6 +520,9 @@ impl Lowerer {
             Expr::Conditional(_, then_expr, _, _) => {
                 self.get_pointed_struct_layout(then_expr)
             }
+            Expr::GnuConditional(cond, _, _) => {
+                self.get_pointed_struct_layout(cond)
+            }
             Expr::Comma(_, last, _) => {
                 self.get_pointed_struct_layout(last)
             }
@@ -687,6 +694,9 @@ impl Lowerer {
             Expr::Conditional(_, then_expr, _, _) => {
                 // Ternary returns the type of either branch
                 self.get_layout_for_expr(then_expr)
+            }
+            Expr::GnuConditional(cond, _, _) => {
+                self.get_layout_for_expr(cond)
             }
             Expr::Comma(_, last, _) => {
                 self.get_layout_for_expr(last)

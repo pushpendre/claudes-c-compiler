@@ -155,6 +155,10 @@ impl Lowerer {
                 self.collect_refs_from_expr(t, refs);
                 self.collect_refs_from_expr(f, refs);
             }
+            Expr::GnuConditional(c, f, _) => {
+                self.collect_refs_from_expr(c, refs);
+                self.collect_refs_from_expr(f, refs);
+            }
             Expr::Comma(lhs, rhs, _) => {
                 self.collect_refs_from_expr(lhs, refs);
                 self.collect_refs_from_expr(rhs, refs);

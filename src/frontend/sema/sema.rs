@@ -396,6 +396,10 @@ impl SemanticAnalyzer {
                 self.analyze_expr(then_expr);
                 self.analyze_expr(else_expr);
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                self.analyze_expr(cond);
+                self.analyze_expr(else_expr);
+            }
             Expr::ArraySubscript(arr, idx, _) => {
                 self.analyze_expr(arr);
                 self.analyze_expr(idx);
@@ -698,6 +702,14 @@ impl SemanticAnalyzer {
             Expr::Cast(_, inner, _) => {
                 // Simple cast: try evaluating the inner expression
                 self.eval_const_expr(inner)
+            }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                let c = self.eval_const_expr(cond)?;
+                if c != 0 {
+                    Some(c) // condition value is used as result
+                } else {
+                    self.eval_const_expr(else_expr)
+                }
             }
             Expr::Conditional(cond, then_expr, else_expr, _) => {
                 let c = self.eval_const_expr(cond)?;

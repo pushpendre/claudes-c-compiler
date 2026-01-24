@@ -73,10 +73,18 @@ impl Parser {
         let cond = self.parse_binary_expr(PrecedenceLevel::LogicalOr);
         if self.consume_if(&TokenKind::Question) {
             let span = cond.span();
-            let then_expr = self.parse_expr();
-            self.expect(&TokenKind::Colon);
-            let else_expr = self.parse_conditional_expr();
-            Expr::Conditional(Box::new(cond), Box::new(then_expr), Box::new(else_expr), span)
+            // GNU extension: `cond ? : else_expr` (omitted middle operand)
+            // Condition is evaluated once and used as the then-value if truthy.
+            if self.peek() == &TokenKind::Colon {
+                self.expect(&TokenKind::Colon);
+                let else_expr = self.parse_conditional_expr();
+                Expr::GnuConditional(Box::new(cond), Box::new(else_expr), span)
+            } else {
+                let then_expr = self.parse_expr();
+                self.expect(&TokenKind::Colon);
+                let else_expr = self.parse_conditional_expr();
+                Expr::Conditional(Box::new(cond), Box::new(then_expr), Box::new(else_expr), span)
+            }
         } else {
             cond
         }

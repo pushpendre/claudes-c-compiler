@@ -427,6 +427,15 @@ impl Lowerer {
                     if else_ct.is_complex() { else_ct } else { then_ct }
                 }
             }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                let cond_ct = self.expr_ctype(cond);
+                if cond_ct.is_complex() {
+                    cond_ct
+                } else {
+                    let else_ct = self.expr_ctype(else_expr);
+                    if else_ct.is_complex() { else_ct } else { cond_ct }
+                }
+            }
             Expr::MemberAccess(base, field, _) => {
                 // Try to resolve struct field type
                 let base_ct = self.expr_ctype(base);

@@ -149,6 +149,14 @@ impl Lowerer {
                     self.eval_const_expr(else_e)
                 }
             }
+            Expr::GnuConditional(cond, else_e, _) => {
+                let cond_val = self.eval_const_expr(cond)?;
+                if cond_val.is_nonzero() {
+                    Some(cond_val) // condition value is used as result
+                } else {
+                    self.eval_const_expr(else_e)
+                }
+            }
             Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
                 Some(IrConst::I64(if val.is_nonzero() { 0 } else { 1 }))
