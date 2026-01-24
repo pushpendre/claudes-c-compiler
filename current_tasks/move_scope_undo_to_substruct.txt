@@ -1,0 +1,11 @@
+Move scope undo tracking into TypeContext and FunctionBuildState (decomposition commit 4)
+
+Split ScopeFrame into TypeScopeFrame (for TypeContext fields: enum_constants,
+struct_layouts, ctype_cache) and FuncScopeFrame (for FunctionBuildState fields:
+locals, static_local_names, const_local_values, var_ctypes).
+
+TypeContext gets its own push_scope/pop_scope methods managing TypeScopeFrame.
+FunctionBuildState gets its own push_scope/pop_scope managing FuncScopeFrame.
+Lowerer's push_scope/pop_scope delegates to both.
+
+Scoped insert helpers move to their owning struct where possible.
