@@ -210,6 +210,18 @@ fn expand_condition_macros(expr: &str, macros: &MacroTable) -> String {
             }
             let ident: String = chars[start..i].iter().collect();
 
+            // Check if this identifier is a pp-number suffix (e.g., 1u, 0xFFULL, 1.0f).
+            // If the previous character in result is a digit, this is part of a number
+            // token and should NOT be expanded as a macro.
+            let is_ppnum_suffix = {
+                let rb = result.as_bytes();
+                !rb.is_empty() && rb[rb.len() - 1].is_ascii_alphanumeric()
+            };
+            if is_ppnum_suffix {
+                result.push_str(&ident);
+                continue;
+            }
+
             // Expand macro if it exists
             if let Some(mac) = macros.get(&ident) {
                 if !mac.is_function_like {

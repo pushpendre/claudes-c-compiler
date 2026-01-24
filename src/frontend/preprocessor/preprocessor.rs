@@ -10,7 +10,7 @@
 /// - Macro expansion in non-directive lines
 /// - Predefined macros (__LINE__, __FILE__, __STDC__, etc.)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use super::macro_defs::{MacroDef, MacroTable, parse_define};
@@ -36,6 +36,9 @@ pub struct Preprocessor {
     pub(super) resolve_includes: bool,
     /// Declarations to inject into the output (from #include processing).
     pub(super) pending_injections: Vec<String>,
+    /// Stack for #pragma push_macro / pop_macro.
+    /// Maps macro name -> stack of saved definitions (None = was undefined).
+    macro_save_stack: HashMap<String, Vec<Option<MacroDef>>>,
 }
 
 impl Preprocessor {
@@ -52,6 +55,7 @@ impl Preprocessor {
             pragma_once_files: HashSet::new(),
             resolve_includes: true,
             pending_injections: Vec::new(),
+            macro_save_stack: HashMap::new(),
         };
         pp.define_predefined_macros();
         define_builtin_macros(&mut pp.macros);
@@ -957,8 +961,58 @@ impl Preprocessor {
             return self.handle_pragma_pack(pack_content.trim());
         }
 
+        // Handle #pragma push_macro("name") / pop_macro("name")
+        if let Some(push_content) = rest.strip_prefix("push_macro") {
+            self.handle_pragma_push_macro(push_content.trim());
+            return None;
+        }
+        if let Some(pop_content) = rest.strip_prefix("pop_macro") {
+            self.handle_pragma_pop_macro(pop_content.trim());
+            return None;
+        }
+
         // Other pragmas (GCC, diagnostic, etc.) are silently ignored
         None
+    }
+
+    /// Handle #pragma push_macro("name") - save the current definition of macro.
+    fn handle_pragma_push_macro(&mut self, content: &str) {
+        if let Some(name) = Self::extract_pragma_macro_name(content) {
+            let saved = self.macros.get(&name).cloned();
+            self.macro_save_stack
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(saved);
+        }
+    }
+
+    /// Handle #pragma pop_macro("name") - restore the previously saved definition.
+    fn handle_pragma_pop_macro(&mut self, content: &str) {
+        if let Some(name) = Self::extract_pragma_macro_name(content) {
+            if let Some(stack) = self.macro_save_stack.get_mut(&name) {
+                if let Some(saved) = stack.pop() {
+                    match saved {
+                        Some(def) => self.macros.define(def),
+                        None => self.macros.undefine(&name),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract macro name from pragma argument like ("name").
+    fn extract_pragma_macro_name(content: &str) -> Option<String> {
+        let content = content.trim();
+        if !content.starts_with('(') {
+            return None;
+        }
+        let inner = content.trim_start_matches('(').trim_end_matches(')').trim();
+        // Strip quotes
+        let name = inner.trim_matches('"');
+        if name.is_empty() {
+            return None;
+        }
+        Some(name.to_string())
     }
 
     /// Handle #pragma pack directives and emit synthetic tokens for the parser.

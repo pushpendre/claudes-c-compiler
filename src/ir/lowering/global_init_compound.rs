@@ -271,7 +271,9 @@ impl Lowerer {
                         }
                     }
                 } else if let Some(val) = self.eval_const_expr(expr) {
-                    // Scalar constant - coerce to field type and emit as bytes
+                    // Scalar constant - coerce to field type before emitting as bytes.
+                    // This handles int-to-float conversion (e.g., { 2, &ptr } where
+                    // the first field is double and 2 must become 2.0 in IEEE 754).
                     let field_ir_ty = IrType::from_ctype(field_ty);
                     let coerced = val.coerce_to(field_ir_ty);
                     self.push_const_as_bytes(elements, &coerced, field_size);
@@ -465,6 +467,7 @@ impl Lowerer {
                     self.emit_ptr_expr_to_elements(elements, expr, ptr_size);
                 } else {
                     if let Some(val) = self.eval_const_expr(expr) {
+                        // Coerce to element type for correct byte representation
                         let elem_ir_ty = IrType::from_ctype(elem_ty);
                         let coerced = val.coerce_to(elem_ir_ty);
                         self.push_const_as_bytes(elements, &coerced, elem_size);

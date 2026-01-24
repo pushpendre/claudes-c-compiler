@@ -78,10 +78,22 @@ impl Lowerer {
             // Handle extern declarations inside function bodies:
             // they reference a global symbol, not a local variable
             if decl.is_extern {
-                self.locals.remove(&declarator.name);
+                // Remove from locals, but track in scope frame so pop_scope()
+                // restores the local when this block exits. This ensures that
+                // `extern int a;` inside a block only shadows the local `a`
+                // within that block, not permanently.
+                if let Some(prev_local) = self.locals.remove(&declarator.name) {
+                    if let Some(frame) = self.scope_stack.last_mut() {
+                        frame.locals_shadowed.push((declarator.name.clone(), prev_local));
+                    }
+                }
                 // Also remove from static_local_names so that the extern name
                 // resolves to the true global, not a same-named static local
-                self.static_local_names.remove(&declarator.name);
+                if let Some(prev_static) = self.static_local_names.remove(&declarator.name) {
+                    if let Some(frame) = self.scope_stack.last_mut() {
+                        frame.statics_shadowed.push((declarator.name.clone(), prev_static));
+                    }
+                }
                 // Check if this is a function declaration (extern int f(int))
                 // before treating it as a variable
                 let is_func_decl = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)));
@@ -134,8 +146,14 @@ impl Lowerer {
                     if variadic {
                         self.func_meta.variadic.insert(declarator.name.clone());
                     }
-                    // Remove from locals if previously added (e.g., shadowed by this declaration)
-                    self.locals.remove(&declarator.name);
+                    // Remove from locals, tracking in scope frame for restoration
+                    // when this block exits. This ensures function declarations only
+                    // shadow variables within their block scope.
+                    if let Some(prev_local) = self.locals.remove(&declarator.name) {
+                        if let Some(frame) = self.scope_stack.last_mut() {
+                            frame.locals_shadowed.push((declarator.name.clone(), prev_local));
+                        }
+                    }
                     continue;
                 }
 
@@ -160,7 +178,12 @@ impl Lowerer {
                             if fti.variadic {
                                 self.func_meta.variadic.insert(declarator.name.clone());
                             }
-                            self.locals.remove(&declarator.name);
+                            // Track removal for scope restoration
+                            if let Some(prev_local) = self.locals.remove(&declarator.name) {
+                                if let Some(frame) = self.scope_stack.last_mut() {
+                                    frame.locals_shadowed.push((declarator.name.clone(), prev_local));
+                                }
+                            }
                             continue;
                         }
                     }
