@@ -646,11 +646,23 @@ impl Lowerer {
         Some((field_addr, storage_ty, bit_offset, bit_width))
     }
 
-    /// Mask a value to bit_width bits and return the masked operand.
-    fn mask_to_bitwidth(&mut self, val: Operand, bit_width: u32) -> Operand {
-        let mask = (1u64 << bit_width) - 1;
-        let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
-        Operand::Value(masked)
+    /// Truncate a value to bit_width bits and sign-extend if the bitfield is signed.
+    /// This returns the value as it would be read back from the bitfield.
+    fn truncate_to_bitfield_value(&mut self, val: Operand, bit_width: u32, is_signed: bool) -> Operand {
+        if bit_width >= 64 {
+            return val;
+        }
+        if is_signed {
+            // Sign-extend: shift left to put the sign bit at bit 63, then arithmetic shift right
+            let shl_amount = 64 - bit_width;
+            let shifted = self.emit_binop_val(IrBinOp::Shl, val, Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
+            let result = self.emit_binop_val(IrBinOp::AShr, Operand::Value(shifted), Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
+            Operand::Value(result)
+        } else {
+            let mask = (1u64 << bit_width) - 1;
+            let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
+            Operand::Value(masked)
+        }
     }
 
     /// Try to lower assignment to a bitfield member. Returns Some if the LHS is a bitfield.
@@ -663,8 +675,8 @@ impl Lowerer {
         // Read-modify-write the storage unit
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, rhs_val.clone());
 
-        // Return the masked value (what was actually stored)
-        Some(self.mask_to_bitwidth(rhs_val, bit_width))
+        // Return the truncated value (what was actually stored), sign-extended for signed bitfields
+        Some(self.truncate_to_bitfield_value(rhs_val, bit_width, storage_ty.is_signed()))
     }
 
     /// Try to lower compound assignment to a bitfield member (e.g., s.bf += val).
@@ -687,13 +699,19 @@ impl Lowerer {
         // Store back via read-modify-write
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, Operand::Value(result));
 
-        // Return the new value masked to bit_width
-        Some(self.mask_to_bitwidth(Operand::Value(result), bit_width))
+        // Return the new value truncated to bit_width, sign-extended for signed bitfields
+        Some(self.truncate_to_bitfield_value(Operand::Value(result), bit_width, storage_ty.is_signed()))
     }
 
     /// Store a value into a bitfield: load storage unit, clear field bits, OR in new value, store back.
     pub(super) fn store_bitfield(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32, val: Operand) {
-        let mask = (1u64 << bit_width) - 1;
+        // When bitfield occupies the entire storage unit, just store directly
+        if bit_width >= 64 && bit_offset == 0 {
+            self.emit(Instruction::Store { val, ptr: addr, ty: storage_ty });
+            return;
+        }
+
+        let mask = if bit_width >= 64 { u64::MAX } else { (1u64 << bit_width) - 1 };
 
         // Mask the value to bit_width bits
         let masked_val = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
@@ -710,7 +728,7 @@ impl Lowerer {
         self.emit(Instruction::Load { dest: old_val, ptr: addr, ty: storage_ty });
 
         // Clear the bitfield bits: old & ~(mask << bit_offset)
-        let clear_mask = !(mask << bit_offset);
+        let clear_mask = if bit_width >= 64 { 0u64 } else { !(mask << bit_offset) };
         let cleared = self.emit_binop_val(IrBinOp::And, Operand::Value(old_val), Operand::Const(IrConst::I64(clear_mask as i64)), IrType::I64);
 
         // OR in the new value
@@ -2464,6 +2482,11 @@ impl Lowerer {
     /// Shifts right by bit_offset, then masks to bit_width bits.
     /// For signed bitfields, sign-extends the result using shl+ashr in 64-bit.
     fn extract_bitfield(&mut self, loaded: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32) -> Operand {
+        // When bitfield is the full 64-bit storage unit, just return the loaded value
+        if bit_width >= 64 && bit_offset == 0 {
+            return Operand::Value(loaded);
+        }
+
         if storage_ty.is_signed() {
             // Sign-extend: shl by (64 - bit_offset - bit_width), then ashr by (64 - bit_width)
             let shl_amount = 64 - bit_offset - bit_width;
@@ -2473,8 +2496,12 @@ impl Lowerer {
                 let shifted = self.emit_binop_val(IrBinOp::Shl, val, Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
                 val = Operand::Value(shifted);
             }
-            let result = self.emit_binop_val(IrBinOp::AShr, val, Operand::Const(IrConst::I64(ashr_amount as i64)), IrType::I64);
-            Operand::Value(result)
+            if ashr_amount > 0 {
+                let result = self.emit_binop_val(IrBinOp::AShr, val, Operand::Const(IrConst::I64(ashr_amount as i64)), IrType::I64);
+                Operand::Value(result)
+            } else {
+                val
+            }
         } else {
             // Unsigned: logical shift right + mask
             let mut val = Operand::Value(loaded);
@@ -2482,9 +2509,13 @@ impl Lowerer {
                 let shifted = self.emit_binop_val(IrBinOp::LShr, val, Operand::Const(IrConst::I64(bit_offset as i64)), IrType::I64);
                 val = Operand::Value(shifted);
             }
-            let mask = (1u64 << bit_width) - 1;
-            let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
-            Operand::Value(masked)
+            if bit_width >= 64 {
+                val
+            } else {
+                let mask = (1u64 << bit_width) - 1;
+                let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
+                Operand::Value(masked)
+            }
         }
     }
 
@@ -2629,9 +2660,9 @@ impl Lowerer {
         // Store back via read-modify-write
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, Operand::Value(result));
 
-        // Return value masked to bit_width
+        // Return value truncated to bit_width, sign-extended for signed bitfields
         let ret_val = if return_new { Operand::Value(result) } else { current_val };
-        Some(self.mask_to_bitwidth(ret_val, bit_width))
+        Some(self.truncate_to_bitfield_value(ret_val, bit_width, storage_ty.is_signed()))
     }
 
     /// Get the step value and operation type for increment/decrement.
