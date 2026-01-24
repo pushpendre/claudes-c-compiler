@@ -1,0 +1,15 @@
+Refactor types.rs: deduplicate parallel functions and extract helpers
+
+Goal: Reduce the 2658-line types.rs by deduplicating structural patterns.
+
+Changes:
+1. Unify expr_is_struct_value (~60 lines) and get_struct_size_for_expr (~58 lines)
+   into a single struct_value_size() -> Option<usize> function (~60 lines, -58 lines)
+2. Unify sizeof_type (~30 lines) and alignof_type (~29 lines) into
+   sizeof_alignof_type() -> (usize, usize) (~35 lines, -24 lines)
+3. Extract compute_strides_from_dims() helper (3 occurrences, -12 lines)
+4. Extract collect_array_dims_from_derived() helper (4+ occurrences, -20 lines)
+
+Expected net reduction: ~100-120 lines from types.rs.
+
+Status: in progress
