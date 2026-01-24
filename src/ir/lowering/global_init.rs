@@ -215,6 +215,13 @@ impl Lowerer {
                     if let Some(ref layout) = struct_layout {
                         if has_ptr_fields {
                             // Use Compound approach for struct arrays with pointer fields
+                            if array_dim_strides.len() > 1 {
+                                // Multi-dimensional struct array (e.g., struct S grid[2][3])
+                                return self.lower_struct_array_with_ptrs_multidim(
+                                    items, layout, total_size, array_dim_strides,
+                                );
+                            }
+                            // 1D struct array
                             return self.lower_struct_array_with_ptrs(items, layout, num_elems);
                         }
                         let struct_size = layout.size;

@@ -183,11 +183,8 @@ impl Lowerer {
             //   x86-64: 24 bytes (gp_offset, fp_offset, overflow_arg_area, reg_save_area)
             //   AArch64: 32 bytes (__stack, __gr_top, __vr_top, __gr_offs, __vr_offs)
             //   RISC-V: 8 bytes (just a pointer)
-            // We use 32 bytes (the max) to be safe across all architectures.
             // va_list decays to a pointer when passed to functions (it's an array type).
-            ("va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(32, Span::dummy()))))),
-            ("__builtin_va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(32, Span::dummy()))))),
-            ("__gnuc_va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(32, Span::dummy()))))),
+            // (target-dependent va_list definitions are added below)
             // <locale.h>
             ("locale_t", Pointer(Box::new(Void))),
             // <pthread.h> - opaque types, treat as unsigned long or pointer
@@ -211,6 +208,28 @@ impl Lowerer {
         for (name, ts) in builtins {
             self.typedefs.insert(name.to_string(), ts.clone());
         }
+        // Target-dependent va_list definition.
+        // On RISC-V, va_list is just `void *` (a pointer passed by value).
+        // On x86-64 and AArch64, va_list is an array/struct type that decays to
+        // a pointer when passed to functions.
+        use crate::backend::Target;
+        let va_list_type = match self.target {
+            Target::Riscv64 => {
+                // RISC-V: va_list = void * (8 bytes, passed by value)
+                Pointer(Box::new(Void))
+            }
+            Target::Aarch64 => {
+                // AArch64: va_list is a 32-byte struct, represented as char[32]
+                Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(32, Span::dummy()))))
+            }
+            Target::X86_64 => {
+                // x86-64: va_list is __va_list_tag[1], 24 bytes, represented as char[24]
+                Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))
+            }
+        };
+        self.typedefs.insert("va_list".to_string(), va_list_type.clone());
+        self.typedefs.insert("__builtin_va_list".to_string(), va_list_type.clone());
+        self.typedefs.insert("__gnuc_va_list".to_string(), va_list_type);
         // Also add the __u_char etc. POSIX internal names
         let posix_extras: &[(&str, TypeSpecifier)] = &[
             ("__u_char", UnsignedChar),

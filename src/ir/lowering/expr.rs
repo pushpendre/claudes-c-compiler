@@ -852,7 +852,7 @@ impl Lowerer {
         alloca
     }
 
-    fn lower_address_of(&mut self, inner: &Expr) -> Operand {
+    pub(super) fn lower_address_of(&mut self, inner: &Expr) -> Operand {
         if let Expr::CompoundLiteral(type_spec, init, _) = inner {
             let ty = self.type_spec_to_ir(type_spec);
             let size = self.sizeof_type(type_spec);
@@ -1325,8 +1325,9 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_va_arg(&mut self, ap_expr: &Expr, type_spec: &TypeSpecifier) -> Operand {
-        let ap_val = self.lower_expr(ap_expr);
-        let va_list_ptr = self.operand_to_value(ap_val);
+        // VaArg needs the ADDRESS of the va_list variable (to read and advance it).
+        let ap_addr = self.lower_address_of(ap_expr);
+        let va_list_ptr = self.operand_to_value(ap_addr);
         let result_ty = self.resolve_va_arg_type(type_spec);
         let dest = self.fresh_value();
         self.emit(Instruction::VaArg { dest, va_list_ptr, result_ty: result_ty.clone() });

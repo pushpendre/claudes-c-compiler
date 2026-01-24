@@ -868,6 +868,171 @@ impl Lowerer {
         }
     }
 
+    /// Lower a (possibly multi-dimensional) array of structs where some fields are pointers.
+    /// Handles multi-dimensional arrays by recursing through dimension strides.
+    pub(super) fn lower_struct_array_with_ptrs_multidim(
+        &mut self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        total_size: usize,
+        array_dim_strides: &[usize],
+    ) -> GlobalInit {
+        let struct_size = layout.size;
+        let mut compound_elements: Vec<GlobalInit> = Vec::new();
+        let mut bytes = vec![0u8; total_size];
+        let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new();
+
+        self.fill_multidim_struct_array_with_ptrs(
+            items, layout, struct_size, array_dim_strides,
+            &mut bytes, &mut ptr_ranges, 0, total_size,
+        );
+
+        // Sort ptr_ranges by offset and emit byte stream with pointer relocations
+        ptr_ranges.sort_by_key(|&(off, _)| off);
+        let mut pos = 0;
+        for (ptr_off, ref addr_init) in &ptr_ranges {
+            while pos < *ptr_off {
+                compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
+                pos += 1;
+            }
+            compound_elements.push(addr_init.clone());
+            pos += 8;
+        }
+        while pos < total_size {
+            compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
+            pos += 1;
+        }
+
+        GlobalInit::Compound(compound_elements)
+    }
+
+    /// Recursively fill a multi-dimensional struct array into byte buffer + ptr_ranges.
+    /// Similar to fill_multidim_struct_array_bytes but with pointer relocation tracking.
+    fn fill_multidim_struct_array_with_ptrs(
+        &mut self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        struct_size: usize,
+        array_dim_strides: &[usize],
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+        base_offset: usize,
+        region_size: usize,
+    ) {
+        if struct_size == 0 { return; }
+
+        let (this_stride, remaining_strides) = if array_dim_strides.len() > 1 {
+            (array_dim_strides[0], &array_dim_strides[1..])
+        } else if array_dim_strides.len() == 1 {
+            (array_dim_strides[0], &array_dim_strides[0..0])
+        } else {
+            (struct_size, &array_dim_strides[0..0])
+        };
+
+        let num_elems = if this_stride > 0 { region_size / this_stride } else { 0 };
+
+        // Check for [N].field designator pattern
+        let has_array_field_designators = items.iter().any(|item| {
+            item.designators.len() >= 2
+                && matches!(item.designators[0], Designator::Index(_))
+                && matches!(item.designators[1], Designator::Field(_))
+        });
+
+        if has_array_field_designators && this_stride == struct_size {
+            // [N].field pattern at the innermost dimension
+            let mut current_elem_idx = 0usize;
+            let mut current_field_idx = 0usize;
+            for item in items {
+                let mut elem_idx = current_elem_idx;
+                let mut remaining_desigs_start = 0;
+
+                if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                    if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                        if idx != current_elem_idx { current_field_idx = 0; }
+                        elem_idx = idx;
+                    }
+                    remaining_desigs_start = 1;
+                }
+
+                let mut field_desig: Option<&str> = None;
+                if let Some(Designator::Field(ref name)) = item.designators.get(remaining_desigs_start) {
+                    field_desig = Some(name.as_str());
+                    remaining_desigs_start += 1;
+                }
+
+                if elem_idx >= num_elems { current_elem_idx = elem_idx + 1; continue; }
+
+                let elem_base = base_offset + elem_idx * struct_size;
+                let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx) {
+                    Some(idx) => idx,
+                    None => { current_elem_idx = elem_idx; continue; }
+                };
+                let field = &layout.fields[field_idx];
+                let field_offset = elem_base + field.offset;
+
+                if remaining_desigs_start < item.designators.len() {
+                    let remaining_item = InitializerItem {
+                        designators: item.designators[remaining_desigs_start..].to_vec(),
+                        init: item.init.clone(),
+                    };
+                    self.fill_nested_designator_with_ptrs(
+                        &remaining_item, &field.ty, field_offset, bytes, ptr_ranges,
+                    );
+                } else {
+                    self.emit_struct_field_init_compound(
+                        item, field, field_offset, bytes, ptr_ranges,
+                    );
+                }
+
+                current_elem_idx = elem_idx;
+                current_field_idx = field_idx + 1;
+            }
+        } else {
+            // Sequential items: each item maps to one element at this_stride
+            let mut current_idx = 0usize;
+            for item in items {
+                if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                    if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                        current_idx = idx;
+                    }
+                }
+                if current_idx >= num_elems { current_idx += 1; continue; }
+
+                let elem_offset = base_offset + current_idx * this_stride;
+
+                match &item.init {
+                    Initializer::List(sub_items) => {
+                        if this_stride > struct_size && !remaining_strides.is_empty() {
+                            // Sub-array dimension: recurse
+                            self.fill_multidim_struct_array_with_ptrs(
+                                sub_items, layout, struct_size, remaining_strides,
+                                bytes, ptr_ranges, elem_offset, this_stride,
+                            );
+                        } else {
+                            // Single struct element: fill its fields
+                            self.fill_nested_struct_with_ptrs(
+                                sub_items, layout, elem_offset, bytes, ptr_ranges,
+                            );
+                        }
+                    }
+                    Initializer::Expr(expr) => {
+                        // Single expression for first field of struct element
+                        if !layout.fields.is_empty() {
+                            let field = &layout.fields[0];
+                            let field_offset = elem_offset + field.offset;
+                            self.write_expr_to_bytes_or_ptrs(
+                                expr, &field.ty, field_offset,
+                                field.bit_offset, field.bit_width,
+                                bytes, ptr_ranges,
+                            );
+                        }
+                    }
+                }
+                current_idx += 1;
+            }
+        }
+    }
+
     /// Lower an array of structs where some fields are pointers.
     /// Uses byte-level serialization but with Compound for address elements.
     /// Each struct element is emitted as a mix of byte constants and pointer-sized addresses.
