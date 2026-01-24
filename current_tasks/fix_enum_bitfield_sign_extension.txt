@@ -1,0 +1,34 @@
+Bug: Enum bitfield values are sign-extended instead of zero-extended
+
+Status: COMPLETED
+
+Problem:
+When reading a bitfield of enum type, the compiler sign-extends the value
+instead of zero-extending it. For example, enum value 151 (0x97) stored in
+an 8-bit bitfield gets sign-extended to -105 when loaded.
+
+Example:
+  enum Code { CODE_151 = 151 };
+  struct S { enum Code code : 8; };
+  struct S s;
+  s.code = CODE_151;
+  int val = s.code;  // gave -105 instead of 151
+
+Root cause:
+The lowerer's type_spec_to_ctype() mapped TypeSpecifier::Enum to CType::Int
+(signed). This CType was stored in StructFieldLayout.ty during struct layout
+computation. When loading the bitfield, IrType::from_ctype(CType::Int)
+returned IrType::I32 (signed), causing extract_bitfield() to use the signed
+path (SHL + arithmetic shift right) instead of the unsigned path (AND mask).
+
+GCC treats enum bitfields as unsigned on x86-64 (zero-extends on load).
+
+Fix:
+In the struct layout computation (struct_or_union_to_ctype and
+compute_struct_union_layout_packed in types.rs), when a bitfield has an
+Enum type specifier and the resolved CType is Int, change it to UInt.
+This makes the bitfield storage type unsigned, matching GCC behavior.
+
+Files changed:
+- src/ir/lowering/types.rs (enum bitfield type override in two struct layout paths)
+- tests/enum-bitfield-unsigned-zero-extend/ (new regression test)

@@ -578,7 +578,15 @@ impl Lowerer {
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
                 self.eval_const_expr(bw).and_then(|c| c.to_u32())
             });
-            let ty = self.struct_field_ctype(f);
+            let mut ty = self.struct_field_ctype(f);
+            // GCC treats enum bitfields as unsigned (see struct_or_union_to_ctype)
+            if bit_width.is_some() {
+                if let TypeSpecifier::Enum(_, _) = &f.type_spec {
+                    if ty == CType::Int {
+                        ty = CType::UInt;
+                    }
+                }
+            }
             StructField {
                 name: f.name.clone().unwrap_or_default(),
                 ty,
@@ -1207,7 +1215,18 @@ impl Lowerer {
                 let bit_width = f.bit_width.as_ref().and_then(|bw| {
                     self.eval_const_expr(bw).and_then(|c| c.to_u32())
                 });
-                let ty = self.struct_field_ctype(f);
+                let mut ty = self.struct_field_ctype(f);
+                // GCC treats enum bitfields as unsigned: values are zero-extended
+                // on load, not sign-extended. When the type specifier is Enum but
+                // type_spec_to_ctype collapsed it to CType::Int, switch to UInt
+                // for bitfield storage so that extract_bitfield uses the unsigned path.
+                if bit_width.is_some() {
+                    if let TypeSpecifier::Enum(_, _) = &f.type_spec {
+                        if ty == CType::Int {
+                            ty = CType::UInt;
+                        }
+                    }
+                }
                 StructField {
                     name: f.name.clone().unwrap_or_default(),
                     ty,

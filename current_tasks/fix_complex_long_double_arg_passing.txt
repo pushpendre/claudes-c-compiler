@@ -1,0 +1,21 @@
+Task: Fix _Complex long double argument passing ABI mismatch
+
+Problem: The IR lowering always decomposes _Complex long double into 2 F128
+scalar components at call sites, but the callee treats it as ParamKind::Struct
+(expecting a pointer). This causes completely wrong argument passing on all
+three backends.
+
+Correct ABI per platform:
+- x86-64: Pass on stack (MEMORY class), do NOT decompose
+- ARM64:  Pass in Q0/Q1 registers (HFA), DO decompose into 2 F128 values
+- RISC-V: Pass by reference (pointer), do NOT decompose
+
+Fix plan:
+1. Make decompose_complex_call_args platform-aware for ComplexLongDouble
+2. On ARM64: keep decomposition, and change build_ir_params to use
+   ComplexDecomposed with F128 components for callee
+3. On x86/RISC-V: stop decomposing, keep as struct pointer
+4. Ensure ComplexLongDouble function return also works correctly
+
+Impact: Fixes ~100+ failing tests across all platforms related to complex
+number operations (the majority of remaining failures).
