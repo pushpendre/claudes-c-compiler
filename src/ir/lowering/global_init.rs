@@ -1295,6 +1295,42 @@ impl Lowerer {
                 current_offset = field_offset;
             }
 
+            // Check if this is a bitfield - if so, collect all bitfields sharing the
+            // same storage unit and pack them into a single value.
+            if layout.fields[fi].bit_offset.is_some() {
+                let storage_offset = field_offset;
+                let storage_size = field_size;
+                let mut packed_val: u64 = 0;
+
+                // Pack all bitfields at this same storage unit offset
+                while fi < layout.fields.len()
+                    && layout.fields[fi].bit_offset.is_some()
+                    && layout.fields[fi].offset == storage_offset
+                {
+                    let bit_offset = layout.fields[fi].bit_offset.unwrap();
+                    let bit_width = layout.fields[fi].bit_width.unwrap_or(0);
+                    if bit_width > 0 {
+                        let inits = &field_inits[fi];
+                        let val = if !inits.is_empty() {
+                            self.eval_init_scalar(&inits[0].init).to_u64().unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let mask = if bit_width >= 64 { u64::MAX } else { (1u64 << bit_width) - 1 };
+                        packed_val |= (val & mask) << bit_offset;
+                    }
+                    fi += 1;
+                }
+
+                // Emit the packed storage unit as bytes (little-endian)
+                let le = packed_val.to_le_bytes();
+                for i in 0..storage_size {
+                    elements.push(GlobalInit::Scalar(IrConst::I8(le[i] as i8)));
+                }
+                current_offset += storage_size;
+                continue;
+            }
+
             let inits = &field_inits[fi];
             if inits.is_empty() {
                 // No initializer for this field - zero fill
