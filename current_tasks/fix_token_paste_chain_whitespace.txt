@@ -1,0 +1,32 @@
+Task: Fix token-paste chaining with trailing whitespace in expansion result
+
+Problem:
+When a macro expansion produces a function-like macro name via token pasting (##),
+the result has trailing whitespace from the space-padding logic (lines 191-195 in
+expand_text). This trailing whitespace prevents extract_trailing_ident from finding
+the identifier, so the chaining loop (lines 156-186) fails to detect that the
+expansion result should be further expanded with following parenthesized arguments.
+
+Example:
+  #define PASTE(a, b) a##b
+  #define INDIRECT(a, b) PASTE(a, b)
+  #define ADD_2(a, b) ((a)+(b))
+
+  INDIRECT(ADD_, 2)(1, 2) should expand to ((1)+(2))
+
+What happened before:
+1. INDIRECT(ADD_, 2) expands via rescan to " ADD_2 " (with space padding)
+2. extract_trailing_ident(" ADD_2 ") returns None (last char is space)
+3. Chaining loop breaks immediately
+4. Result: ADD_2  (1, 2) - unexpanded
+
+Fix:
+1. extract_trailing_ident now trim_end()s the input before scanning for identifier
+2. The truncation in the chaining loop accounts for trailing whitespace by using
+   trimmed_len instead of expanded.len()
+
+Real-world impact: Fixes the VFUNC/NARG variadic dispatch pattern used in redis
+(fmtargs.h), jq, and many C projects. This is the token-paste variant of the
+issue fixed in fix_funclike_macro_rescan_chaining.
+
+Status: In progress
