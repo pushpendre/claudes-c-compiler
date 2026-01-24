@@ -1,0 +1,24 @@
+Fix local array-of-structs init not doing full struct copy for struct-valued expressions
+
+Bug: When initializing a local array of structs where an initializer element
+is a struct-valued expression (e.g., dereferencing a struct pointer), only
+the first field is copied instead of the entire struct.
+
+Example:
+    struct data { long data_l1; long data_l2; };
+    void sub(struct data *xxx, long n, long vvv) {
+        const struct data aaa[1] = {*xxx};  // BUG: only copies data_l1
+        ...
+    }
+
+Root cause: In lower_array_of_structs_init (stmt_init.rs), the Expr branch
+(line ~435) calls emit_struct_init which treats the expression as flat
+scalar values for individual fields. It should first check struct_value_size
+and emit a memcpy for the whole struct, matching the pattern already used
+in emit_struct_init for nested struct fields (stmt.rs line ~1374).
+
+Fix: Before calling emit_struct_init, check if expression is struct-valued
+using struct_value_size(). If so, emit memcpy. Apply to both the normal
+and multidim code paths.
+
+Status: LOCKED
