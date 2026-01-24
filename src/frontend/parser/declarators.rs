@@ -170,28 +170,43 @@ impl Parser {
         }
 
         // Check for pointer-to-array: inner contains Pointer(s) with optional arrays,
-        // outer is all Array(s).
+        // outer is all Array(s). Handle inside-out rule correctly:
+        //
         // For `int (*p)[3][6]`: inner=[Pointer], outer=[Array(3), Array(6)]
-        //   -> result: [Array(3), Array(6), Pointer]
+        //   Split inner at pointer: pre_ptr=[], post_ptr=[]
+        //   Result: [] ++ [Array(3), Array(6)] ++ [Pointer] ++ [] = [Array(3), Array(6), Pointer]
+        //
         // For `int ((*(p))[3])[6]`: inner=[Array(3), Pointer], outer=[Array(6)]
-        //   -> result: [Array(3), Array(6), Pointer]
-        // The rule: inner arrays first, then outer arrays, then pointer(s) last.
+        //   Split inner at pointer: pre_ptr=[Array(3)], post_ptr=[]
+        //   Result: [Array(3)] ++ [Array(6)] ++ [Pointer] ++ [] = [Array(3), Array(6), Pointer]
+        //
+        // For `int (*ptrs[2])[4]`: inner=[Pointer, Array(2)], outer=[Array(4)]
+        //   Split inner at pointer: pre_ptr=[], post_ptr=[Array(2)]
+        //   Result: [] ++ [Array(4)] ++ [Pointer] ++ [Array(2)] = [Array(4), Pointer, Array(2)]
         let outer_only_arrays = outer_suffixes.iter().all(|d| matches!(d, DerivedDeclarator::Array(_)));
         if inner_only_ptr_and_array && inner_has_pointer && outer_only_arrays {
+            // Split inner_derived at the last Pointer:
+            // - pre_ptr_arrays: arrays before the last pointer (part of pointee type)
+            // - post_ptr_arrays: arrays after the last pointer (variable's own array dimensions)
+            let last_ptr_idx = inner_derived.iter().rposition(|d| matches!(d, DerivedDeclarator::Pointer)).unwrap();
             let mut result = outer_pointers;
-            // First: inner array dimensions (from deeper nesting levels)
-            for d in &inner_derived {
+            // 1. Arrays from inner that come before the pointer (pointee array dimensions)
+            for d in &inner_derived[..last_ptr_idx] {
                 if matches!(d, DerivedDeclarator::Array(_)) {
                     result.push(d.clone());
                 }
             }
-            // Then: outer array dimensions (from current level)
+            // 2. Outer array suffixes (also pointee dimensions)
             result.extend(outer_suffixes);
-            // Finally: pointer(s)
-            for d in inner_derived {
+            // 3. Pointer(s)
+            for d in &inner_derived[..=last_ptr_idx] {
                 if matches!(d, DerivedDeclarator::Pointer) {
-                    result.push(d);
+                    result.push(d.clone());
                 }
+            }
+            // 4. Arrays from inner that come after the pointer (variable's array dims)
+            for d in &inner_derived[last_ptr_idx + 1..] {
+                result.push(d.clone());
             }
             return result;
         }

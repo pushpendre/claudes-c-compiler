@@ -575,25 +575,47 @@ impl Lowerer {
             return (8, elem_size, false, true, vec![]);
         }
         if has_pointer && has_array {
-            // Check order: if Pointer comes before Array in derived list,
-            // this is an array of pointers (e.g., int *arr[3]).
-            // If Array comes before Pointer (e.g., int (*p)[5]), it's pointer to array.
-            // Exception: if FunctionPointer is present (e.g., int (*ops[2])(int,int)),
-            // it's an array of function pointers regardless of Pointer/Array order.
-            let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-            let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
+            // Determine whether this is "array of pointers" or "pointer to array"
+            // by looking at the LAST element of the derived list (outermost type wrapper).
+            // The last element determines what the overall declaration IS:
+            // - Last is Array: it's an array (of pointers to something)
+            //   e.g., int *arr[3] -> derived=[Pointer, Array(3)] -> array of ptrs
+            //   e.g., int (*ptrs[3])[4] -> derived=[Array(4), Pointer, Array(3)] -> array of ptrs-to-arrays
+            // - Last is Pointer: it's a pointer (to an array)
+            //   e.g., int (*p)[5] -> derived=[Array(5), Pointer] -> pointer to array
             let has_func_ptr = derived.iter().any(|d| matches!(d,
                 DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
 
             // If pointer is from resolved type spec (not in derived), and array is in derived,
-            // this is an array of typedef'd pointers (e.g., typedef int *intptr; intptr arr[3];
-            // or typedef int (*fn_t)(int); fn_t ops[2];)
+            // this is an array of typedef'd pointers
+            let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
             let pointer_from_type_spec = ptr_pos.is_none() && matches!(ts, TypeSpecifier::Pointer(_));
 
-            if has_func_ptr || pointer_from_type_spec || matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap) {
-                // Array of pointers: int *arr[3] or typedef'd_ptr arr[3]
-                // Each element is a pointer (8 bytes)
-                let array_dims = self.collect_derived_array_dims(derived);
+            // Check if the outermost (last) derived element is an Array
+            let last_is_array = matches!(derived.last(), Some(DerivedDeclarator::Array(_)));
+
+            if has_func_ptr || pointer_from_type_spec || last_is_array {
+                // Array of pointers (or array of pointers-to-arrays, etc.)
+                // Each element is a pointer (8 bytes).
+                // Only collect array dims that are AFTER the last pointer
+                // (these are the variable's own array dimensions, not the pointee's).
+                let last_ptr_pos = derived.iter().rposition(|d| matches!(d, DerivedDeclarator::Pointer))
+                    .or_else(|| {
+                        // Pointer might come from type spec rather than derived
+                        if pointer_from_type_spec || has_func_ptr { Some(0) } else { None }
+                    });
+                let array_dims: Vec<Option<usize>> = if let Some(lpp) = last_ptr_pos {
+                    // Collect only Array dims after the last pointer
+                    derived[lpp + 1..].iter().filter_map(|d| {
+                        if let DerivedDeclarator::Array(size_expr) = d {
+                            Some(size_expr.as_ref().and_then(|e| self.expr_as_array_size(e).map(|n| n as usize)))
+                        } else {
+                            None
+                        }
+                    }).collect()
+                } else {
+                    self.collect_derived_array_dims(derived)
+                };
                 let resolved_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256)).collect();
                 let total_size: usize = resolved_dims.iter().product::<usize>() * 8;
                 let strides = if resolved_dims.len() > 1 {
@@ -604,14 +626,30 @@ impl Lowerer {
                 return (total_size, 8, true, false, strides);
             }
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
-            // Compute strides from the Array dims in the derived list
-            let array_dims: Vec<usize> = self.collect_derived_array_dims(derived)
-                .iter().map(|d| d.unwrap_or(1)).collect();
+            // Compute strides from the Array dims BEFORE the pointer in the derived list
+            // (these are the pointed-to array dimensions)
+            let array_dims: Vec<usize> = derived.iter()
+                .take_while(|d| !matches!(d, DerivedDeclarator::Pointer))
+                .filter_map(|d| {
+                    if let DerivedDeclarator::Array(size_expr) = d {
+                        Some(size_expr.as_ref()
+                            .and_then(|e| self.expr_as_array_size(e).map(|n| n as usize))
+                            .unwrap_or(1))
+                    } else {
+                        None
+                    }
+                }).collect();
             let base_elem_size = self.sizeof_type(ts);
-            let full_array_size: usize = array_dims.iter().product::<usize>() * base_elem_size;
+            let full_array_size: usize = if array_dims.is_empty() {
+                base_elem_size
+            } else {
+                array_dims.iter().product::<usize>() * base_elem_size
+            };
             // strides[0] = full pointed-to array size, then per-dim strides
             let mut strides = vec![full_array_size];
-            strides.extend(Self::compute_strides_from_dims(&array_dims, base_elem_size));
+            if !array_dims.is_empty() {
+                strides.extend(Self::compute_strides_from_dims(&array_dims, base_elem_size));
+            }
             let elem_size = full_array_size;
             return (8, elem_size, false, true, strides);
         }
