@@ -1224,11 +1224,7 @@ impl Lowerer {
                     } else {
                         layout.as_ref().map_or(8, |l| l.size)
                     };
-                    let param_ctype = if is_complex_param {
-                        func.params.get(orig_idx).map(|p| self.type_spec_to_ctype(&p.type_spec))
-                    } else {
-                        None
-                    };
+                    let param_ctype = func.params.get(orig_idx).map(|p| self.type_spec_to_ctype(&p.type_spec));
                     struct_params.push(StructParamInfo {
                         ptr_alloca: alloca,
                         struct_size,
