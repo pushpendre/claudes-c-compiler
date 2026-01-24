@@ -1,0 +1,32 @@
+Task: Fix bitfield packing in global struct compound initialization
+
+Problem:
+When a struct has both pointer/address fields AND bitfield members, global
+initialization takes the "compound" path (lower_struct_global_init_compound)
+which supports relocations. However, this path does NOT handle bitfield packing.
+
+Each bitfield member is treated as a full-width independent field, emitting
+its raw value as individual bytes rather than packing multiple bitfield values
+into their shared storage unit.
+
+Example:
+  struct entry {
+      void (*handler)(void);
+      unsigned int max_length :12;
+      unsigned int min_length :8;
+  };
+  static struct entry table[] = { { handler_func, 13, 7 } };
+
+The handler pointer forces the compound path, but then max_length and
+min_length are emitted as separate full-size fields instead of being packed
+into a single 32-bit bitfield storage unit.
+
+Result: Bitfield values read as wrong values at runtime (shifted or zero).
+
+Fix: In lower_struct_global_init_compound, detect consecutive bitfield
+fields sharing the same storage unit offset, group them, pack them correctly
+using write_bitfield_to_bytes, and emit as packed bytes.
+
+Impact: This fixes libpng runtime failure (IHDR chunk dispatch table
+bitfields read as 0), and likely affects other projects using structs
+with both function pointers and bitfields.
