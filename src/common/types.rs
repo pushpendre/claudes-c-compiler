@@ -39,7 +39,7 @@ pub struct FunctionType {
     pub variadic: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StructType {
     pub name: Option<String>,
     pub fields: Vec<StructField>,
@@ -48,6 +48,131 @@ pub struct StructType {
     /// Maximum field alignment imposed by #pragma pack(N) or __attribute__((packed)).
     /// None means use natural alignment. Some(1) for packed, Some(N) for #pragma pack(N).
     pub max_field_align: Option<usize>,
+    /// Cached size in bytes (computed once at construction).
+    cached_size: usize,
+    /// Cached alignment in bytes (computed once at construction).
+    cached_align: usize,
+}
+
+impl PartialEq for StructType {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.fields == other.fields
+            && self.is_packed == other.is_packed
+            && self.max_field_align == other.max_field_align
+    }
+}
+
+impl Eq for StructType {}
+
+impl StructType {
+    /// Create a new StructType for a struct, eagerly computing and caching size/align.
+    pub fn new_struct(name: Option<String>, fields: Vec<StructField>, is_packed: bool, max_field_align: Option<usize>) -> Self {
+        let layout = StructLayout::for_struct_with_packing(&fields, max_field_align);
+        StructType {
+            name,
+            fields,
+            is_packed,
+            max_field_align,
+            cached_size: layout.size,
+            cached_align: layout.align,
+        }
+    }
+
+    /// Create a new StructType for a union, eagerly computing and caching size/align.
+    pub fn new_union(name: Option<String>, fields: Vec<StructField>, is_packed: bool, max_field_align: Option<usize>) -> Self {
+        let layout = StructLayout::for_union(&fields);
+        StructType {
+            name,
+            fields,
+            is_packed,
+            max_field_align,
+            cached_size: layout.size,
+            cached_align: layout.align,
+        }
+    }
+
+    /// Create a forward-declared or empty struct/union type (no fields yet).
+    pub fn new_empty(name: Option<String>, is_packed: bool, max_field_align: Option<usize>) -> Self {
+        StructType {
+            name,
+            fields: Vec::new(),
+            is_packed,
+            max_field_align,
+            cached_size: 0,
+            cached_align: 1,
+        }
+    }
+
+    /// Get the cached size in bytes.
+    pub fn size(&self) -> usize {
+        self.cached_size
+    }
+
+    /// Get the cached alignment in bytes.
+    pub fn align(&self) -> usize {
+        self.cached_align
+    }
+
+    /// Look up a field by name, returning its byte offset and type reference.
+    /// For unions, all fields have offset 0.
+    /// For structs, computes offset by iterating fields (uses cached size/align).
+    /// Also searches anonymous struct/union members recursively.
+    pub fn find_field(&self, name: &str, is_union: bool) -> Option<(usize, &CType)> {
+        if is_union {
+            // Union: all fields at offset 0
+            for field in &self.fields {
+                if field.name == name {
+                    return Some((0, &field.ty));
+                }
+                // Search anonymous members
+                if field.name.is_empty() {
+                    if let Some((inner_offset, ty)) = Self::find_field_in_anon(&field.ty, name) {
+                        return Some((inner_offset, ty));
+                    }
+                }
+            }
+            None
+        } else {
+            // Struct: compute offset by iterating
+            let mut offset = 0usize;
+            let max_field_align = self.max_field_align;
+            for field in &self.fields {
+                if field.bit_width.is_some() {
+                    // Skip bitfield offset computation for now - fall through to full layout
+                    // if the target field is in a bitfield region
+                    continue;
+                }
+                let natural_align = field.ty.align();
+                let field_align = if let Some(max_a) = max_field_align {
+                    natural_align.min(max_a)
+                } else {
+                    natural_align
+                };
+                offset = align_up(offset, field_align);
+                if field.name == name {
+                    return Some((offset, &field.ty));
+                }
+                // Search anonymous members
+                if field.name.is_empty() {
+                    if let Some((inner_offset, ty)) = Self::find_field_in_anon(&field.ty, name) {
+                        return Some((offset + inner_offset, ty));
+                    }
+                }
+                offset += field.ty.size();
+            }
+            None
+        }
+    }
+
+    /// Search for a field in an anonymous struct/union member.
+    fn find_field_in_anon<'a>(ty: &'a CType, name: &str) -> Option<(usize, &'a CType)> {
+        match ty {
+            CType::Struct(st) => st.find_field(name, false),
+            CType::Union(st) => st.find_field(name, true),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,14 +549,8 @@ impl CType {
             CType::Array(elem, Some(n)) => elem.size() * n,
             CType::Array(_, None) => 8, // incomplete array treated as pointer
             CType::Function(_) => 8, // function pointer size
-            CType::Struct(s) => {
-                let layout = StructLayout::for_struct_with_packing(&s.fields, s.max_field_align);
-                layout.size
-            }
-            CType::Union(s) => {
-                let layout = StructLayout::for_union(&s.fields);
-                layout.size
-            }
+            CType::Struct(s) => s.size(),
+            CType::Union(s) => s.size(),
             CType::Enum(_) => 4,
         }
     }
@@ -454,17 +573,8 @@ impl CType {
             CType::Pointer(_) => 8,
             CType::Array(elem, _) => elem.align(),
             CType::Function(_) => 8,
-            CType::Struct(s) => {
-                let natural = s.fields.iter().map(|f| f.ty.align()).max().unwrap_or(1);
-                if let Some(max_a) = s.max_field_align {
-                    natural.min(max_a)
-                } else {
-                    natural
-                }
-            }
-            CType::Union(s) => {
-                s.fields.iter().map(|f| f.ty.align()).max().unwrap_or(1)
-            }
+            CType::Struct(s) => s.align(),
+            CType::Union(s) => s.align(),
             CType::Enum(_) => 4,
         }
     }

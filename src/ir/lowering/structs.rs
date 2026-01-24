@@ -74,11 +74,11 @@ impl Lowerer {
     }
 
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
+    /// Prefers cached layout from struct_layouts when a tag name is available.
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
         let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack) => {
-                // Use cached layout for tagged structs that have been registered
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("struct.{}", tag)) {
                         return Some(layout.clone());
@@ -91,7 +91,6 @@ impl Lowerer {
                 self.struct_layouts.get(&format!("struct.{}", tag)).cloned()
             }
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack) => {
-                // Use cached layout for tagged unions that have been registered
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("union.{}", tag)) {
                         return Some(layout.clone());
@@ -513,25 +512,33 @@ impl Lowerer {
         }
     }
 
-    /// Get struct layout from a CType (struct or union)
+    /// Get struct layout from a CType (struct or union).
+    /// Prefers cached layout from struct_layouts when available.
     fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<StructLayout> {
         match ctype {
             CType::Struct(st) => {
-                if st.fields.is_empty() {
-                    // Forward-declared or self-referential: look up by tag name
-                    if let Some(ref tag) = st.name {
-                        let key = format!("struct.{}", tag);
-                        return self.struct_layouts.get(&key).cloned();
+                // Try cache first (by tag name)
+                if let Some(ref tag) = st.name {
+                    let key = format!("struct.{}", tag);
+                    if let Some(layout) = self.struct_layouts.get(&key) {
+                        return Some(layout.clone());
                     }
+                }
+                if st.fields.is_empty() {
+                    return None;
                 }
                 Some(StructLayout::for_struct(&st.fields))
             }
             CType::Union(st) => {
-                if st.fields.is_empty() {
-                    if let Some(ref tag) = st.name {
-                        let key = format!("union.{}", tag);
-                        return self.struct_layouts.get(&key).cloned();
+                // Try cache first (by tag name)
+                if let Some(ref tag) = st.name {
+                    let key = format!("union.{}", tag);
+                    if let Some(layout) = self.struct_layouts.get(&key) {
+                        return Some(layout.clone());
                     }
+                }
+                if st.fields.is_empty() {
+                    return None;
                 }
                 Some(StructLayout::for_union(&st.fields))
             }
@@ -568,20 +575,13 @@ impl Lowerer {
                 // For nested member access, find the layout of the inner field
                 if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
                     if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field) {
-                        // If the inner field is itself a struct, get its layout
-                        if let CType::Struct(st) = ctype {
-                            return Some(StructLayout::for_struct(&st.fields));
-                        }
-                        if let CType::Union(st) = ctype {
-                            return Some(StructLayout::for_union(&st.fields));
+                        if let Some(layout) = self.struct_layout_from_ctype(ctype) {
+                            return Some(layout);
                         }
                         // If the field is an array of structs, return the element struct layout
                         if let CType::Array(elem, _) = ctype {
-                            if let CType::Struct(st) = elem.as_ref() {
-                                return Some(StructLayout::for_struct(&st.fields));
-                            }
-                            if let CType::Union(st) = elem.as_ref() {
-                                return Some(StructLayout::for_union(&st.fields));
+                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
+                                return Some(layout);
                             }
                         }
                     }
@@ -592,19 +592,13 @@ impl Lowerer {
                 // For p->field where field is an embedded struct, get its layout
                 if let Some(pointed_layout) = self.get_pointed_struct_layout(inner_base) {
                     if let Some((_offset, ctype)) = pointed_layout.field_offset(inner_field) {
-                        if let CType::Struct(st) = ctype {
-                            return Some(StructLayout::for_struct(&st.fields));
-                        }
-                        if let CType::Union(st) = ctype {
-                            return Some(StructLayout::for_union(&st.fields));
+                        if let Some(layout) = self.struct_layout_from_ctype(ctype) {
+                            return Some(layout);
                         }
                         // If the field is an array of structs, return the element struct layout
                         if let CType::Array(elem, _) = ctype {
-                            if let CType::Struct(st) = elem.as_ref() {
-                                return Some(StructLayout::for_struct(&st.fields));
-                            }
-                            if let CType::Union(st) = elem.as_ref() {
-                                return Some(StructLayout::for_union(&st.fields));
+                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
+                                return Some(layout);
                             }
                         }
                     }
@@ -622,20 +616,13 @@ impl Lowerer {
                 if let Some(base_ctype) = self.get_expr_ctype(base) {
                     match &base_ctype {
                         CType::Array(elem, _) => {
-                            if let CType::Struct(st) = elem.as_ref() {
-                                return Some(StructLayout::for_struct(&st.fields));
-                            }
-                            if let CType::Union(st) = elem.as_ref() {
-                                return Some(StructLayout::for_union(&st.fields));
+                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
+                                return Some(layout);
                             }
                         }
                         CType::Pointer(pointee) => {
-                            // ptr[i] where ptr points to a struct/union
-                            if let CType::Struct(st) = pointee.as_ref() {
-                                return Some(StructLayout::for_struct(&st.fields));
-                            }
-                            if let CType::Union(st) = pointee.as_ref() {
-                                return Some(StructLayout::for_union(&st.fields));
+                            if let Some(layout) = self.struct_layout_from_ctype(pointee) {
+                                return Some(layout);
                             }
                         }
                         _ => {}
@@ -664,10 +651,8 @@ impl Lowerer {
                 // Function returning a struct: look up the return CType
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
-                        match ctype {
-                            CType::Struct(st) => return Some(StructLayout::for_struct(&st.fields)),
-                            CType::Union(st) => return Some(StructLayout::for_union(&st.fields)),
-                            _ => {}
+                        if let Some(layout) = self.struct_layout_from_ctype(ctype) {
+                            return Some(layout);
                         }
                     }
                 }
@@ -709,33 +694,49 @@ impl Lowerer {
         None
     }
 
+    /// Resolve member access and return full info including CType.
+    /// Returns (byte_offset, ir_type, bitfield_info, field_ctype).
+    pub(super) fn resolve_member_access_with_ctype(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>, Option<CType>) {
+        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+            if let Some(fl) = layout.field_layout(field_name) {
+                let ir_ty = IrType::from_ctype(&fl.ty);
+                let bf = match (fl.bit_offset, fl.bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (fl.offset, ir_ty, bf, Some(fl.ty.clone()));
+            }
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, IrType::from_ctype(ctype), None, Some(ctype.clone()));
+            }
+        }
+        (0, IrType::I32, None, None)
+    }
+
+    /// Resolve pointer member access and return full info including CType.
+    /// Returns (byte_offset, ir_type, bitfield_info, field_ctype).
+    pub(super) fn resolve_pointer_member_access_with_ctype(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>, Option<CType>) {
+        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+            if let Some(fl) = layout.field_layout(field_name) {
+                let ir_ty = IrType::from_ctype(&fl.ty);
+                let bf = match (fl.bit_offset, fl.bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (fl.offset, ir_ty, bf, Some(fl.ty.clone()));
+            }
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, IrType::from_ctype(ctype), None, Some(ctype.clone()));
+            }
+        }
+        (0, IrType::I32, None, None)
+    }
+
     /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
     /// Handles self-referential structs by looking up the cache when fields are empty.
     fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<StructLayout> {
         if let CType::Pointer(inner) = ctype {
-            match inner.as_ref() {
-                CType::Struct(st) => {
-                    if st.fields.is_empty() {
-                        // Empty fields: likely a forward/self-referential struct.
-                        // Look up by tag name from the cache.
-                        if let Some(ref tag) = st.name {
-                            let key = format!("struct.{}", tag);
-                            return self.struct_layouts.get(&key).cloned();
-                        }
-                    }
-                    return Some(StructLayout::for_struct(&st.fields));
-                }
-                CType::Union(st) => {
-                    if st.fields.is_empty() {
-                        if let Some(ref tag) = st.name {
-                            let key = format!("union.{}", tag);
-                            return self.struct_layouts.get(&key).cloned();
-                        }
-                    }
-                    return Some(StructLayout::for_union(&st.fields));
-                }
-                _ => {}
-            }
+            return self.struct_layout_from_ctype(inner);
         }
         None
     }

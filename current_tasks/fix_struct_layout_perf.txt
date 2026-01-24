@@ -1,0 +1,16 @@
+Fix struct layout exponential recomputation hang
+
+Problem: IR lowering hangs (exponential time) when compiling files with complex
+union types like oniguruma's Node type (10+ struct variants in a union).
+
+Root cause: CType::size() and CType::align() recomputed StructLayout from scratch
+on every call, causing exponential recursion for nested struct/union types.
+Additionally, struct_layout_from_ctype, get_layout_for_expr, and
+lower_member_access_impl performed redundant layout resolutions.
+
+Fix:
+1. Cache size/align in StructType (computed once at construction)
+2. Use struct_layouts cache for named types in struct_layout_from_ctype
+3. Cache CType objects for named struct/union in ctype_cache
+4. Combine field_is_array/struct/complex into single resolution call
+5. Prefer cached layouts in sizeof_type, alignof_type, get_struct_layout_for_type

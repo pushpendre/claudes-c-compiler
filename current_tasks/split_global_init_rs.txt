@@ -1,7 +1,0 @@
-Task: split_global_init_rs
-Status: in_progress
-
-Split global_init.rs (2398 lines) into submodules:
-- Extract byte-serialization methods to global_init_bytes.rs
-- Extract compound-init builders to global_init_compound.rs
-- Deduplicate repeated patterns

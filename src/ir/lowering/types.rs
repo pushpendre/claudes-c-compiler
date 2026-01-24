@@ -2137,6 +2137,13 @@ impl Lowerer {
         let max_field_align = if is_packed { Some(1) } else { pragma_pack };
 
         if let Some(fs) = fields {
+            // Inline definition with fields: check cache first for named types
+            if let Some(tag) = name {
+                let cache_key = format!("{}.{}", prefix, tag);
+                if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+                    return cached.clone();
+                }
+            }
             let struct_fields: Vec<StructField> = fs.iter().map(|f| {
                 let bit_width = f.bit_width.as_ref().and_then(|bw| {
                     self.eval_const_expr(bw).and_then(|c| c.to_u32())
@@ -2148,13 +2155,23 @@ impl Lowerer {
                     bit_width,
                 }
             }).collect();
-            make(crate::common::types::StructType {
-                name: name.clone(),
-                fields: struct_fields,
-                is_packed,
-                max_field_align,
-            })
+            let st = if is_union {
+                crate::common::types::StructType::new_union(name.clone(), struct_fields, is_packed, max_field_align)
+            } else {
+                crate::common::types::StructType::new_struct(name.clone(), struct_fields, is_packed, max_field_align)
+            };
+            let result = make(st);
+            if let Some(tag) = name {
+                let cache_key = format!("{}.{}", prefix, tag);
+                self.ctype_cache.borrow_mut().insert(cache_key, result.clone());
+            }
+            result
         } else if let Some(tag) = name {
+            let cache_key = format!("{}.{}", prefix, tag);
+            // Check cache first
+            if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+                return cached.clone();
+            }
             let key = format!("{}.{}", prefix, tag);
             if let Some(layout) = self.struct_layouts.get(&key) {
                 let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
@@ -2164,27 +2181,19 @@ impl Lowerer {
                         bit_width: f.bit_width,
                     }
                 }).collect();
-                make(crate::common::types::StructType {
-                    name: Some(tag.clone()),
-                    fields: struct_fields,
-                    is_packed,
-                    max_field_align,
-                })
+                let st = if is_union {
+                    crate::common::types::StructType::new_union(Some(tag.clone()), struct_fields, is_packed, max_field_align)
+                } else {
+                    crate::common::types::StructType::new_struct(Some(tag.clone()), struct_fields, is_packed, max_field_align)
+                };
+                let result = make(st);
+                self.ctype_cache.borrow_mut().insert(cache_key, result.clone());
+                result
             } else {
-                make(crate::common::types::StructType {
-                    name: Some(tag.clone()),
-                    fields: Vec::new(),
-                    is_packed,
-                    max_field_align,
-                })
+                make(crate::common::types::StructType::new_empty(Some(tag.clone()), is_packed, max_field_align))
             }
         } else {
-            make(crate::common::types::StructType {
-                name: None,
-                fields: Vec::new(),
-                is_packed,
-                max_field_align,
-            })
+            make(crate::common::types::StructType::new_empty(None, is_packed, max_field_align))
         }
     }
 

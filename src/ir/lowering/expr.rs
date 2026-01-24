@@ -2297,11 +2297,11 @@ impl Lowerer {
 
     /// Unified member access lowering for both direct (s.field) and pointer (p->field) access.
     fn lower_member_access_impl(&mut self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> Operand {
-        // Resolve field metadata and compute base address
-        let (field_offset, field_ty, bitfield) = if is_pointer {
-            self.resolve_pointer_member_access_full(base_expr, field_name)
+        // Resolve field metadata and CType in a single call to avoid redundant layout lookups
+        let (field_offset, field_ty, bitfield, field_ctype) = if is_pointer {
+            self.resolve_pointer_member_access_with_ctype(base_expr, field_name)
         } else {
-            self.resolve_member_access_full(base_expr, field_name)
+            self.resolve_member_access_with_ctype(base_expr, field_name)
         };
 
         let base_addr = if is_pointer {
@@ -2323,10 +2323,18 @@ impl Lowerer {
         // IR type is Ptr (pointer to the pair). Returning the field address
         // avoids a double-dereference bug where the real part bits would be
         // misinterpreted as a pointer.
-        if self.field_is_array(base_expr, field_name, is_pointer)
-            || self.field_is_struct(base_expr, field_name, is_pointer)
-            || self.field_is_complex(base_expr, field_name, is_pointer)
-        {
+        let is_addr_type = match &field_ctype {
+            Some(ct) => matches!(ct,
+                CType::Array(_, _) | CType::Struct(_) | CType::Union(_) |
+                CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble),
+            None => {
+                // Fallback: use the old per-check resolution (shouldn't normally happen)
+                self.field_is_array(base_expr, field_name, is_pointer)
+                    || self.field_is_struct(base_expr, field_name, is_pointer)
+                    || self.field_is_complex(base_expr, field_name, is_pointer)
+            }
+        };
+        if is_addr_type {
             return Operand::Value(field_addr);
         }
         let dest = self.fresh_value();

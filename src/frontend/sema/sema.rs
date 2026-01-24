@@ -491,19 +491,16 @@ impl SemanticAnalyzer {
             }
             TypeSpecifier::Struct(name, fields, is_packed, pragma_pack_align) => {
                 let struct_fields = fields.as_ref().map(|f| self.convert_struct_fields(f)).unwrap_or_default();
-                // __attribute__((packed)) forces alignment 1; #pragma pack(N) caps to N.
-                // packed takes priority as it's most restrictive.
                 let effective_align = if *is_packed {
                     Some(1)
                 } else {
                     *pragma_pack_align
                 };
-                CType::Struct(std::sync::Arc::new(crate::common::types::StructType {
-                    name: name.clone(),
-                    fields: struct_fields,
-                    is_packed: *is_packed,
-                    max_field_align: effective_align,
-                }))
+                if struct_fields.is_empty() {
+                    CType::Struct(std::sync::Arc::new(crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align)))
+                } else {
+                    CType::Struct(std::sync::Arc::new(crate::common::types::StructType::new_struct(name.clone(), struct_fields, *is_packed, effective_align)))
+                }
             }
             TypeSpecifier::Union(name, fields, is_packed, pragma_pack_align) => {
                 let union_fields = fields.as_ref().map(|f| self.convert_struct_fields(f)).unwrap_or_default();
@@ -512,12 +509,11 @@ impl SemanticAnalyzer {
                 } else {
                     *pragma_pack_align
                 };
-                CType::Union(std::sync::Arc::new(crate::common::types::StructType {
-                    name: name.clone(),
-                    fields: union_fields,
-                    is_packed: *is_packed,
-                    max_field_align: effective_align,
-                }))
+                if union_fields.is_empty() {
+                    CType::Union(std::sync::Arc::new(crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align)))
+                } else {
+                    CType::Union(std::sync::Arc::new(crate::common::types::StructType::new_union(name.clone(), union_fields, *is_packed, effective_align)))
+                }
             }
             TypeSpecifier::Enum(name, variants) => {
                 if let Some(variants) = variants {

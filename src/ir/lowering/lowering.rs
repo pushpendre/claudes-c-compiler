@@ -343,6 +343,9 @@ pub struct Lowerer {
     /// Each frame tracks what was added/shadowed in that scope, so we can undo
     /// changes on scope exit without cloning entire HashMaps.
     pub(super) scope_stack: Vec<ScopeFrame>,
+    /// Cache for CType of named struct/union types (tag -> CType).
+    /// Uses RefCell because type_spec_to_ctype takes &self.
+    pub(super) ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
 }
 
 impl Lowerer {
@@ -381,6 +384,7 @@ impl Lowerer {
             func_return_ctypes: HashMap::new(),
             emitted_global_names: HashSet::new(),
             scope_stack: Vec::new(),
+            ctype_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -633,7 +637,7 @@ impl Lowerer {
         let referenced_statics = self.collect_referenced_static_functions(tu);
 
         // Third pass: lower everything
-        for decl in &tu.decls {
+        for decl in tu.decls.iter() {
             match decl {
                 ExternalDecl::FunctionDef(func) => {
                     // Skip unreferenced static functions (e.g., static inline from headers
