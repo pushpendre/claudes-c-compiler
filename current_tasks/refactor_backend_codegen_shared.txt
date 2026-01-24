@@ -1,0 +1,21 @@
+Task: Refactor backend codegen_shared.rs and backend architecture
+Status: IN PROGRESS
+
+The codegen_shared.rs file (1843 lines) is a monolithic file containing:
+- ArchCodegen trait definition (~100 methods + ~20 default implementations)
+- InlineAsmEmitter trait
+- Shared data structures (CodegenState, StackSlot, SlotAddr, CastKind, FloatOp, etc.)
+- Free functions for module/function/instruction generation
+- Call ABI classification logic
+- Inline asm framework
+
+Plan:
+1. Split codegen_shared.rs into focused modules:
+   - backend/state.rs: CodegenState, StackSlot, SlotAddr and related types
+   - backend/traits.rs: ArchCodegen trait with all default method implementations
+   - backend/call_abi.rs: CallArgClass, CallAbiConfig, classify_call_args, stack computation
+   - backend/generation.rs: generate_module, generate_function, generate_instruction, generate_terminator
+   - backend/inline_asm.rs: InlineAsmEmitter trait, AsmOperand types, emit_inline_asm_common
+   - backend/cast.rs: CastKind, classify_cast, FloatOp, classify_float_binop
+2. Add README.md documentation for backend/ directory
+3. Ensure all backends still compile and tests pass
