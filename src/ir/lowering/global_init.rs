@@ -2282,7 +2282,14 @@ impl Lowerer {
     fn flatten_global_init_item(&self, init: &Initializer, base_ty: IrType, values: &mut Vec<IrConst>) {
         match init {
             Initializer::Expr(expr) => {
-                if let Some(val) = self.eval_const_expr(expr) {
+                if let Expr::StringLiteral(s, _) = expr {
+                    // String literal initializing a char array element: inline bytes
+                    for &byte in s.as_bytes() {
+                        values.push(IrConst::I64(byte as i64));
+                    }
+                    // Add null terminator
+                    values.push(IrConst::I64(0));
+                } else if let Some(val) = self.eval_const_expr(expr) {
                     let expr_ty = self.get_expr_type(expr);
                     values.push(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));
                 } else {
