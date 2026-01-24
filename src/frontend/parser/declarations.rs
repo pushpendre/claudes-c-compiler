@@ -508,8 +508,8 @@ impl Parser {
             if let Some(range_pos) = item.designators.iter().position(|d| matches!(d, Designator::Range(_, _))) {
                 if let Designator::Range(ref lo_expr, ref hi_expr) = item.designators[range_pos] {
                     // Try to evaluate lo and hi as integer constants
-                    let lo = Self::eval_simple_int_expr(lo_expr);
-                    let hi = Self::eval_simple_int_expr(hi_expr);
+                    let lo = Self::eval_const_int_expr(lo_expr);
+                    let hi = Self::eval_const_int_expr(hi_expr);
                     if let (Some(lo_val), Some(hi_val)) = (lo, hi) {
                         for idx in lo_val..=hi_val {
                             let mut new_desigs = item.designators.clone();
@@ -533,27 +533,64 @@ impl Parser {
         result
     }
 
-    /// Simple constant expression evaluator for range designator bounds.
-    /// Handles integer literals and character literals.
-    fn eval_simple_int_expr(expr: &Expr) -> Option<i64> {
+    /// Constant expression evaluator for compile-time integer contexts.
+    /// Handles integer/char literals, all arithmetic/bitwise/shift/logical/relational
+    /// binary ops, unary ops (neg, bitwise not, logical not), and ternary expressions.
+    /// Used for range designator bounds, alignment expressions, etc.
+    pub(super) fn eval_const_int_expr(expr: &Expr) -> Option<i64> {
         match expr {
             Expr::IntLiteral(val, _) => Some(*val),
             Expr::UIntLiteral(val, _) => Some(*val as i64),
             Expr::LongLiteral(val, _) => Some(*val),
+            Expr::ULongLiteral(val, _) => Some(*val as i64),
             Expr::CharLiteral(val, _) => Some(*val as i64),
             Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = Self::eval_simple_int_expr(lhs)?;
-                let r = Self::eval_simple_int_expr(rhs)?;
+                let l = Self::eval_const_int_expr(lhs)?;
+                let r = Self::eval_const_int_expr(rhs)?;
                 match op {
-                    BinOp::Add => Some(l + r),
-                    BinOp::Sub => Some(l - r),
-                    BinOp::Mul => Some(l * r),
-                    BinOp::Div if r != 0 => Some(l / r),
+                    BinOp::Add => Some(l.wrapping_add(r)),
+                    BinOp::Sub => Some(l.wrapping_sub(r)),
+                    BinOp::Mul => Some(l.wrapping_mul(r)),
+                    BinOp::Div if r != 0 => Some(l.wrapping_div(r)),
+                    BinOp::Mod if r != 0 => Some(l.wrapping_rem(r)),
+                    BinOp::Shl => Some(l.wrapping_shl(r as u32)),
+                    BinOp::Shr => Some(l.wrapping_shr(r as u32)),
+                    BinOp::BitAnd => Some(l & r),
+                    BinOp::BitOr => Some(l | r),
+                    BinOp::BitXor => Some(l ^ r),
+                    BinOp::Eq => Some(if l == r { 1 } else { 0 }),
+                    BinOp::Ne => Some(if l != r { 1 } else { 0 }),
+                    BinOp::Lt => Some(if l < r { 1 } else { 0 }),
+                    BinOp::Le => Some(if l <= r { 1 } else { 0 }),
+                    BinOp::Gt => Some(if l > r { 1 } else { 0 }),
+                    BinOp::Ge => Some(if l >= r { 1 } else { 0 }),
+                    BinOp::LogicalAnd => Some(if l != 0 && r != 0 { 1 } else { 0 }),
+                    BinOp::LogicalOr => Some(if l != 0 || r != 0 { 1 } else { 0 }),
                     _ => None,
                 }
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                Self::eval_simple_int_expr(inner).map(|v| -v)
+                Self::eval_const_int_expr(inner).map(|v| v.wrapping_neg())
+            }
+            Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
+                Self::eval_const_int_expr(inner).map(|v| !v)
+            }
+            Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
+                Self::eval_const_int_expr(inner).map(|v| if v == 0 { 1 } else { 0 })
+            }
+            Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
+                Self::eval_const_int_expr(inner)
+            }
+            Expr::Conditional(cond, then_expr, else_expr, _) => {
+                let c = Self::eval_const_int_expr(cond)?;
+                if c != 0 {
+                    Self::eval_const_int_expr(then_expr)
+                } else {
+                    Self::eval_const_int_expr(else_expr)
+                }
+            }
+            Expr::Cast(_, inner, _) => {
+                Self::eval_const_int_expr(inner)
             }
             _ => None,
         }
@@ -573,25 +610,8 @@ impl Parser {
                 | TokenKind::Inline | TokenKind::Register | TokenKind::Auto => { self.advance(); }
                 TokenKind::Alignas => {
                     self.advance();
-                    if matches!(self.peek(), TokenKind::LParen) {
-                        self.advance(); // consume (
-                        if let TokenKind::IntLiteral(n) = self.peek() {
-                            self.parsed_alignas = Some(*n as usize);
-                            self.advance();
-                        }
-                        // Skip remaining tokens to closing paren
-                        let mut depth = 1i32;
-                        while depth > 0 {
-                            match self.peek() {
-                                TokenKind::LParen => { depth += 1; self.advance(); }
-                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
-                                TokenKind::Eof => break,
-                                _ => { self.advance(); }
-                            }
-                        }
-                        if matches!(self.peek(), TokenKind::RParen) {
-                            self.advance();
-                        }
+                    if let Some(align) = self.parse_alignas_argument() {
+                        self.parsed_alignas = Some(self.parsed_alignas.map_or(align, |prev| prev.max(align)));
                     }
                 }
                 TokenKind::Attribute => {

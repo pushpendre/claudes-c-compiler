@@ -103,25 +103,8 @@ impl Parser {
                 // Alignas
                 TokenKind::Alignas => {
                     self.advance();
-                    if matches!(self.peek(), TokenKind::LParen) {
-                        self.advance(); // consume (
-                        if let TokenKind::IntLiteral(n) = self.peek() {
-                            self.parsed_alignas = Some(*n as usize);
-                            self.advance();
-                        }
-                        // Skip remaining tokens to closing paren (handles sizeof/alignof expressions)
-                        let mut depth = 1i32;
-                        while depth > 0 {
-                            match self.peek() {
-                                TokenKind::LParen => { depth += 1; self.advance(); }
-                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
-                                TokenKind::Eof => break,
-                                _ => { self.advance(); }
-                            }
-                        }
-                        if matches!(self.peek(), TokenKind::RParen) {
-                            self.advance();
-                        }
+                    if let Some(align) = self.parse_alignas_argument() {
+                        self.parsed_alignas = Some(self.parsed_alignas.map_or(align, |prev| prev.max(align)));
                     }
                 }
                 // Type specifier tokens
@@ -588,25 +571,8 @@ impl Parser {
                 }
                 TokenKind::Alignas => {
                     self.advance();
-                    if matches!(self.peek(), TokenKind::LParen) {
-                        self.advance(); // consume (
-                        if let TokenKind::IntLiteral(n) = self.peek() {
-                            *alignas = Some(*n as usize);
-                            self.advance();
-                        }
-                        // Skip remaining tokens to closing paren
-                        let mut depth = 1i32;
-                        while depth > 0 {
-                            match self.peek() {
-                                TokenKind::LParen => { depth += 1; self.advance(); }
-                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
-                                TokenKind::Eof => break,
-                                _ => { self.advance(); }
-                            }
-                        }
-                        if matches!(self.peek(), TokenKind::RParen) {
-                            self.advance();
-                        }
+                    if let Some(align) = self.parse_alignas_argument() {
+                        *alignas = Some(alignas.map_or(align, |prev| prev.max(align)));
                     }
                 }
                 TokenKind::Attribute => {

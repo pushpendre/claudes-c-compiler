@@ -1,0 +1,16 @@
+Task: Fix struct assignment via pointer dereference producing zero-size memcpy
+
+Problem:
+struct_value_size() in expr_types.rs calls ctype.size() for Deref, ArraySubscript,
+FunctionCall, Conditional, MemberAccess, and PointerMemberAccess expressions.
+CType::size() returns 0 for Struct/Union types (since CType::Struct only stores
+the name, not the layout). This causes lower_struct_assign to emit Memcpy with
+size=0, making all struct copies through pointer dereference, array subscript,
+function return, and conditional expressions produce zero-filled results.
+
+Fix:
+Replace ctype.size() with ctype.size_ctx(&self.types.struct_layouts) in
+struct_value_size() so that struct/union sizes are properly resolved.
+
+Impact: Fixes ~16+ test failures on x86 (struct-assignment, struct-passing,
+struct-array tags), likely similar impact on ARM and RISC-V.

@@ -312,30 +312,8 @@ impl Parser {
                                     TokenKind::Identifier(name) if name == "aligned" || name == "__aligned__" => {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume opening (
-                                            if let TokenKind::IntLiteral(n) = self.peek() {
-                                                _aligned = Some(*n as usize);
-                                                self.advance();
-                                            }
-                                            // Skip to matching closing paren, tracking nesting depth
-                                            // so that __alignof__(long long) and sizeof(type) work
-                                            let mut paren_depth = 1i32;
-                                            while paren_depth > 0 {
-                                                match self.peek() {
-                                                    TokenKind::LParen => { paren_depth += 1; self.advance(); }
-                                                    TokenKind::RParen => {
-                                                        paren_depth -= 1;
-                                                        if paren_depth > 0 {
-                                                            self.advance();
-                                                        }
-                                                    }
-                                                    TokenKind::Eof => break,
-                                                    _ => { self.advance(); }
-                                                }
-                                            }
-                                            // Consume the final closing paren
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
+                                            if let Some(align) = self.parse_alignment_expr() {
+                                                _aligned = Some(align);
                                             }
                                         }
                                     }
@@ -556,5 +534,57 @@ impl Parser {
                 _ => { self.advance(); }
             }
         }
+    }
+
+    /// Parse the parenthesized argument of `aligned(expr)` in __attribute__.
+    /// Expects the opening `(` to be the current token (not yet consumed).
+    /// Parses and evaluates a constant expression, consuming through the closing `)`.
+    /// Returns Some(alignment) on success, None on failure.
+    pub(super) fn parse_alignment_expr(&mut self) -> Option<usize> {
+        if !matches!(self.peek(), TokenKind::LParen) {
+            return None;
+        }
+        self.advance(); // consume opening (
+        let expr = self.parse_assignment_expr();
+        // Consume closing )
+        if matches!(self.peek(), TokenKind::RParen) {
+            self.advance();
+        }
+        Self::eval_const_int_expr(&expr).map(|v| v as usize)
+    }
+
+    /// Parse the parenthesized argument of `_Alignas(...)`.
+    /// _Alignas can take either a type-name or a constant expression.
+    /// Returns Some(alignment) on success, None on failure.
+    pub(super) fn parse_alignas_argument(&mut self) -> Option<usize> {
+        if !matches!(self.peek(), TokenKind::LParen) {
+            return None;
+        }
+        // Try type-name first using save/restore
+        let save = self.pos;
+        let save_typedef = self.parsing_typedef;
+        self.advance(); // consume (
+        if self.is_type_specifier() {
+            if let Some(ts) = self.parse_type_specifier() {
+                let _result_type = self.parse_abstract_declarator_suffix(ts);
+                if matches!(self.peek(), TokenKind::RParen) {
+                    self.advance(); // consume )
+                    // TODO: evaluate alignof(type) - for now, we'd need the
+                    // full type system to compute alignment. Return None to fall
+                    // back to default alignment for type-based _Alignas.
+                    // Most real code uses integer expressions for alignment.
+                    return None;
+                }
+            }
+        }
+        // Backtrack and try as constant expression
+        self.pos = save;
+        self.parsing_typedef = save_typedef;
+        self.advance(); // consume (
+        let expr = self.parse_assignment_expr();
+        if matches!(self.peek(), TokenKind::RParen) {
+            self.advance();
+        }
+        Self::eval_const_int_expr(&expr).map(|v| v as usize)
     }
 }
