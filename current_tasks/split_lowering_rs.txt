@@ -1,4 +1,0 @@
-Task: split_lowering_rs
-Status: in_progress
-
-Extract pointer_analysis.rs and ref_collection.rs from lowering.rs
