@@ -1,0 +1,16 @@
+Fix designated array initializer ignoring index when struct has pointer fields
+
+Bug: When using designated array initializers like:
+  struct WithPtr table[5] = { [2] = { "two", 2 }, [4] = { "four", 4 } };
+
+If the struct has pointer fields (char *, function pointers, etc.), the array
+index designator [N] is ignored and entries are placed sequentially at indices
+0, 1, 2, ... instead of at the designated indices.
+
+Structs WITHOUT pointer fields work correctly with designated array indices.
+This suggests the bug is specifically in the pointer-field global init path
+(global_init_compound.rs or similar) where it handles structs that contain
+relocatable pointer values.
+
+The previous fix (244a279) addressed [N].field designators but did not fix
+plain [N] = { whole struct init } for structs with pointer fields.
