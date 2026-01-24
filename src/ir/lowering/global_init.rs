@@ -781,6 +781,11 @@ impl Lowerer {
                     }
                     item_idx = advanced.new_item_idx;
                 }
+                // Complex field: write {real, imag} pair to bytes
+                CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => {
+                    self.write_complex_field_to_bytes(bytes, field_offset, &field_layout.ty, &item.init);
+                    item_idx += 1;
+                }
                 // Scalar field (possibly bitfield)
                 _ => {
                     let field_ir_ty = IrType::from_ctype(&field_layout.ty);
@@ -1494,6 +1499,16 @@ impl Lowerer {
         field_size: usize,
         field_is_pointer: bool,
     ) {
+        // Complex fields: emit {real, imag} as byte pairs
+        if field_ty.is_complex() {
+            let mut bytes = vec![0u8; field_size];
+            self.write_complex_field_to_bytes(&mut bytes, 0, field_ty, init);
+            for &b in &bytes {
+                elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
+            }
+            return;
+        }
+
         match init {
             Initializer::Expr(expr) => {
                 if let Expr::StringLiteral(s, _) = expr {
@@ -1857,6 +1872,86 @@ impl Lowerer {
         }
     }
 
+    /// Write a complex field ({real, imag} pair) to a byte buffer.
+    /// Evaluates the initializer as a complex constant expression and writes
+    /// both components at the correct offsets within the field.
+    fn write_complex_field_to_bytes(
+        &self,
+        bytes: &mut [u8],
+        field_offset: usize,
+        complex_ctype: &CType,
+        init: &Initializer,
+    ) {
+        let comp_size = match complex_ctype {
+            CType::ComplexFloat => 4,
+            CType::ComplexDouble => 8,
+            CType::ComplexLongDouble => 16,
+            _ => 8,
+        };
+
+        // Try to extract (real, imag) from the initializer
+        let (real, imag) = match init {
+            Initializer::Expr(expr) => {
+                self.eval_complex_const_public(expr).unwrap_or((0.0, 0.0))
+            }
+            Initializer::List(items) => {
+                // {real, imag} or {real} (imag defaults to 0)
+                let real_val = items.first().and_then(|item| {
+                    if let Initializer::Expr(e) = &item.init {
+                        self.eval_const_expr(e).and_then(|c| match c {
+                            IrConst::F64(v) => Some(v),
+                            IrConst::F32(v) => Some(v as f64),
+                            IrConst::I64(v) => Some(v as f64),
+                            IrConst::I32(v) => Some(v as f64),
+                            IrConst::LongDouble(v) => Some(v),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                }).unwrap_or(0.0);
+                let imag_val = items.get(1).and_then(|item| {
+                    if let Initializer::Expr(e) = &item.init {
+                        self.eval_const_expr(e).and_then(|c| match c {
+                            IrConst::F64(v) => Some(v),
+                            IrConst::F32(v) => Some(v as f64),
+                            IrConst::I64(v) => Some(v as f64),
+                            IrConst::I32(v) => Some(v as f64),
+                            IrConst::LongDouble(v) => Some(v),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                }).unwrap_or(0.0);
+                (real_val, imag_val)
+            }
+        };
+
+        // Write real part at field_offset
+        match complex_ctype {
+            CType::ComplexFloat => {
+                let real_const = IrConst::F32(real as f32);
+                let imag_const = IrConst::F32(imag as f32);
+                self.write_const_to_bytes(bytes, field_offset, &real_const, IrType::F32);
+                self.write_const_to_bytes(bytes, field_offset + comp_size, &imag_const, IrType::F32);
+            }
+            CType::ComplexLongDouble => {
+                let real_const = IrConst::LongDouble(real);
+                let imag_const = IrConst::LongDouble(imag);
+                self.write_const_to_bytes(bytes, field_offset, &real_const, IrType::F128);
+                self.write_const_to_bytes(bytes, field_offset + comp_size, &imag_const, IrType::F128);
+            }
+            _ => {
+                // ComplexDouble
+                let real_const = IrConst::F64(real);
+                let imag_const = IrConst::F64(imag);
+                self.write_const_to_bytes(bytes, field_offset, &real_const, IrType::F64);
+                self.write_const_to_bytes(bytes, field_offset + comp_size, &imag_const, IrType::F64);
+            }
+        }
+    }
+
     /// Write a struct initializer list to a byte buffer at the given base offset.
     /// Handles nested struct fields recursively.
     fn write_struct_init_to_bytes(
@@ -1891,6 +1986,13 @@ impl Lowerer {
                     };
                     self.write_struct_init_to_bytes(bytes, field_offset, &[sub_item], &sub_layout);
                 }
+                current_field_idx = field_idx + 1;
+                continue;
+            }
+
+            // Complex fields: use specialized handler for {real, imag} pair
+            if field_layout.ty.is_complex() {
+                self.write_complex_field_to_bytes(bytes, field_offset, &field_layout.ty, &item.init);
                 current_field_idx = field_idx + 1;
                 continue;
             }

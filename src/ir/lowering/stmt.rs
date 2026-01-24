@@ -651,6 +651,84 @@ impl Lowerer {
 
             let field = &layout.fields[field_idx];
             let field_offset = field.offset;
+
+            // Complex fields need special handling: memcpy data instead of storing pointer
+            if field.ty.is_complex() {
+                let complex_ctype = field.ty.clone();
+                let complex_size = complex_ctype.size();
+                let dest_addr = self.fresh_value();
+                self.emit(Instruction::GetElementPtr {
+                    dest: dest_addr,
+                    base,
+                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    ty: IrType::Ptr,
+                });
+                match &item.init {
+                    Initializer::Expr(e) => {
+                        let expr_ctype = self.expr_ctype(e);
+                        let val = self.lower_expr(e);
+                        let src = if expr_ctype.is_complex() {
+                            if expr_ctype != complex_ctype {
+                                let val_v = self.operand_to_value(val);
+                                let converted = self.complex_to_complex(val_v, &expr_ctype, &complex_ctype);
+                                self.operand_to_value(converted)
+                            } else {
+                                self.operand_to_value(val)
+                            }
+                        } else {
+                            let converted = self.real_to_complex(val, &expr_ctype, &complex_ctype);
+                            self.operand_to_value(converted)
+                        };
+                        self.emit(Instruction::Memcpy {
+                            dest: dest_addr,
+                            src,
+                            size: complex_size,
+                        });
+                    }
+                    Initializer::List(sub_items) => {
+                        let comp_ty = Self::complex_component_ir_type(&complex_ctype);
+                        let comp_size = Self::complex_component_size(&complex_ctype);
+                        if let Some(first) = sub_items.first() {
+                            if let Initializer::Expr(e) = &first.init {
+                                let val = self.lower_expr(e);
+                                let expr_ty = self.get_expr_type(e);
+                                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                                self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
+                            }
+                        } else {
+                            let zero = match comp_ty {
+                                IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                                _ => Operand::Const(IrConst::F64(0.0)),
+                            };
+                            self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
+                        }
+                        let imag_ptr = self.fresh_value();
+                        self.emit(Instruction::GetElementPtr {
+                            dest: imag_ptr,
+                            base: dest_addr,
+                            offset: Operand::Const(IrConst::I64(comp_size as i64)),
+                            ty: IrType::I8,
+                        });
+                        if let Some(item) = sub_items.get(1) {
+                            if let Initializer::Expr(e) = &item.init {
+                                let val = self.lower_expr(e);
+                                let expr_ty = self.get_expr_type(e);
+                                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                                self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
+                            }
+                        } else {
+                            let zero = match comp_ty {
+                                IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                                _ => Operand::Const(IrConst::F64(0.0)),
+                            };
+                            self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
+                        }
+                    }
+                }
+                current_field_idx = field_idx + 1;
+                continue;
+            }
+
             let field_ty = IrType::from_ctype(&field.ty);
 
             match &item.init {
@@ -1919,6 +1997,86 @@ impl Lowerer {
                             }
                         }
                     }
+                }
+                // Complex field: lower expression and memcpy data
+                CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => {
+                    let complex_ctype = field.ty.clone();
+                    let complex_size = complex_ctype.size();
+                    let dest_addr = self.fresh_value();
+                    self.emit(Instruction::GetElementPtr {
+                        dest: dest_addr,
+                        base: base_alloca,
+                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                        ty: IrType::Ptr,
+                    });
+                    match &item.init {
+                        Initializer::Expr(e) => {
+                            let expr_ctype = self.expr_ctype(e);
+                            let val = self.lower_expr(e);
+                            let src = if expr_ctype.is_complex() {
+                                // Already complex: might need conversion
+                                if expr_ctype != complex_ctype {
+                                    let val_v = self.operand_to_value(val);
+                                    let converted = self.complex_to_complex(val_v, &expr_ctype, &complex_ctype);
+                                    self.operand_to_value(converted)
+                                } else {
+                                    self.operand_to_value(val)
+                                }
+                            } else {
+                                // Real/integer scalar: convert to complex {val, 0}
+                                let converted = self.real_to_complex(val, &expr_ctype, &complex_ctype);
+                                self.operand_to_value(converted)
+                            };
+                            self.emit(Instruction::Memcpy {
+                                dest: dest_addr,
+                                src,
+                                size: complex_size,
+                            });
+                        }
+                        Initializer::List(sub_items) => {
+                            // {real, imag} list init
+                            let comp_ty = Self::complex_component_ir_type(&complex_ctype);
+                            let comp_size = Self::complex_component_size(&complex_ctype);
+                            // Store real part
+                            if let Some(item) = sub_items.first() {
+                                if let Initializer::Expr(e) = &item.init {
+                                    let val = self.lower_expr(e);
+                                    let expr_ty = self.get_expr_type(e);
+                                    let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                                    self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
+                                }
+                            } else {
+                                let zero = match comp_ty {
+                                    IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                                    _ => Operand::Const(IrConst::F64(0.0)),
+                                };
+                                self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
+                            }
+                            // Store imag part
+                            let imag_ptr = self.fresh_value();
+                            self.emit(Instruction::GetElementPtr {
+                                dest: imag_ptr,
+                                base: dest_addr,
+                                offset: Operand::Const(IrConst::I64(comp_size as i64)),
+                                ty: IrType::I8,
+                            });
+                            if let Some(item) = sub_items.get(1) {
+                                if let Initializer::Expr(e) = &item.init {
+                                    let val = self.lower_expr(e);
+                                    let expr_ty = self.get_expr_type(e);
+                                    let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                                    self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
+                                }
+                            } else {
+                                let zero = match comp_ty {
+                                    IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                                    _ => Operand::Const(IrConst::F64(0.0)),
+                                };
+                                self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
+                            }
+                        }
+                    }
+                    item_idx += 1;
                 }
                 _ => {
                     // Scalar field (possibly a bitfield)
