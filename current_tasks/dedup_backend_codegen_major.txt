@@ -1,0 +1,10 @@
+Major backend codegen deduplication refactor.
+
+Extract shared logic from x86/arm/riscv codegen files into codegen_shared.rs:
+1. emit_cast: shared CastKind match dispatch with arch-specific instruction callbacks
+2. emit_binop: shared float binop dispatch and integer op structure
+3. emit_call: shared argument classification logic (register vs stack assignment)
+4. emit_inline_asm: shared 4-phase operand handling framework
+5. Small helpers: load/store type dispatch, string literal helpers
+
+Goal: Reduce ~5500 lines of duplicated code across 3 backends to shared framework + arch tables.
