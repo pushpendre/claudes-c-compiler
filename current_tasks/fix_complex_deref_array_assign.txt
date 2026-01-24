@@ -1,0 +1,27 @@
+Task: Fix complex assignment through array dereference
+Status: in progress
+Agent: claude
+
+Problem:
+Assigning to a complex value through array dereference (*arr = complex_val) only
+copies the real part. For example:
+  double _Complex arr[1];
+  double _Complex y = 7.0 + 8.0i;
+  *arr = y;
+After this, arr[0] has imag part = 0.0 instead of 8.0.
+
+Root cause:
+expr_ctype() for Deref only handled CType::Pointer(pointee) but not
+CType::Array(elem, _). When dereferencing an array name (which has Array type),
+the complex type was not detected, causing the assignment to fall through to
+the scalar Store path (8 bytes) instead of the complex Memcpy path (16 bytes).
+
+Fix:
+1. complex.rs: expr_ctype Deref arm now matches both Pointer and Array
+2. expr.rs: lower_deref now handles Array(complex) same as Pointer(complex)
+
+Files changed:
+- src/ir/lowering/complex.rs (expr_ctype Deref arm)
+- src/ir/lowering/expr.rs (lower_deref Array-of-complex case)
+
+Test results: x86 95.2%, ARM 95.5%, RISC-V 92.8%
