@@ -791,14 +791,14 @@ impl Lowerer {
 
     /// Evaluate a complex expression for global initialization.
     /// Returns a GlobalInit::Array with [real, imag] constant values.
-    pub(super) fn eval_complex_global_init(&self, expr: &Expr, target_type: &TypeSpecifier) -> Option<GlobalInit> {
+    pub(super) fn eval_complex_global_init(&self, expr: &Expr, target_ctype: &CType) -> Option<GlobalInit> {
         let (real, imag) = self.eval_complex_const(expr)?;
-        match target_type {
-            TypeSpecifier::ComplexFloat => Some(GlobalInit::Array(vec![
+        match target_ctype {
+            CType::ComplexFloat => Some(GlobalInit::Array(vec![
                 IrConst::F32(real as f32),
                 IrConst::F32(imag as f32),
             ])),
-            TypeSpecifier::ComplexLongDouble => Some(GlobalInit::Array(vec![
+            CType::ComplexLongDouble => Some(GlobalInit::Array(vec![
                 IrConst::LongDouble(real),
                 IrConst::LongDouble(imag),
             ])),

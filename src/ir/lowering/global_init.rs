@@ -112,8 +112,7 @@ impl Lowerer {
                 {
                     let ctype = self.type_spec_to_ctype(_type_spec);
                     if ctype.is_complex() {
-                        let resolved = self.resolve_type_spec(_type_spec).clone();
-                        if let Some(init) = self.eval_complex_global_init(expr, &resolved) {
+                        if let Some(init) = self.eval_complex_global_init(expr, &ctype) {
                             return init;
                         }
                     }
@@ -142,14 +141,13 @@ impl Lowerer {
                 let complex_ctype = self.type_spec_to_ctype(_type_spec);
                 let is_complex_element = is_array && complex_ctype.is_complex();
                 if is_complex_element {
-                    let resolved = self.resolve_type_spec(_type_spec).clone();
                     let num_elems = total_size / elem_size.max(1);
                     // Each complex element is stored as [real, imag] pair.
                     // Total scalar values = num_elems * 2.
                     let total_scalars = num_elems * 2;
-                    let zero_pair: Vec<IrConst> = match &resolved {
-                        TypeSpecifier::ComplexFloat => vec![IrConst::F32(0.0), IrConst::F32(0.0)],
-                        TypeSpecifier::ComplexLongDouble => vec![IrConst::LongDouble(0.0), IrConst::LongDouble(0.0)],
+                    let zero_pair: Vec<IrConst> = match &complex_ctype {
+                        CType::ComplexFloat => vec![IrConst::F32(0.0), IrConst::F32(0.0)],
+                        CType::ComplexLongDouble => vec![IrConst::LongDouble(0.0), IrConst::LongDouble(0.0)],
                         _ => vec![IrConst::F64(0.0), IrConst::F64(0.0)],
                     };
                     let mut values: Vec<IrConst> = Vec::with_capacity(total_scalars);
@@ -173,12 +171,12 @@ impl Lowerer {
                             if let Some(expr) = expr {
                                 if let Some((real, imag)) = self.eval_complex_const_public(expr) {
                                     let base_offset = current_idx * 2;
-                                    match &resolved {
-                                        TypeSpecifier::ComplexFloat => {
+                                    match &complex_ctype {
+                                        CType::ComplexFloat => {
                                             values[base_offset] = IrConst::F32(real as f32);
                                             values[base_offset + 1] = IrConst::F32(imag as f32);
                                         }
-                                        TypeSpecifier::ComplexLongDouble => {
+                                        CType::ComplexLongDouble => {
                                             values[base_offset] = IrConst::LongDouble(real);
                                             values[base_offset + 1] = IrConst::LongDouble(imag);
                                         }
