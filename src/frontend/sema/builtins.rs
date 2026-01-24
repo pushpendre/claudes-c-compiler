@@ -162,6 +162,9 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     m.insert("conjf", BuiltinInfo::intrinsic(BuiltinIntrinsic::ComplexConj));
     m.insert("conjl", BuiltinInfo::intrinsic(BuiltinIntrinsic::ComplexConj));
 
+    // Complex construction
+    m.insert("__builtin_complex", BuiltinInfo::intrinsic(BuiltinIntrinsic::ComplexConstruct));
+
     m
 });
 
@@ -218,6 +221,8 @@ pub enum BuiltinIntrinsic {
     IsInfSign,
     /// __builtin_alloca(size) -> dynamic stack allocation
     Alloca,
+    /// __builtin_complex(real, imag) -> construct complex number
+    ComplexConstruct,
 }
 
 impl BuiltinInfo {

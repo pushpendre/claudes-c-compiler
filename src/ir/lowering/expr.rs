@@ -1100,6 +1100,51 @@ impl Lowerer {
                         // Handled earlier in try_lower_builtin_call - should not reach here
                         Some(Operand::Const(IrConst::I64(0)))
                     }
+                    BuiltinIntrinsic::ComplexConstruct => {
+                        // __builtin_complex(real, imag) -> _Complex double
+                        // Creates a complex value from two FP arguments.
+                        // The result type is determined by the argument types:
+                        // double args -> _Complex double, float args -> _Complex float
+                        if args.len() >= 2 {
+                            let real_val = self.lower_expr(&args[0]);
+                            let imag_val = self.lower_expr(&args[1]);
+                            let arg_ty = self.get_expr_type(&args[0]);
+                            let (comp_ty, complex_size, comp_size) = if arg_ty == IrType::F32 {
+                                (IrType::F32, 8usize, 4usize)
+                            } else {
+                                (IrType::F64, 16usize, 8usize)
+                            };
+                            // Allocate complex-sized stack slot
+                            let alloca = self.fresh_value();
+                            self.emit(Instruction::Alloca {
+                                dest: alloca,
+                                ty: IrType::Ptr,
+                                size: complex_size,
+                            });
+                            // Store real part at offset 0
+                            self.emit(Instruction::Store {
+                                val: real_val,
+                                ptr: alloca,
+                                ty: comp_ty,
+                            });
+                            // Store imag part at offset comp_size
+                            let imag_ptr = self.fresh_value();
+                            self.emit(Instruction::GetElementPtr {
+                                dest: imag_ptr,
+                                base: alloca,
+                                offset: Operand::Const(IrConst::I64(comp_size as i64)),
+                                ty: IrType::I8,
+                            });
+                            self.emit(Instruction::Store {
+                                val: imag_val,
+                                ptr: imag_ptr,
+                                ty: comp_ty,
+                            });
+                            Some(Operand::Value(alloca))
+                        } else {
+                            Some(Operand::Const(IrConst::I64(0)))
+                        }
+                    }
                 }
             }
         }

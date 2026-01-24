@@ -86,6 +86,37 @@ impl Lowerer {
                 });
                 Some(LValue::Address(field_addr))
             }
+            Expr::UnaryOp(UnaryOp::RealPart, inner, _) => {
+                // __real__ z as lvalue -> address of real part (offset 0 from complex base)
+                if let Some(lv) = self.lower_lvalue(inner) {
+                    let addr = self.lvalue_addr(&lv);
+                    Some(LValue::Address(addr))
+                } else {
+                    None
+                }
+            }
+            Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
+                // __imag__ z as lvalue -> address of imag part (offset = sizeof(component))
+                if let Some(lv) = self.lower_lvalue(inner) {
+                    let addr = self.lvalue_addr(&lv);
+                    let inner_ct = self.expr_ctype(inner);
+                    let comp_size = match inner_ct {
+                        CType::ComplexFloat => 4i64,
+                        CType::ComplexLongDouble => 16i64,
+                        _ => 8i64, // ComplexDouble
+                    };
+                    let imag_addr = self.fresh_value();
+                    self.emit(Instruction::GetElementPtr {
+                        dest: imag_addr,
+                        base: addr,
+                        offset: Operand::Const(IrConst::I64(comp_size)),
+                        ty: IrType::I8,
+                    });
+                    Some(LValue::Address(imag_addr))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }

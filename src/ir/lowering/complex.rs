@@ -396,8 +396,20 @@ impl Lowerer {
                     lt // approximate
                 }
             }
-            Expr::FunctionCall(callee, _, _) => {
+            Expr::FunctionCall(callee, args, _) => {
                 if let Expr::Identifier(name, _) = callee.as_ref() {
+                    // __builtin_complex returns complex type based on argument types
+                    if name == "__builtin_complex" {
+                        if let Some(first_arg) = args.first() {
+                            let arg_ct = self.expr_ctype(first_arg);
+                            return match arg_ct {
+                                CType::Float => CType::ComplexFloat,
+                                CType::LongDouble => CType::ComplexLongDouble,
+                                _ => CType::ComplexDouble,
+                            };
+                        }
+                        return CType::ComplexDouble;
+                    }
                     self.get_function_return_ctype(name)
                 } else {
                     CType::Int
