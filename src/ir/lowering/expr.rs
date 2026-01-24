@@ -2337,30 +2337,22 @@ impl Lowerer {
         // (aggregate values are represented by their addresses in the IR).
         // Dereferencing a pointer-to-complex: return the address (like struct deref).
         // Complex values are aggregates passed by pointer, so *ptr just yields the address.
-        if let Some(ctype) = self.get_expr_ctype(inner) {
-            if let CType::Pointer(ref pointee) = ctype {
-                if matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_)) {
-                    return self.lower_expr(inner);
-                }
-                if pointee.is_complex() {
-                    return self.lower_expr(inner);
-                }
-            }
+        // Check if the pointee type is an aggregate (array/struct/union/complex)
+        // that should not be loaded from memory. Try get_expr_ctype first, then
+        // fall back to expr_ctype for broader expression form coverage.
+        let pointee_is_aggregate = |ct: &CType| -> bool {
+            if let CType::Pointer(ref pointee) = ct {
+                matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_))
+                    || pointee.is_complex()
+            } else { false }
+        };
+        if self.get_expr_ctype(inner).map_or(false, |ct| pointee_is_aggregate(&ct)) {
+            return self.lower_expr(inner);
         }
-
-        // Fallback: use expr_ctype which handles more expression forms (e.g. when
-        // get_expr_ctype returns None because c_type wasn't set in LocalInfo).
-        // This ensures complex/struct/array types accessed via pointer deref are
-        // correctly treated as aggregates (address-only, no scalar load).
         {
             let inner_ct = self.expr_ctype(inner);
-            if let CType::Pointer(ref pointee) = inner_ct {
-                if matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_)) {
-                    return self.lower_expr(inner);
-                }
-                if pointee.is_complex() {
-                    return self.lower_expr(inner);
-                }
+            if pointee_is_aggregate(&inner_ct) {
+                return self.lower_expr(inner);
             }
             // Dereferencing an array that decays to pointer: if element is complex,
             // struct, or union, return the address (no load needed).
