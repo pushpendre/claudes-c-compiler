@@ -1,0 +1,11 @@
+Unify the duplicated struct-field-traversal logic in global initialization.
+
+Three separate functions implement the same struct field walking algorithm for
+different output targets. This refactoring introduces an InitEmitter trait with
+ByteEmitter, CompoundEmitter, and HybridEmitter implementations, and a single
+walk_struct_init() function that replaces all five duplicated traversal loops.
+
+Files affected:
+- src/ir/lowering/global_init.rs
+- src/ir/lowering/global_init_bytes.rs
+- src/ir/lowering/global_init_compound.rs
