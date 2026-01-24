@@ -96,7 +96,7 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
         cmd.arg(obj);
     }
 
-    // Add user-provided linker args (-l, -L, -static, -shared, etc.)
+    // Add user-provided linker args (-l, -L, -static, -shared, -Wl, pass-through, etc.)
     for arg in user_args {
         cmd.arg(arg);
     }

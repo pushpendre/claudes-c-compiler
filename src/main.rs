@@ -74,7 +74,8 @@ fn main() {
             }
 
             // Warning flags (ignored for now)
-            arg if arg.starts_with("-W") => {}
+            // Note: -Wl, is handled below (linker pass-through), so exclude it here
+            arg if arg.starts_with("-W") && !arg.starts_with("-Wl,") => {}
 
             // Preprocessor defines: -DFOO or -DFOO=bar or -D FOO
             "-D" => {
@@ -163,10 +164,12 @@ fn main() {
             }
 
             // Linker pass-through: -Wl,flag1,flag2,...
+            // Since we use gcc as the linker driver, re-wrap each flag with -Wl,
+            // so gcc forwards them to the linker correctly.
             arg if arg.starts_with("-Wl,") => {
                 for flag in arg[4..].split(',') {
                     if !flag.is_empty() {
-                        driver.linker_extra_args.push(flag.to_string());
+                        driver.linker_extra_args.push(format!("-Wl,{}", flag));
                     }
                 }
             }
@@ -186,8 +189,13 @@ fn main() {
                 i += 1;
             }
 
+            // -rdynamic: export all symbols to dynamic symbol table
+            "-rdynamic" => {
+                driver.linker_extra_args.push("-rdynamic".to_string());
+            }
+
             // Miscellaneous ignored flags
-            "-pipe" | "-pthread" | "-rdynamic" | "-Xa" | "-Xc" | "-Xt" => {}
+            "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
 
             // Unknown flags - warn in verbose mode
             arg if arg.starts_with('-') => {
