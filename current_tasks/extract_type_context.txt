@@ -1,0 +1,10 @@
+Extract TypeContext from Lowerer (decomposition commit 3)
+
+Pull type-system state into its own struct:
+- struct_layouts, typedefs, function_typedefs, enum_constants, ctype_cache,
+  var_ctypes, func_return_ctypes, const_local_values
+
+Methods like resolve_ctype_size, type_spec_to_ctype, get_struct_layout become
+methods on TypeContext. Lowerer holds a TypeContext field.
+
+Status: IN PROGRESS
