@@ -1,3 +1,8 @@
-Fix _Bool cast normalization: explicit casts like (_Bool)expr must produce 0 or 1,
-not truncate to the low byte. Currently lower_cast emits a plain IntNarrow for Bool targets,
-but C requires (expr != 0) ? 1 : 0 semantics. This affects all three backends.
+LOCKED: Fixing _Bool cast/conversion normalization.
+
+The bug: implicit conversions to _Bool (init, assignment, return, parameter passing)
+first truncate the value to U8 via emit_implicit_cast, THEN normalize. This means
+values like 256 (0x100) get truncated to 0x00 first, then (0 != 0) = false.
+
+Fix: normalize at the source type BEFORE any truncation, using a new
+emit_bool_normalize_typed() function that compares at the source width.
