@@ -1183,8 +1183,15 @@ impl Lowerer {
                 }
             }
 
-            // Determine struct layout for global struct/pointer-to-struct variables
-            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
+            // Determine struct layout for global struct/pointer-to-struct variables.
+            // For arrays of pointers (e.g., struct foo *arr[]), the struct layout describes
+            // the pointee, not the array element (which is a pointer). Clear it so the array
+            // is treated as a pointer array, not a struct array.
+            let struct_layout = if is_array_of_pointers || is_array_of_func_ptrs {
+                None
+            } else {
+                self.get_struct_layout_for_type(&decl.type_spec)
+            };
             let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
 
             let actual_alloc_size = if let Some(ref layout) = struct_layout {

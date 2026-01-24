@@ -330,14 +330,24 @@ impl Lowerer {
                     }));
 
                     if has_addr_exprs {
-                        // Use Compound initializer for arrays containing address expressions
-                        let mut elements = Vec::with_capacity(num_elems);
+                        // Use Compound initializer for arrays containing address expressions.
+                        // Support designated initializers: [idx] = val
+                        let mut elements: Vec<GlobalInit> = (0..num_elems).map(|_| GlobalInit::Zero).collect();
+                        let mut current_idx = 0usize;
                         for item in items {
-                            self.collect_compound_init_element(&item.init, &mut elements);
-                        }
-                        // Zero-fill remaining
-                        while elements.len() < num_elems {
-                            elements.push(GlobalInit::Zero);
+                            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                                    current_idx = idx;
+                                }
+                            }
+                            if current_idx < num_elems {
+                                let mut elem_parts = Vec::new();
+                                self.collect_compound_init_element(&item.init, &mut elem_parts);
+                                if let Some(elem) = elem_parts.into_iter().next() {
+                                    elements[current_idx] = elem;
+                                }
+                            }
+                            current_idx += 1;
                         }
                         return GlobalInit::Compound(elements);
                     }

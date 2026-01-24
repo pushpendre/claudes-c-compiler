@@ -168,6 +168,15 @@ fn main() {
                 // TODO: handle -x c, -x assembler, etc.
             }
 
+            // Dependency generation flags (ignored, but must consume arguments)
+            "-MD" | "-MMD" | "-MP" | "-M" | "-MM" => {
+                // Standalone flags, no argument to consume
+            }
+            "-MF" | "-MT" | "-MQ" => {
+                // These take an argument: skip the next arg
+                i += 1;
+            }
+
             // Miscellaneous ignored flags
             "-pipe" | "-pthread" | "-rdynamic" => {}
 

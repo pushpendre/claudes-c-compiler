@@ -504,6 +504,32 @@ impl Parser {
                 field_type = TypeSpecifier::Pointer(Box::new(field_type));
                 self.skip_cv_qualifiers();
             }
+            // After consuming pointer stars, check for function pointer declarator
+            // with pointer return type, e.g. void *(*func)(void) or int *(*f)(int).
+            // At this point field_type = Pointer(base_type), next token is '(' from '(*name)(...)'
+            if matches!(self.peek(), TokenKind::LParen) {
+                let save2 = self.pos;
+                self.advance(); // consume '('
+                if matches!(self.peek(), TokenKind::Star) {
+                    self.advance(); // consume '*'
+                    self.skip_cv_qualifiers();
+                    let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+                        self.advance();
+                        Some(n)
+                    } else {
+                        None
+                    };
+                    self.skip_array_dimensions();
+                    self.expect(&TokenKind::RParen);
+                    self.skip_balanced_parens();
+                    // Function pointer with pointer return type
+                    fields.push(StructFieldDecl { type_spec: field_type, name, bit_width: None });
+                    if !self.consume_if(&TokenKind::Comma) { break; }
+                    continue;
+                } else {
+                    self.pos = save2; // restore
+                }
+            }
             let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                 self.advance();
                 Some(n)
