@@ -9,11 +9,19 @@ impl Lowerer {
     /// nested struct/union types defined in the fields.
     pub(super) fn register_struct_type(&mut self, ts: &TypeSpecifier) {
         match ts {
-            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
+            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, struct_aligned) => {
                 // Recursively register nested struct/union types in fields
                 self.register_nested_struct_types(fields);
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                let layout = self.compute_struct_union_layout_packed(fields, false, max_field_align);
+                let mut layout = self.compute_struct_union_layout_packed(fields, false, max_field_align);
+                // Apply struct-level __attribute__((aligned(N))): sets minimum alignment
+                if let Some(a) = struct_aligned {
+                    if *a > layout.align {
+                        layout.align = *a;
+                        let mask = layout.align - 1;
+                        layout.size = (layout.size + mask) & !mask;
+                    }
+                }
                 let key = self.struct_layout_key(tag, false);
                 self.insert_struct_layout_scoped(key.clone(), layout);
                 // Also invalidate the ctype_cache for this tag so sizeof picks
@@ -22,11 +30,19 @@ impl Lowerer {
                     self.invalidate_ctype_cache_scoped(&key);
                 }
             }
-            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
+            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, struct_aligned) => {
                 // Recursively register nested struct/union types in fields
                 self.register_nested_struct_types(fields);
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                let layout = self.compute_struct_union_layout_packed(fields, true, max_field_align);
+                let mut layout = self.compute_struct_union_layout_packed(fields, true, max_field_align);
+                // Apply struct-level __attribute__((aligned(N))): sets minimum alignment
+                if let Some(a) = struct_aligned {
+                    if *a > layout.align {
+                        layout.align = *a;
+                        let mask = layout.align - 1;
+                        layout.size = (layout.size + mask) & !mask;
+                    }
+                }
                 let key = self.struct_layout_key(tag, true);
                 self.insert_struct_layout_scoped(key.clone(), layout);
                 if tag.is_some() {

@@ -1175,11 +1175,11 @@ impl Lowerer {
                 });
                 CType::Array(Box::new(elem_ctype), size)
             }
-            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack, _) => {
-                self.struct_or_union_to_ctype(name, fields, false, *is_packed, *pragma_pack)
+            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack, struct_aligned) => {
+                self.struct_or_union_to_ctype(name, fields, false, *is_packed, *pragma_pack, *struct_aligned)
             }
-            TypeSpecifier::Union(name, fields, is_packed, pragma_pack, _) => {
-                self.struct_or_union_to_ctype(name, fields, true, *is_packed, *pragma_pack)
+            TypeSpecifier::Union(name, fields, is_packed, pragma_pack, struct_aligned) => {
+                self.struct_or_union_to_ctype(name, fields, true, *is_packed, *pragma_pack, *struct_aligned)
             }
             TypeSpecifier::Enum(_, _) => CType::Int,
             TypeSpecifier::Typeof(expr) => {
@@ -1202,6 +1202,7 @@ impl Lowerer {
         is_union: bool,
         is_packed: bool,
         pragma_pack: Option<usize>,
+        struct_aligned: Option<usize>,
     ) -> CType {
         let prefix = if is_union { "union" } else { "struct" };
         let wrap = |key: String| -> CType {
@@ -1237,11 +1238,19 @@ impl Lowerer {
                     alignment: f.alignment,
                 }
             }).collect();
-            let layout = if is_union {
+            let mut layout = if is_union {
                 StructLayout::for_union(&struct_fields, &self.types)
             } else {
                 StructLayout::for_struct_with_packing(&struct_fields, max_field_align, &self.types)
             };
+            // Apply struct-level __attribute__((aligned(N))): sets minimum alignment
+            if let Some(a) = struct_aligned {
+                if a > layout.align {
+                    layout.align = a;
+                    let mask = layout.align - 1;
+                    layout.size = (layout.size + mask) & !mask;
+                }
+            }
             let key = if let Some(tag) = name {
                 format!("{}.{}", prefix, tag)
             } else {
