@@ -91,6 +91,22 @@ impl MacroTable {
                 }
                 let ident: String = chars[start..i].iter().collect();
 
+                // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
+                // In C, pp-numbers include sequences like digit followed by identifier chars.
+                // If preceded by a digit or dot-digit, this is a pp-number suffix, not a macro.
+                let is_ppnumber_suffix = if start > 0 {
+                    let prev = chars[start - 1];
+                    prev.is_ascii_digit() || prev == '.' ||
+                    // Also handle hex float exponent (0x1p+2) where 'p' precedes sign/digit
+                    (prev == '+' || prev == '-') && start >= 2 && (chars[start - 2] == 'e' || chars[start - 2] == 'E' || chars[start - 2] == 'p' || chars[start - 2] == 'P')
+                } else {
+                    false
+                };
+                if is_ppnumber_suffix {
+                    result.push_str(&ident);
+                    continue;
+                }
+
                 // Check if this is a macro that's not currently being expanded
                 if !expanding.contains(&ident) {
                     if let Some(mac) = self.macros.get(&ident) {

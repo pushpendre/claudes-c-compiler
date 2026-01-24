@@ -125,6 +125,68 @@ impl Lowerer {
                     }
                 }
 
+                // Array of complex types: emit {real, imag} pairs for each element.
+                // Complex types (e.g., double _Complex) have base_ty=Ptr in IR but are
+                // actually stored as {real, imag} pairs. We detect this case early and
+                // use eval_complex_global_init to properly evaluate each element.
+                let is_complex_element = is_array && matches!(
+                    self.resolve_type_spec(_type_spec),
+                    TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
+                );
+                if is_complex_element {
+                    let resolved = self.resolve_type_spec(_type_spec).clone();
+                    let num_elems = total_size / elem_size.max(1);
+                    // Each complex element is stored as [real, imag] pair.
+                    // Total scalar values = num_elems * 2.
+                    let total_scalars = num_elems * 2;
+                    let zero_pair: Vec<IrConst> = match &resolved {
+                        TypeSpecifier::ComplexFloat => vec![IrConst::F32(0.0), IrConst::F32(0.0)],
+                        TypeSpecifier::ComplexLongDouble => vec![IrConst::LongDouble(0.0), IrConst::LongDouble(0.0)],
+                        _ => vec![IrConst::F64(0.0), IrConst::F64(0.0)],
+                    };
+                    let mut values: Vec<IrConst> = Vec::with_capacity(total_scalars);
+                    for _ in 0..num_elems {
+                        values.extend_from_slice(&zero_pair);
+                    }
+                    let mut current_idx = 0usize;
+                    for item in items {
+                        if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                            if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                                current_idx = idx;
+                            }
+                        }
+                        if current_idx < num_elems {
+                            let expr = match &item.init {
+                                Initializer::Expr(e) => Some(e),
+                                Initializer::List(sub_items) => {
+                                    Self::unwrap_nested_init_expr(sub_items)
+                                }
+                            };
+                            if let Some(expr) = expr {
+                                if let Some((real, imag)) = self.eval_complex_const_public(expr) {
+                                    let base_offset = current_idx * 2;
+                                    match &resolved {
+                                        TypeSpecifier::ComplexFloat => {
+                                            values[base_offset] = IrConst::F32(real as f32);
+                                            values[base_offset + 1] = IrConst::F32(imag as f32);
+                                        }
+                                        TypeSpecifier::ComplexLongDouble => {
+                                            values[base_offset] = IrConst::LongDouble(real);
+                                            values[base_offset + 1] = IrConst::LongDouble(imag);
+                                        }
+                                        _ => {
+                                            values[base_offset] = IrConst::F64(real);
+                                            values[base_offset + 1] = IrConst::F64(imag);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        current_idx += 1;
+                    }
+                    return GlobalInit::Array(values);
+                }
+
                 if is_array && elem_size > 0 {
                     // For struct arrays, elem_size is the actual struct size (from sizeof_type),
                     // whereas base_ty.size() may return Ptr size (8). Use elem_size for structs.

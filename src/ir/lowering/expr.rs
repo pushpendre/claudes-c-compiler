@@ -2673,9 +2673,14 @@ impl Lowerer {
             ty: field_ty,
         });
 
-        // Array and struct fields return address (don't load)
+        // Array, struct, and complex fields return address (don't load).
+        // Complex types are stored as {real, imag} pairs in memory and their
+        // IR type is Ptr (pointer to the pair). Returning the field address
+        // avoids a double-dereference bug where the real part bits would be
+        // misinterpreted as a pointer.
         if self.field_is_array(base_expr, field_name, is_pointer)
             || self.field_is_struct(base_expr, field_name, is_pointer)
+            || self.field_is_complex(base_expr, field_name, is_pointer)
         {
             return Operand::Value(field_addr);
         }
@@ -2790,6 +2795,17 @@ impl Lowerer {
             self.resolve_member_field_ctype(base_expr, field_name)
         };
         ctype.map(|ct| matches!(ct, CType::Struct(_) | CType::Union(_))).unwrap_or(false)
+    }
+
+    /// Check if a struct field is a complex type (returns address, not loaded value).
+    /// Complex types are stored as {real, imag} pairs and use Ptr IR type.
+    fn field_is_complex(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
+        let ctype = if is_pointer_access {
+            self.resolve_pointer_member_field_ctype(base_expr, field_name)
+        } else {
+            self.resolve_member_field_ctype(base_expr, field_name)
+        };
+        ctype.map(|ct| matches!(ct, CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble)).unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------

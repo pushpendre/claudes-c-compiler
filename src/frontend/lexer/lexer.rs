@@ -313,10 +313,10 @@ impl Lexer {
                 }
                 2 // long double
             } else if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
-                // GCC extension: imaginary suffix 'i'/'I' (3.0i, 3.0I)
+                // GCC extension: imaginary suffix 'i' or 'I' (3.0i, 3.0I)
                 self.pos += 1;
                 is_imaginary = true;
-                // Check for additional f/F/l/L after i/I (e.g., 3.0if, 3.0IF)
+                // Check for additional f/F/l/L after i/I (e.g., 3.0if, 3.0iF, 3.0IF)
                 if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
                     self.pos += 1;
                     1 // float imaginary

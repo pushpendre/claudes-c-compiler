@@ -786,6 +786,11 @@ impl Lowerer {
         }
     }
 
+    /// Public wrapper for eval_complex_const, used by global_init for complex array elements.
+    pub(super) fn eval_complex_const_public(&self, expr: &Expr) -> Option<(f64, f64)> {
+        self.eval_complex_const(expr)
+    }
+
     /// Try to evaluate a complex constant expression, returning (real, imag) as f64.
     fn eval_complex_const(&self, expr: &Expr) -> Option<(f64, f64)> {
         match expr {

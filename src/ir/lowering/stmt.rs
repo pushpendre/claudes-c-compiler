@@ -722,6 +722,14 @@ impl Lowerer {
                                     self.zero_init_alloca(alloca, alloc_size);
                                 }
 
+                                // Detect arrays of complex types. Complex elements are stored as
+                                // {real, imag} pairs and lower_expr returns a pointer to a stack
+                                // temp. We need to Memcpy from that pointer to the array slot.
+                                let is_complex_elem_array = matches!(
+                                    self.resolve_type_spec(&decl.type_spec),
+                                    TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
+                                );
+
                                 // For arrays of pointers, the element type is Ptr (8 bytes),
                                 // not the base type spec (which would be e.g. I32 for int *arr[N]).
                                 let elem_store_ty = if is_array_of_pointers || is_array_of_func_ptrs { IrType::I64 } else { elem_ir_ty };
@@ -752,10 +760,30 @@ impl Lowerer {
                                                 continue;
                                             }
                                         }
-                                        let val = self.lower_expr(e);
-                                        let expr_ty = self.get_expr_type(e);
-                                        let val = self.emit_implicit_cast(val, expr_ty, elem_store_ty);
-                                        self.emit_array_element_store(alloca, val, current_idx * elem_size, elem_store_ty);
+                                        if is_complex_elem_array {
+                                            // Complex array element: lower_expr returns a pointer to
+                                            // a stack-allocated {real, imag} pair. Memcpy from that
+                                            // pointer to the target array slot.
+                                            let val = self.lower_expr(e);
+                                            let src = self.operand_to_value(val);
+                                            let dest = self.fresh_value();
+                                            self.emit(Instruction::GetElementPtr {
+                                                dest,
+                                                base: alloca,
+                                                offset: Operand::Const(IrConst::I64((current_idx * elem_size) as i64)),
+                                                ty: IrType::I8,
+                                            });
+                                            self.emit(Instruction::Memcpy {
+                                                dest,
+                                                src,
+                                                size: elem_size,
+                                            });
+                                        } else {
+                                            let val = self.lower_expr(e);
+                                            let expr_ty = self.get_expr_type(e);
+                                            let val = self.emit_implicit_cast(val, expr_ty, elem_store_ty);
+                                            self.emit_array_element_store(alloca, val, current_idx * elem_size, elem_store_ty);
+                                        }
                                     }
                                     current_idx += 1;
                                 }
@@ -892,7 +920,7 @@ impl Lowerer {
 
     /// Unwrap nested `Initializer::List` items to find the innermost expression.
     /// Used for double-brace init like `{{expr}}` to extract the `expr`.
-    fn unwrap_nested_init_expr(items: &[InitializerItem]) -> Option<&Expr> {
+    pub(super) fn unwrap_nested_init_expr(items: &[InitializerItem]) -> Option<&Expr> {
         if let Some(first) = items.first() {
             match &first.init {
                 Initializer::Expr(e) => Some(e),
