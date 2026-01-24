@@ -1,0 +1,28 @@
+Task: Implement SSE intrinsic support for ARM (NEON) and RISC-V backends
+Status: in progress
+
+Problem:
+- SSE intrinsic operations (X86SseOp IR instructions) were silently no-oped on non-x86 targets
+- The default emit_x86_sse_op trait method is empty, causing SSE tests to produce garbage output
+- Tests sse-intrinsics-basic and sse-nontemporal-fence both fail on ARM and RISC-V
+
+Fix:
+- ARM: Implement emit_x86_sse_op using NEON instructions
+  - SetEpi8 -> dup v0.16b; SetEpi32 -> dup v0.4s
+  - Loaddqu/Storedqu -> ldr/str q0
+  - Pcmpeqb128 -> cmeq v0.16b; Pcmpeqd128 -> cmeq v0.4s
+  - Por128/Pand128/Pxor128 -> orr/and/eor on NEON regs
+  - Pmovmskb128 -> multi-instruction bit extraction using mul+addv
+  - Movnti/Movntdq -> regular str (non-temporal not critical)
+  - Fences -> dmb ish/ishst
+- RISC-V: Implement emit_x86_sse_op using 64-bit register pairs
+  - 128-bit load/store as two 64-bit ld/sd
+  - Binary ops (or/and/xor) on both halves
+  - Byte comparison using zero-byte detection algorithm
+  - Pmovmskb using magic constant multiplication
+  - Splat using multiply-by-constant technique
+  - Fences -> fence instructions
+
+Files modified:
+- src/backend/arm/codegen/codegen.rs
+- src/backend/riscv/codegen/codegen.rs
