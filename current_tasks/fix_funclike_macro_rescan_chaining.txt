@@ -1,0 +1,28 @@
+Fix function-like macro expansion result chaining with following tokens
+
+Problem: When a function-like macro expansion produces a result that is itself
+a function-like macro name, and the source text following the original macro
+invocation contains '(args)', the result is not chained with the following tokens
+for further expansion.
+
+Example:
+  #define BLOCK_IDX(_1,_2,_3,NAME,...) NAME
+  #define BLOCK_2(a,b) ((a)+(b))
+  #define BLOCK(...) BLOCK_IDX(__VA_ARGS__, BLOCK_3, BLOCK_2, BLOCK_1)(__VA_ARGS__)
+
+  BLOCK(1, 2) should expand to ((1)+(2))
+
+What happens now:
+1. BLOCK(1,2) body after substitution: BLOCK_IDX(1,2,BLOCK_3,BLOCK_2,BLOCK_1)(1,2)
+2. Rescan encounters BLOCK_IDX(...) and expands it to BLOCK_2
+3. BLOCK_2 is pushed to result, then (1,2) follows as plain text
+4. Result: BLOCK_2(1, 2) - unexpanded
+
+The fix: After expanding a function-like macro, check if the expanded result
+ends with a function-like macro name and the next character in source is '('.
+This is the same logic already present for object-like macros at line 146-172.
+
+Real-world impact: Breaks jq build (BLOCK variadic dispatch), and many C projects
+that use the argument-counting variadic macro dispatch pattern.
+
+Status: In progress
