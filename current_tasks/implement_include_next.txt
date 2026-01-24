@@ -1,0 +1,11 @@
+Implement #include_next preprocessor directive
+
+The #include_next directive searches for the included file starting from the
+directory AFTER the directory where the current file was found, skipping the
+current directory. This is a GCC extension used by glibc and other system headers.
+
+Implementation approach:
+1. Track the current file's directory in the preprocessor state
+2. When #include_next is encountered, find the current file's position in the
+   include path list and start searching from the next directory
+3. Handle both #include_next <file> and #include_next "file" forms

@@ -468,14 +468,15 @@ impl RiscvCodegen {
             }
             _ => {
                 // Ordered comparisons: compare high halves first
-                let done = self.state.fresh_label("cmp128_done");
+                let hi_differ = self.state.fresh_label("cmp128_hi_diff");
                 let hi_equal = self.state.fresh_label("cmp128_hi_eq");
+                let done = self.state.fresh_label("cmp128_done");
                 // Compare high halves
-                self.state.emit(&format!("    bne t4, t6, {}", done));
+                self.state.emit(&format!("    bne t4, t6, {}", hi_differ));
                 // High halves equal, compare low halves (always unsigned)
                 self.state.emit(&format!("    j {}", hi_equal));
                 // hi != hi: set result based on high comparison
-                self.state.emit(&format!("{}:", done));
+                self.state.emit(&format!("{}:", hi_differ));
                 match op {
                     IrCmpOp::Slt | IrCmpOp::Sle => self.state.emit("    slt t0, t4, t6"),
                     IrCmpOp::Sgt | IrCmpOp::Sge => self.state.emit("    slt t0, t6, t4"),
@@ -483,8 +484,7 @@ impl RiscvCodegen {
                     IrCmpOp::Ugt | IrCmpOp::Uge => self.state.emit("    sltu t0, t6, t4"),
                     _ => unreachable!(),
                 }
-                let end = self.state.fresh_label("cmp128_end");
-                self.state.emit(&format!("    j {}", end));
+                self.state.emit(&format!("    j {}", done));
                 // High halves equal: compare low halves (unsigned for all orderings)
                 self.state.emit(&format!("{}:", hi_equal));
                 match op {
@@ -500,7 +500,7 @@ impl RiscvCodegen {
                     }
                     _ => unreachable!(),
                 }
-                self.state.emit(&format!("{}:", end));
+                self.state.emit(&format!("{}:", done));
             }
         }
         self.store_t0_to(dest);

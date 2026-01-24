@@ -363,8 +363,9 @@ impl ArmCodegen {
                 // x2:x3 = value, x4 = shift amount
                 let lbl = self.state.fresh_label("shl128");
                 let done = self.state.fresh_label("shl128_done");
+                let noop = self.state.fresh_label("shl128_noop");
                 self.state.emit("    and x4, x4, #127");        // mask to 0-127
-                self.state.emit(&format!("    cbz x4, {}", done)); // shift 0 = noop
+                self.state.emit(&format!("    cbz x4, {}", noop)); // shift 0 = copy
                 self.state.emit("    cmp x4, #64");
                 self.state.emit(&format!("    b.ge {}", lbl));
                 // shift < 64: hi = (hi << n) | (lo >> (64-n)), lo = lo << n
@@ -380,6 +381,11 @@ impl ArmCodegen {
                 self.state.emit("    sub x4, x4, #64");
                 self.state.emit("    lsl x1, x2, x4");
                 self.state.emit("    mov x0, #0");
+                self.state.emit(&format!("    b {}", done));
+                // shift == 0: copy input to output
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mov x0, x2");
+                self.state.emit("    mov x1, x3");
                 self.state.emit(&format!("{}:", done));
             }
             IrBinOp::LShr => {
@@ -387,8 +393,9 @@ impl ArmCodegen {
                 self.prep_i128_binop(lhs, rhs);
                 let lbl = self.state.fresh_label("lshr128");
                 let done = self.state.fresh_label("lshr128_done");
+                let noop = self.state.fresh_label("lshr128_noop");
                 self.state.emit("    and x4, x4, #127");
-                self.state.emit(&format!("    cbz x4, {}", done));
+                self.state.emit(&format!("    cbz x4, {}", noop));
                 self.state.emit("    cmp x4, #64");
                 self.state.emit(&format!("    b.ge {}", lbl));
                 // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >> n
@@ -404,6 +411,11 @@ impl ArmCodegen {
                 self.state.emit("    sub x4, x4, #64");
                 self.state.emit("    lsr x0, x3, x4");
                 self.state.emit("    mov x1, #0");
+                self.state.emit(&format!("    b {}", done));
+                // shift == 0: copy input to output
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mov x0, x2");
+                self.state.emit("    mov x1, x3");
                 self.state.emit(&format!("{}:", done));
             }
             IrBinOp::AShr => {
@@ -411,8 +423,9 @@ impl ArmCodegen {
                 self.prep_i128_binop(lhs, rhs);
                 let lbl = self.state.fresh_label("ashr128");
                 let done = self.state.fresh_label("ashr128_done");
+                let noop = self.state.fresh_label("ashr128_noop");
                 self.state.emit("    and x4, x4, #127");
-                self.state.emit(&format!("    cbz x4, {}", done));
+                self.state.emit(&format!("    cbz x4, {}", noop));
                 self.state.emit("    cmp x4, #64");
                 self.state.emit(&format!("    b.ge {}", lbl));
                 // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >>a n
@@ -428,6 +441,11 @@ impl ArmCodegen {
                 self.state.emit("    sub x4, x4, #64");
                 self.state.emit("    asr x0, x3, x4");
                 self.state.emit("    asr x1, x3, #63");
+                self.state.emit(&format!("    b {}", done));
+                // shift == 0: copy input to output
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mov x0, x2");
+                self.state.emit("    mov x1, x3");
                 self.state.emit(&format!("{}:", done));
             }
             IrBinOp::SDiv | IrBinOp::UDiv | IrBinOp::SRem | IrBinOp::URem => {
