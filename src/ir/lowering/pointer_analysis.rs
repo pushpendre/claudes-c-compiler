@@ -208,6 +208,9 @@ impl Lowerer {
                     return layout.size;
                 }
             }
+            CType::Array(elem_ty, Some(n)) => {
+                return self.resolve_ctype_size(elem_ty) * n;
+            }
             _ => {}
         }
         // Fall back to the cached size in the CType itself

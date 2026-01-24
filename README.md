@@ -56,6 +56,15 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix typedef function pointer return type signedness**: When calling through a
+  typedef'd function pointer (e.g., `typedef int (*cmp_fn)(...)`), the `(*)` syntax
+  marker in derived declarators was incorrectly included in the return type, making it
+  `Pointer(Int)` instead of `Int`. This caused the compiler to classify the call result
+  as a pointer, forcing unsigned comparison operators (`seta` instead of `setg`). Fixed
+  by excluding the last `Pointer` derived (the `(*)` marker) when building the
+  `FunctionTypedefInfo` return type. This resolved PostgreSQL's initdb PANIC "could not
+  open critical system index 2672" — the qsort comparators used via typedef'd function
+  pointers were producing incorrect sort orderings.
 - **Fix va_list parameter passing (postgres zic segfault)**: Fixed `va_arg`, `va_start`,
   `va_end`, and `va_copy` when operating on a `va_list` function parameter. On x86-64,
   `va_list` is `__va_list_tag[1]` (array type), which decays to a pointer when passed as
@@ -244,7 +253,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Build succeeds; initdb + zic timezone compiler work (fixed va_list param passing + 2D array init); `make check` temp-install succeeds but postmaster has bind EFAULT issue |
+| postgres | PARTIAL | Build succeeds; initdb fully works (fixed typedef fptr return signedness + va_list param passing + 2D array init); `make check` temp-install succeeds but postmaster has bind EFAULT issue |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)

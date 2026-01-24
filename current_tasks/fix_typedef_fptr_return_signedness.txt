@@ -1,0 +1,18 @@
+Fix typedef function pointer return type signedness
+
+Bug: When calling through a function pointer declared via typedef (e.g.,
+typedef int (*cmp_fn)(const void *, const void *)), the return type's
+signedness is lost. The (*) syntax marker in the derived declarators was
+incorrectly treated as a pointer return type, causing the return CType
+to be Pointer(Int) instead of Int. This made the compiler classify the
+call result as a pointer, forcing unsigned comparison instructions (seta
+instead of setg), which broke signed comparisons like `fn(a, b) > 0`.
+
+This caused PostgreSQL's initdb to PANIC with "could not open critical
+system index 2672" because qsort comparators through typedef'd function
+pointer types produced wrong sort ordering.
+
+Fix: In stmt.rs and lowering.rs, the loop that builds FunctionTypedefInfo's
+return_type from DerivedDeclarator::Pointer entries before FunctionPointer
+now correctly excludes the last Pointer (the (*) syntax marker) rather
+than including it as part of the return type.
