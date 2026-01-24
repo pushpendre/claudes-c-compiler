@@ -203,6 +203,23 @@ impl Parser {
         }
     }
 
+    /// Skip C99 type qualifiers and 'static' inside array brackets.
+    /// In C99 function parameter declarations, array dimensions can include:
+    ///   [static restrict const 10], [restrict n], [const], [static 10], etc.
+    /// We skip these qualifiers since they only affect optimization hints and
+    /// don't change the type semantics (array params decay to pointers).
+    pub(super) fn skip_array_qualifiers(&mut self) {
+        loop {
+            match self.peek() {
+                TokenKind::Static | TokenKind::Const | TokenKind::Volatile
+                | TokenKind::Restrict | TokenKind::Atomic => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+    }
+
     pub(super) fn skip_array_dimensions(&mut self) {
         while matches!(self.peek(), TokenKind::LBracket) {
             self.advance();

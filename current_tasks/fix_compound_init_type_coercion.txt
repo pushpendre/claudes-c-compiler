@@ -1,0 +1,23 @@
+Fix missing type coercion in compound struct global initialization
+
+Problem:
+When a struct has fields requiring address relocations (pointers to globals),
+the compiler uses lower_struct_global_init_compound() instead of the byte-based
+fill_struct_global_bytes(). In the compound path, emit_compound_field_init()
+fails to coerce scalar constants to the target field type before writing bytes.
+
+For example:
+  struct S { double value; double *pointer; };
+  struct S g = { 2, &target2 };  // 2 is integer, should become 2.0 for double
+
+The byte-based path correctly calls write_const_to_bytes() which does coerce_to(),
+but the compound path calls push_const_as_bytes() with the raw I32(2) value,
+producing 8 bytes of integer 2 (0x0200000000000000) instead of the double 2.0.
+
+Fix:
+In emit_compound_field_init(), coerce the value to the field's IrType using
+IrType::from_ctype(field_ty) and val.coerce_to() before push_const_as_bytes().
+
+Also check other similar code paths in the compound init for the same issue.
+
+Status: In progress

@@ -47,7 +47,10 @@ impl Parser {
             match self.peek() {
                 TokenKind::LBracket => {
                     self.advance();
-                    self.consume_if(&TokenKind::Static); // Handle int a[static 10]
+                    // C99 array parameter declarators can have qualifiers and 'static':
+                    // [static restrict const 10], [restrict n], [const], etc.
+                    // Skip all qualifiers and 'static' before the size expression.
+                    self.skip_array_qualifiers();
                     let size = if matches!(self.peek(), TokenKind::RBracket) {
                         None
                     } else {
@@ -302,6 +305,8 @@ impl Parser {
         // Parse trailing array dimensions
         while matches!(self.peek(), TokenKind::LBracket) {
             self.advance();
+            // Skip C99 array qualifiers (static, restrict, const, volatile)
+            self.skip_array_qualifiers();
             if matches!(self.peek(), TokenKind::RBracket) {
                 array_dims.push(None);
                 self.advance();
@@ -358,6 +363,7 @@ impl Parser {
                 // Pointer-to-array
                 while matches!(self.peek(), TokenKind::LBracket) {
                     self.advance();
+                    self.skip_array_qualifiers();
                     if matches!(self.peek(), TokenKind::RBracket) {
                         ptr_to_array_dims.push(None);
                         self.advance();
