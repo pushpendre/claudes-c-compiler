@@ -1,0 +1,15 @@
+Fix designated initializer continuation in struct init
+
+Problem: When a designated initializer targets an array element within a struct
+(e.g., struct t { int c; int a[5]; } x = { .a[1]=1, 7 }), subsequent values
+without designators should continue filling that array from the next position
+(a[2]=7). Instead, the compiler incorrectly advances to the next struct field.
+
+Root cause: In emit_struct_init (stmt.rs), the CType::Array case with
+has_nested_designator only processes the single designated element, then
+unconditionally advances current_field_idx to the next struct field. It should
+instead consume subsequent non-designated items that continue filling the array.
+
+Fix: After processing .a[idx]=val in the has_nested_designator Array arm,
+continue consuming items from the init list for subsequent array positions
+(idx+1, idx+2, etc.) until hitting another designator or running out of items.
