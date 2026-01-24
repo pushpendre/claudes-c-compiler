@@ -217,10 +217,18 @@ impl Lowerer {
             BuiltinIntrinsic::ComplexReal => {
                 if !args.is_empty() {
                     let arg_ctype = self.expr_ctype(&args[0]);
+                    let target_ty = Self::creal_return_type(name);
                     if arg_ctype.is_complex() {
-                        Some(self.lower_complex_real_part(&args[0]))
+                        let val = self.lower_complex_real_part(&args[0]);
+                        // Cast from component type to target return type
+                        // e.g., creal(float_complex) extracts F32 but must return F64
+                        let comp_ty = Self::complex_component_ir_type(&arg_ctype);
+                        if comp_ty != target_ty {
+                            Some(self.emit_implicit_cast(val, comp_ty, target_ty))
+                        } else {
+                            Some(val)
+                        }
                     } else {
-                        let target_ty = Self::creal_return_type(name);
                         let val = self.lower_expr(&args[0]);
                         let val_ty = self.get_expr_type(&args[0]);
                         Some(self.emit_implicit_cast(val, val_ty, target_ty))
@@ -232,10 +240,17 @@ impl Lowerer {
             BuiltinIntrinsic::ComplexImag => {
                 if !args.is_empty() {
                     let arg_ctype = self.expr_ctype(&args[0]);
+                    let target_ty = Self::creal_return_type(name);
                     if arg_ctype.is_complex() {
-                        Some(self.lower_complex_imag_part(&args[0]))
+                        let val = self.lower_complex_imag_part(&args[0]);
+                        // Cast from component type to target return type
+                        let comp_ty = Self::complex_component_ir_type(&arg_ctype);
+                        if comp_ty != target_ty {
+                            Some(self.emit_implicit_cast(val, comp_ty, target_ty))
+                        } else {
+                            Some(val)
+                        }
                     } else {
-                        let target_ty = Self::creal_return_type(name);
                         Some(match target_ty {
                             IrType::F32 => Operand::Const(IrConst::F32(0.0)),
                             IrType::F128 => Operand::Const(IrConst::LongDouble(0.0)),
