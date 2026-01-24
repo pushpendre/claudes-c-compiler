@@ -383,16 +383,34 @@ impl Lowerer {
                 }
             }
             Expr::Deref(inner, _) => {
-                // In C, dereferencing a function pointer is a no-op: (*f)(args) == f(args).
-                // We lower the inner expression to get the function pointer value directly,
-                // rather than lower_expr(func) which would go through lower_deref and
-                // incorrectly emit a Load from the function address (especially when typedef
-                // resolution loses the function type information — resolve_typedef_derived
-                // discards FunctionPointer derived declarators, so CType ends up as
-                // Pointer(Int) instead of Pointer(Function(...))).
+                // In C, dereferencing a function pointer is a no-op: (*fp)(args) == fp(args).
+                // But dereferencing a pointer-to-function-pointer is a real load:
+                // (*fpp)(args) where fpp is func_ptr* needs to load the func_ptr first.
+                // Detect if inner is a plain function pointer (no-op deref) vs something
+                // that requires a real dereference.
+                let is_noop_deref = if let Expr::Identifier(ref name, _) = **inner {
+                    self.lookup_var_info(name)
+                        .and_then(|vi| vi.c_type.as_ref())
+                        .map(|ct| match ct {
+                            // Variable is a function pointer: *fp is no-op
+                            CType::Pointer(inner_ct) => matches!(**inner_ct, CType::Function(_)),
+                            // Variable is a function: *func is no-op
+                            CType::Function(_) => true,
+                            _ => false,
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
                 let n = arg_vals.len();
                 let sas = struct_arg_sizes;
-                let func_ptr = self.lower_expr(inner);
+                let func_ptr = if is_noop_deref {
+                    // No-op dereference: (*fp)() == fp()
+                    self.lower_expr(inner)
+                } else {
+                    // Real dereference needed: load through the pointer to get the func ptr
+                    self.lower_expr(func)
+                };
                 self.emit(Instruction::CallIndirect {
                     dest: Some(dest), func_ptr, args: arg_vals, arg_types,
                     return_type: indirect_ret_ty, is_variadic: false, num_fixed_args: n,

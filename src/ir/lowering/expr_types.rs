@@ -87,13 +87,17 @@ impl Lowerer {
             Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
                 let ctype = self.resolve_field_ctype(base_expr, field_name, is_ptr)?;
-                if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
+                if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
+                    Some(ctype.size_ctx(&self.types.struct_layouts))
+                } else { None }
             }
             Expr::ArraySubscript(_, _, _) | Expr::Deref(_, _)
             | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _)
             | Expr::GnuConditional(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
-                if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
+                if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
+                    Some(ctype.size_ctx(&self.types.struct_layouts))
+                } else { None }
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
                 let resolved = self.resolve_type_spec(type_spec);

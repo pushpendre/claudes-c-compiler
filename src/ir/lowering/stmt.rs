@@ -513,9 +513,16 @@ impl Lowerer {
                             ai = idx;
                         }
                     }
-                    if let Initializer::Expr(e) = &item.init {
-                        let val = self.lower_and_cast_init_expr(e, elem_ir_ty);
-                        self.emit_store_at_offset(base, ai * elem_size, val, elem_ir_ty);
+                    match &item.init {
+                        Initializer::Expr(e) => {
+                            let val = self.lower_and_cast_init_expr(e, elem_ir_ty);
+                            self.emit_store_at_offset(base, ai * elem_size, val, elem_ir_ty);
+                        }
+                        Initializer::List(sub_items) => {
+                            // Braced sub-initializer for array element (e.g., struct element)
+                            let elem_addr = self.emit_gep_offset(base, ai * elem_size, elem_ir_ty);
+                            self.lower_struct_field_init_list(sub_items, elem_addr, elem_ty);
+                        }
                     }
                     ai += 1;
                 }
