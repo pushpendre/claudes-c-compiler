@@ -558,6 +558,11 @@ impl Lowerer {
         if let Some(ctype) = sig.and_then(|s| s.return_ctype.as_ref()) {
             return ctype.clone();
         }
+        // Fall back to sema's function signatures when lowerer's ABI-adjusted info
+        // is unavailable (sema has accurate C-level CTypes for all declared functions)
+        if let Some(func_info) = self.sema_functions.get(name) {
+            return func_info.return_type.clone();
+        }
         if let Some(&ir_ty) = sig.map(|s| &s.return_type) {
             return match ir_ty {
                 IrType::F32 => CType::Float,

@@ -1,8 +1,10 @@
 HIGH PRIORITY: Expand sema to produce a typed AST, reducing lowering responsibilities
 
-Current state (after TypeContext move and type_checker addition):
+Current state (after TypeContext move, type_checker addition, and function sig sharing):
 The sema pass collects type information (typedefs, struct layouts, enum constants,
-function signatures) and now has ExprTypeChecker for CType inference. It does NOT yet:
+function signatures) and now has ExprTypeChecker for CType inference. The lowerer
+now receives sema's function signatures (FunctionInfo map) and uses them as the
+authoritative source for function return types and parameter CTypes. It does NOT yet:
 - Annotate AST nodes with inferred types (typed AST)
 - Reject type errors with diagnostics
 - Replace the lowerer's expr_types.rs entirely (lowerer still needs its own
@@ -40,6 +42,13 @@ Step 2: (DONE) Add ExprTypeChecker in sema/type_checker.rs with infer_expr_ctype
         - CType arithmetic (usual_arithmetic_conversion etc.) moved to CType methods
         - ExprTypeChecker uses SymbolTable + TypeContext + FunctionInfo
         - Sema now resolves typeof(expr) via ExprTypeChecker
+Step 2.5: (DONE) Pass sema function signatures to lowerer
+        - Lowerer receives FxHashMap<String, FunctionInfo> from SemaResult
+        - Pre-populates known_functions from sema's function map
+        - Uses sema's return CType as source-of-truth in register_function_meta
+        - Falls back to sema function info in get_expr_ctype, get_call_return_type,
+          get_function_return_ctype for function return type resolution
+        - Eliminates redundant type_spec_to_ctype calls in register_function_meta
 Step 3: Have sema annotate expressions with CTypes during its walk
         - Add a HashMap<ExprId, CType> or modify AST nodes to carry type info
         - Populate during analyze_expr using ExprTypeChecker
@@ -59,8 +68,8 @@ Benefits:
 Key files:
 - src/frontend/sema/sema.rs (current sema pass)
 - src/frontend/sema/type_context.rs (TypeContext, in sema)
-- src/frontend/sema/type_checker.rs (NEW: ExprTypeChecker for CType inference)
+- src/frontend/sema/type_checker.rs (ExprTypeChecker for CType inference)
 - src/common/types.rs (CType methods: usual_arithmetic_conversion, integer_rank, etc.)
 - src/ir/lowering/expr_types.rs (~1200 lines of type inference, partially shared now)
 - src/ir/lowering/const_eval.rs (969 lines of const eval to unify)
-- src/ir/lowering/lowering.rs (analyze_declaration to move)
+- src/ir/lowering/lowering.rs (analyze_declaration to move; now consumes sema functions)

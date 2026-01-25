@@ -433,6 +433,10 @@ impl Lowerer {
             if let Some(ret_ty) = Self::builtin_return_type(name) {
                 return ret_ty;
             }
+            // Fall back to sema's function signatures for IrType derivation
+            if let Some(func_info) = self.sema_functions.get(name.as_str()) {
+                return IrType::from_ctype(&func_info.return_type);
+            }
         }
         if let Some(ctype) = self.get_expr_ctype(stripped) {
             return Self::extract_func_ptr_return_type(&ctype);
@@ -1082,6 +1086,15 @@ impl Lowerer {
                 if let Some(vi) = self.lookup_var_info(name) {
                     return vi.c_type.clone();
                 }
+                // Fall back to sema's function signatures for function-typed identifiers
+                // (e.g., taking address of a function: &func_name)
+                if let Some(func_info) = self.sema_functions.get(name.as_str()) {
+                    return Some(CType::Function(Box::new(crate::common::types::FunctionType {
+                        return_type: func_info.return_type.clone(),
+                        params: func_info.params.clone(),
+                        variadic: func_info.variadic,
+                    })));
+                }
                 None
             }
             Expr::Deref(inner, _) => {
@@ -1163,8 +1176,13 @@ impl Lowerer {
             Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int))),
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
+                    // First check lowerer's own func_meta (has ABI-adjusted return_ctype)
                     if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                         return Some(ctype.clone());
+                    }
+                    // Fall back to sema's authoritative function signatures
+                    if let Some(func_info) = self.sema_functions.get(name.as_str()) {
+                        return Some(func_info.return_type.clone());
                     }
                 }
                 // For indirect calls through function pointer variables,

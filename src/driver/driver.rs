@@ -345,8 +345,13 @@ impl Driver {
         let sema_result = sema.into_result();
 
         // Lower to IR (target-aware for ABI-specific lowering decisions)
-        // Pass sema's TypeContext to the lowerer so it has pre-populated type info.
-        let lowerer = Lowerer::with_type_context(self.target, sema_result.type_context);
+        // Pass sema's TypeContext and function signatures to the lowerer so it has
+        // pre-populated type info and knows about all declared functions upfront.
+        let lowerer = Lowerer::with_type_context(
+            self.target,
+            sema_result.type_context,
+            sema_result.functions,
+        );
         let mut module = lowerer.lower(&ast);
 
         if self.verbose {

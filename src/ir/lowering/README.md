@@ -45,8 +45,12 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
   embedded in both `LocalInfo` and `GlobalInfo` via `Deref`
 - **`DeclAnalysis`** - Computed once per declaration, bundles all type properties.
   Used by both local and global lowering to avoid duplicating type analysis
-- **`FuncSig`** - Consolidated function signature (return type, param types, sret/two-reg info)
+- **`FuncSig`** - Consolidated ABI-adjusted function signature (IrType return/params, sret/two-reg info)
 - **`FunctionMeta`** - Maps function names to `FuncSig` (direct calls) and `ptr_sigs` (function pointers)
+- **`FunctionInfo`** (`sema::sema`) - Sema-provided C-level function signature (CType return/params, variadic).
+  Stored in `Lowerer::sema_functions`. Provides authoritative CType info that the lowerer falls back to
+  when its own ABI-adjusted `FuncSig` doesn't have the info (e.g., non-pointer return types, function
+  identifiers used as expressions). Also pre-populates `known_functions` during construction.
 - **`FunctionTypedefInfo`** (`sema::type_context`) - Function/fptr typedef metadata (return type, params, variadic)
 - **`ParamKind`** - Classifies how each C parameter maps to IR params after ABI decomposition
   (Normal, Struct, ComplexDecomposed, ComplexFloatPacked)
@@ -126,3 +130,20 @@ separately, then merges them into a single `GlobalInit::Compound` vector. Key he
 ```
 parser/AST + sema/types  →  lowering  →  ir::Module  →  mem2reg → passes → codegen
 ```
+
+### Data flow from sema to lowerer
+
+The lowerer receives two things from sema:
+- **`TypeContext`** (ownership transfer): typedefs, struct layouts, enum constants, function typedef info
+- **`FxHashMap<String, FunctionInfo>`** (sema_functions): C-level function signatures with CType return
+  types and parameter types
+
+The lowerer uses sema's function signatures in two ways:
+1. **Pre-population**: `known_functions` is seeded from sema's function map at construction time
+2. **Fallback CType resolution**: `register_function_meta` uses sema's CType as source-of-truth
+   for return types and param CTypes instead of re-deriving from AST. Expression type inference
+   (`get_expr_ctype`, `get_call_return_type`, `get_function_return_ctype`) falls back to
+   sema_functions when the lowerer's own `func_meta.sigs` doesn't have the info.
+
+Note: The lowerer's `FuncSig` contains ABI-adjusted information (IrType, sret_size, param_struct_sizes)
+that sema doesn't compute. Sema provides C-level CTypes; the lowerer adds target-specific ABI details.

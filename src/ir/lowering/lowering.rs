@@ -13,6 +13,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
+use crate::frontend::sema::FunctionInfo;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
 use crate::backend::Target;
@@ -46,13 +47,36 @@ pub struct Lowerer {
     pub(super) func_meta: FunctionMeta,
     /// Set of emitted global variable names (O(1) dedup)
     pub(super) emitted_global_names: FxHashSet<String>,
+    /// Function signatures from semantic analysis.
+    /// Used as authoritative source for function return types and parameter types,
+    /// reducing the lowerer's need to re-derive type information from the raw AST.
+    pub(super) sema_functions: FxHashMap<String, FunctionInfo>,
 }
 
 impl Lowerer {
-    /// Create a new Lowerer with a pre-populated TypeContext from semantic analysis.
+    /// Create a new Lowerer with pre-populated state from semantic analysis.
+    ///
     /// The sema-provided TypeContext contains typedefs, enum constants, struct layouts,
     /// and function typedef info collected during the sema pass.
-    pub fn with_type_context(target: Target, type_context: TypeContext) -> Self {
+    ///
+    /// The sema-provided function map contains function signatures (return types,
+    /// parameter types, variadic status) collected during sema. This is used to:
+    /// - Pre-populate `known_functions` so function names are recognized immediately
+    /// - Pre-populate `func_return_ctypes` for function call return type resolution
+    /// - Provide authoritative CType info for `get_expr_ctype` fallback
+    pub fn with_type_context(
+        target: Target,
+        type_context: TypeContext,
+        sema_functions: FxHashMap<String, FunctionInfo>,
+    ) -> Self {
+        // Pre-populate known_functions from sema's function map.
+        // This means the lowerer knows about all functions before the first pass,
+        // which helps with early identifier resolution.
+        let mut known_functions = FxHashSet::default();
+        for name in sema_functions.keys() {
+            known_functions.insert(name.clone());
+        }
+
         Self {
             target,
             next_label: 0,
@@ -62,12 +86,13 @@ impl Lowerer {
             module: IrModule::new(),
             func_state: None,
             globals: FxHashMap::default(),
-            known_functions: FxHashSet::default(),
+            known_functions,
             defined_functions: FxHashSet::default(),
             static_functions: FxHashSet::default(),
             types: type_context,
             func_meta: FunctionMeta::default(),
             emitted_global_names: FxHashSet::default(),
+            sema_functions,
         }
     }
 
@@ -320,6 +345,11 @@ impl Lowerer {
     /// a function name. This shared helper eliminates the triplicated pattern in `lower()`
     /// where function definitions, extern declarations, and typedef-based declarations
     /// all needed to register the same metadata fields.
+    ///
+    /// When sema has already collected the function's CType info (via FunctionInfo),
+    /// this method uses sema's return CType as source-of-truth instead of re-computing
+    /// it from the AST TypeSpecifier. This reduces duplicated work and establishes
+    /// sema as the authority on function type information.
     fn register_function_meta(
         &mut self,
         name: &str,
@@ -335,21 +365,34 @@ impl Lowerer {
             self.static_functions.insert(name.to_string());
         }
 
+        // Compute the return CType once. Prefer sema's authoritative CType if available,
+        // falling back to re-computing from the AST TypeSpecifier.
+        let base_ret_ctype = if let Some(func_info) = self.sema_functions.get(name) {
+            func_info.return_type.clone()
+        } else {
+            self.type_spec_to_ctype(ret_type_spec)
+        };
+        let full_ret_ctype = if ptr_count > 0 {
+            let mut ct = base_ret_ctype.clone();
+            for _ in 0..ptr_count {
+                ct = CType::Pointer(Box::new(ct));
+            }
+            ct
+        } else {
+            base_ret_ctype.clone()
+        };
+
         // Compute return type, wrapping with pointer levels if needed
-        let mut ret_ty = self.type_spec_to_ir(ret_type_spec);
-        if ptr_count > 0 {
-            ret_ty = IrType::Ptr;
-        }
+        let mut ret_ty = IrType::from_ctype(&full_ret_ctype);
         // Complex return types need special IR type overrides:
         // _Complex double: real in first FP register (F64), imag in second
         // _Complex float:
         //   x86-64: packed two F32 in one xmm register -> F64
         //   ARM/RISC-V: real in first FP register -> F32, imag in second FP register
         if ptr_count == 0 {
-            let ret_ctype = self.type_spec_to_ctype(ret_type_spec);
-            if matches!(ret_ctype, CType::ComplexDouble) {
+            if matches!(full_ret_ctype, CType::ComplexDouble) {
                 ret_ty = IrType::F64;
-            } else if matches!(ret_ctype, CType::ComplexFloat) {
+            } else if matches!(full_ret_ctype, CType::ComplexFloat) {
                 if self.uses_packed_complex_float() {
                     ret_ty = IrType::F64;
                 } else {
@@ -357,36 +400,24 @@ impl Lowerer {
                 }
             }
         }
+
         // Track CType for pointer-returning functions
-        let mut return_ctype = None;
-        if ret_ty == IrType::Ptr {
-            let base_ctype = self.type_spec_to_ctype(ret_type_spec);
-            let ret_ctype = if ptr_count > 0 {
-                let mut ct = base_ctype;
-                for _ in 0..ptr_count {
-                    ct = CType::Pointer(Box::new(ct));
-                }
-                ct
-            } else {
-                base_ctype
-            };
-            return_ctype = Some(ret_ctype);
-        }
+        let return_ctype = if ret_ty == IrType::Ptr {
+            Some(full_ret_ctype.clone())
+        } else {
+            None
+        };
 
         // Record complex return types for expr_ctype resolution
-        if ptr_count == 0 {
-            let ret_ct = self.type_spec_to_ctype(ret_type_spec);
-            if ret_ct.is_complex() {
-                self.types.func_return_ctypes.insert(name.to_string(), ret_ct);
-            }
+        if ptr_count == 0 && full_ret_ctype.is_complex() {
+            self.types.func_return_ctypes.insert(name.to_string(), full_ret_ctype.clone());
         }
 
         // Detect struct/complex returns that need special ABI handling.
         let mut sret_size = None;
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
-            let ret_ct = self.type_spec_to_ctype(ret_type_spec);
-            if matches!(ret_ct, CType::Struct(_) | CType::Union(_)) {
+            if matches!(full_ret_ctype, CType::Struct(_) | CType::Union(_)) {
                 let size = self.sizeof_type(ret_type_spec);
                 if size > 16 {
                     sret_size = Some(size);
@@ -394,15 +425,27 @@ impl Lowerer {
                     two_reg_ret_size = Some(size);
                 }
             }
-            if matches!(ret_ct, CType::ComplexLongDouble) {
+            if matches!(full_ret_ctype, CType::ComplexLongDouble) {
                 let size = self.sizeof_type(ret_type_spec);
                 sret_size = Some(size);
             }
         }
 
-        // Collect parameter types, with K&R default argument promotions
-        let param_tys: Vec<IrType> = params.iter().map(|p| {
-            let ty = self.type_spec_to_ir(&p.type_spec);
+        // Collect parameter types, with K&R default argument promotions.
+        // Use sema's param CTypes when available to avoid re-computing from AST.
+        let sema_param_ctypes = self.sema_functions.get(name)
+            .map(|fi| fi.params.iter().map(|(ct, _)| ct.clone()).collect::<Vec<_>>());
+
+        let param_tys: Vec<IrType> = params.iter().enumerate().map(|(i, p)| {
+            let ty = if let Some(ref sema_cts) = sema_param_ctypes {
+                if let Some(ct) = sema_cts.get(i) {
+                    IrType::from_ctype(ct)
+                } else {
+                    self.type_spec_to_ir(&p.type_spec)
+                }
+            } else {
+                self.type_spec_to_ir(&p.type_spec)
+            };
             if is_kr {
                 match ty {
                     IrType::F32 => IrType::F64,
@@ -414,10 +457,21 @@ impl Lowerer {
         let param_bool_flags: Vec<bool> = params.iter().map(|p| {
             self.is_type_bool(&p.type_spec)
         }).collect();
-        // Collect parameter CTypes for complex argument conversion
-        let param_ctypes: Vec<CType> = params.iter().map(|p| {
-            self.type_spec_to_ctype(&p.type_spec)
-        }).collect();
+        // Collect parameter CTypes for complex argument conversion.
+        // Prefer sema's authoritative CTypes when available.
+        let param_ctypes: Vec<CType> = if let Some(sema_cts) = sema_param_ctypes {
+            params.iter().enumerate().map(|(i, p)| {
+                if let Some(ct) = sema_cts.get(i) {
+                    ct.clone()
+                } else {
+                    self.type_spec_to_ctype(&p.type_spec)
+                }
+            }).collect()
+        } else {
+            params.iter().map(|p| {
+                self.type_spec_to_ctype(&p.type_spec)
+            }).collect()
+        };
 
         // Collect per-parameter struct sizes for by-value struct passing ABI.
         // ComplexLongDouble is included as a struct on platforms that don't decompose it
