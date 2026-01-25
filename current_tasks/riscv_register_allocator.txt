@@ -1,0 +1,22 @@
+RISC-V Register Allocator: Linear Scan with Callee-Saved Registers
+
+Goal: Implement a register allocator for the RISC-V backend that assigns
+frequently-used IR values to callee-saved registers (s1-s11) instead of
+always spilling everything to the stack.
+
+Approach:
+1. Implement liveness analysis (live intervals for each IR value)
+2. Implement linear scan register allocator using s1-s11 (11 callee-saved regs)
+3. Add ValueLocation enum (Stack/Register) to backend state
+4. Update RISC-V operand_to_t0 / store_t0_to to check ValueLocation
+5. Save/restore used callee-saved registers in prologue/epilogue
+6. Handle register pressure with spilling back to stack slots
+
+This is the first backend to get a register allocator. x86 and ARM remain
+stack-based. The architecture changes are designed to be backend-specific
+so other backends are unaffected.
+
+Key files:
+- src/backend/state.rs (ValueLocation, allocator data structures)
+- src/backend/riscv/codegen/codegen.rs (RISC-V-specific register allocation)
+- src/backend/generation.rs (instruction dispatch, cache management)
