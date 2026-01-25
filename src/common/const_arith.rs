@@ -169,12 +169,13 @@ pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool
 
 /// Negate a constant value (unary `-`).
 /// Sub-int types are promoted to i32 per C integer promotion rules.
+/// Uses wrapping negation to handle MIN values (e.g. -(-2^63) wraps to -2^63 in C).
 pub fn negate_const(val: IrConst) -> Option<IrConst> {
     match val {
-        IrConst::I64(v) => Some(IrConst::I64(-v)),
-        IrConst::I32(v) => Some(IrConst::I32(-v)),
-        IrConst::I8(v) => Some(IrConst::I32(-(v as i32))),
-        IrConst::I16(v) => Some(IrConst::I32(-(v as i32))),
+        IrConst::I64(v) => Some(IrConst::I64(v.wrapping_neg())),
+        IrConst::I32(v) => Some(IrConst::I32(v.wrapping_neg())),
+        IrConst::I8(v) => Some(IrConst::I32((v as i32).wrapping_neg())),
+        IrConst::I16(v) => Some(IrConst::I32((v as i32).wrapping_neg())),
         IrConst::F64(v) => Some(IrConst::F64(-v)),
         IrConst::F32(v) => Some(IrConst::F32(-v)),
         IrConst::LongDouble(v) => Some(IrConst::LongDouble(-v)),
