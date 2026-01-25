@@ -1,0 +1,50 @@
+HIGH PRIORITY: Expand sema to produce a typed AST, reducing lowering responsibilities
+
+Current state (after TypeContext move to sema/type_context.rs):
+The sema pass collects type information (typedefs, struct layouts, enum constants,
+function signatures) but does NOT:
+- Type-check expressions
+- Infer expression types
+- Reject type errors
+- Produce a typed AST
+
+The lowerer (ir/lowering/) is ~20K lines and handles both type inference AND IR
+emission. Key type-inference code that should move to sema:
+
+1. Expression type inference (expr_types.rs, 1286 lines)
+   - get_expr_type(): determines IrType of any expression
+   - expr_ctype(): determines CType of any expression
+   - struct_value_size(): checks if expression produces struct value
+   These are pure type queries with no IR emission.
+
+2. Constant expression evaluation (const_eval.rs, 969 lines)
+   Both sema and lowering have const_eval. Sema's is simpler (for enum values,
+   array dimensions). Lowering's handles more cases (global initializers,
+   sizeof of complex types). These should be unified.
+
+3. Type conversion duplication (DONE - unified via TypeConvertContext trait)
+   The type_spec_to_ctype dispatch was unified into type_builder.rs.
+
+4. Declaration analysis (lowering.rs analyze_declaration, ~200 lines)
+   Computes DeclAnalysis from type specifiers. This is type analysis, not IR.
+
+Incremental approach:
+Step 1: (DONE) Move TypeContext to sema/type_context.rs
+Step 2: Move expr_ctype() to sema (expression CType inference without IR)
+Step 3: Add type annotations to AST nodes (or build typed AST wrapper)
+Step 4: Move constant evaluation to sema
+Step 5: Add actual type error diagnostics in sema
+Step 6: Simplify lowering to assume types are correct
+
+Benefits:
+- Type errors become diagnostics instead of IR lowering panics
+- Lowering shrinks from ~20K to ~12K lines
+- Clearer module boundary: sema validates, lowering emits
+- Enables future type-system features (generics, better error messages)
+
+Key files:
+- src/frontend/sema/sema.rs (current sema pass)
+- src/frontend/sema/type_context.rs (TypeContext, now in sema)
+- src/ir/lowering/expr_types.rs (1286 lines of type inference to move)
+- src/ir/lowering/const_eval.rs (969 lines of const eval to unify)
+- src/ir/lowering/lowering.rs (analyze_declaration to move)
