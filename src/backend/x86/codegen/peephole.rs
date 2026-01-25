@@ -24,6 +24,9 @@
 type RegId = u8;
 const REG_NONE: RegId = 255;
 
+/// Sentinel value for `rbp_offset` meaning "no %rbp reference" or "multiple/complex references".
+const RBP_OFFSET_NONE: i32 = i32::MIN;
+
 /// Compact classification of a single assembly line.
 /// Stored in a parallel array alongside the raw text, so hot loops
 /// can check integer fields instead of re-parsing strings.
@@ -41,6 +44,11 @@ struct LineInfo {
     /// `false` for all non-`Other` kinds. This avoids repeated byte scans in
     /// `eliminate_dead_stores` and `global_store_forwarding`.
     has_indirect_mem: bool,
+    /// Pre-parsed %rbp offset for `Other` lines that reference a stack slot
+    /// (e.g., `leaq -24(%rbp), %rax`). `RBP_OFFSET_NONE` if no rbp reference,
+    /// multiple references, or non-Other kind. This eliminates expensive
+    /// `str::contains` checks in `eliminate_dead_stores`.
+    rbp_offset: i32,
 }
 
 /// What kind of assembly line this is, with pre-extracted fields for the
@@ -162,13 +170,13 @@ impl LineInfo {
 /// Helper to construct a LineInfo with default ext_kind and has_indirect_mem.
 #[inline]
 fn line_info(kind: LineKind, ts: u16) -> LineInfo {
-    LineInfo { kind, ext_kind: ExtKind::None, trim_start: ts, has_indirect_mem: false }
+    LineInfo { kind, ext_kind: ExtKind::None, trim_start: ts, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE }
 }
 
 /// Helper to construct a LineInfo with a specific ext_kind.
 #[inline]
 fn line_info_ext(kind: LineKind, ext: ExtKind, ts: u16) -> LineInfo {
-    LineInfo { kind, ext_kind: ext, trim_start: ts, has_indirect_mem: false }
+    LineInfo { kind, ext_kind: ext, trim_start: ts, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE }
 }
 
 /// Parse one assembly line into a `LineInfo`.
@@ -237,11 +245,13 @@ fn classify_line(raw: &str) -> LineInfo {
         if ext != ExtKind::None {
             let dest_reg = parse_dest_reg_fast(s);
             let has_indirect = has_indirect_memory_access(s);
+            let rbp_off = if has_indirect { RBP_OFFSET_NONE } else { parse_rbp_offset(s) };
             return LineInfo {
                 kind: LineKind::Other { dest_reg },
                 ext_kind: ext,
                 trim_start: ts,
                 has_indirect_mem: has_indirect,
+                rbp_offset: rbp_off,
             };
         }
     }
@@ -308,7 +318,8 @@ fn classify_line(raw: &str) -> LineInfo {
     let dest_reg = parse_dest_reg_fast(s);
     // Cache has_indirect_memory_access for Other lines
     let has_indirect = has_indirect_memory_access(s);
-    LineInfo { kind: LineKind::Other { dest_reg }, ext_kind: ext, trim_start: ts, has_indirect_mem: has_indirect }
+    let rbp_off = if has_indirect { RBP_OFFSET_NONE } else { parse_rbp_offset(s) };
+    LineInfo { kind: LineKind::Other { dest_reg }, ext_kind: ext, trim_start: ts, has_indirect_mem: has_indirect, rbp_offset: rbp_off }
 }
 
 /// Fast check for self-move: `movq %REG, %REG` where both register names match.
@@ -713,7 +724,7 @@ impl LineStore {
 
 #[inline]
 fn mark_nop(info: &mut LineInfo) {
-    *info = LineInfo { kind: LineKind::Nop, ext_kind: ExtKind::None, trim_start: 0, has_indirect_mem: false };
+    *info = LineInfo { kind: LineKind::Nop, ext_kind: ExtKind::None, trim_start: 0, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE };
 }
 
 /// Replace a line's text and re-classify it.
@@ -1199,8 +1210,8 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
     let len = store.len();
     const WINDOW: usize = 16;
 
-    // Reusable buffer for the "OFFSET(%rbp)" pattern string, avoiding
-    // heap allocation on every inner-loop iteration.
+    // Reusable buffer for the "OFFSET(%rbp)" pattern string, used as fallback
+    // when the pre-parsed rbp_offset is RBP_OFFSET_NONE (multiple/complex refs).
     let mut pattern_buf = String::with_capacity(20);
 
     for i in 0..len {
@@ -1212,7 +1223,6 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
         let end = std::cmp::min(i + WINDOW, len);
         let mut slot_read = false;
         let mut slot_overwritten = false;
-        // Build the "OFFSET(%rbp)" pattern lazily (only when an Other line appears)
         let mut pattern_built = false;
 
         for j in (i + 1)..end {
@@ -1242,7 +1252,7 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
                 }
             }
 
-            // Catch-all: check if line references the offset via string search
+            // Catch-all: check if line references the offset
             // (handles leaq, movslq, etc. that aren't classified as store/load)
             if matches!(infos[j].kind, LineKind::Other { .. }) {
                 // Check for indirect memory access using cached flag (computed
@@ -1251,7 +1261,20 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
                     slot_read = true;
                     break;
                 }
-                // Build pattern once per outer iteration, reuse for all Other lines
+                // Fast path: use pre-parsed rbp_offset for O(1) integer comparison
+                // instead of O(n) string search.
+                let rbp_off = infos[j].rbp_offset;
+                if rbp_off != RBP_OFFSET_NONE {
+                    if rbp_off == store_offset {
+                        slot_read = true;
+                        break;
+                    }
+                    // rbp_offset is known and doesn't match - this line is safe
+                    continue;
+                }
+                // Fallback: rbp_offset is RBP_OFFSET_NONE (no rbp ref or complex pattern).
+                // Lines with no (%rbp) at all won't match; the string check handles
+                // edge cases where parse_rbp_offset couldn't determine a single offset.
                 if !pattern_built {
                     pattern_buf.clear();
                     use std::fmt::Write;
@@ -1295,6 +1318,53 @@ fn has_indirect_memory_access(s: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Pre-parse an `Other` line for a %rbp offset reference.
+/// Looks for patterns like `N(%rbp)` and returns the offset N.
+/// Returns `RBP_OFFSET_NONE` if no rbp reference or multiple references found.
+/// This is called once during classify_line and cached in LineInfo.rbp_offset,
+/// eliminating the expensive `str::contains` in eliminate_dead_stores.
+fn parse_rbp_offset(s: &str) -> i32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Search for "(%rbp)" pattern
+    let mut found_offset = RBP_OFFSET_NONE;
+    let mut i = 0;
+    while i + 5 < len {
+        if bytes[i] == b'(' && bytes[i + 1] == b'%'
+            && bytes[i + 2] == b'r' && bytes[i + 3] == b'b' && bytes[i + 4] == b'p'
+            && bytes[i + 5] == b')'
+        {
+            // Found "(%rbp)" at position i. Parse the offset before '('.
+            // The offset is the integer immediately before the '(' character.
+            let offset = if i == 0 {
+                0 // bare (%rbp) with no offset
+            } else {
+                // Scan backwards for digits/minus sign
+                let end = i;
+                let mut start = end;
+                while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'-') {
+                    start -= 1;
+                }
+                if start == end {
+                    0 // no numeric prefix, bare (%rbp) after space/comma
+                } else {
+                    fast_parse_i32(&s[start..end])
+                }
+            };
+            if found_offset == RBP_OFFSET_NONE {
+                found_offset = offset;
+            } else if found_offset != offset {
+                // Multiple different rbp offsets - can't pre-classify
+                return RBP_OFFSET_NONE;
+            }
+            i += 6;
+            continue;
+        }
+        i += 1;
+    }
+    found_offset
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────────
@@ -2342,5 +2412,21 @@ mod tests {
 
         let info = classify_line("    ret");
         assert_eq!(info.kind, LineKind::Ret);
+    }
+
+    #[test]
+    fn test_parse_rbp_offset() {
+        // Standard negative offset
+        assert_eq!(parse_rbp_offset("leaq -24(%rbp), %rax"), -24);
+        // Bare (%rbp) with no numeric prefix
+        assert_eq!(parse_rbp_offset("addq (%rbp), %rax"), 0);
+        // Positive offset
+        assert_eq!(parse_rbp_offset("movq 16(%rbp), %rdx"), 16);
+        // No (%rbp) reference at all
+        assert_eq!(parse_rbp_offset("movq %rax, %rcx"), RBP_OFFSET_NONE);
+        // Two different rbp offsets -> NONE (can't pre-classify)
+        assert_eq!(parse_rbp_offset("movq -8(%rbp), -16(%rbp)"), RBP_OFFSET_NONE);
+        // Two identical rbp offsets -> that offset
+        assert_eq!(parse_rbp_offset("addq -8(%rbp), -8(%rbp)"), -8);
     }
 }

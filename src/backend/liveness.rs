@@ -9,6 +9,13 @@
 //! 2. Run backward dataflow to compute live-in/live-out sets for each block.
 //!    This correctly handles values that are live across loop back-edges.
 //! 3. Build intervals by taking the union of def/use points and live-through blocks.
+//!
+//! ## Performance
+//!
+//! The dataflow uses compact bitsets instead of hash sets for gen/kill/live_in/live_out.
+//! Value IDs are remapped to a dense [0..N) range so bitsets are minimal size.
+//! This eliminates per-iteration heap allocation and replaces hash-table operations
+//! with fast word-level bitwise ops (union = OR, difference = AND-NOT, equality = ==).
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::ir::ir::*;
@@ -30,10 +37,86 @@ pub struct LivenessResult {
     pub num_points: u32,
 }
 
+// ── Compact bitset for dataflow ──────────────────────────────────────────────
+
+/// A compact bitset stored as a contiguous slice of u64 words.
+/// Supports O(1) insert/contains and O(n/64) union/difference/equality.
+#[derive(Clone)]
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    /// Create a new empty bitset that can hold indices [0..num_bits).
+    fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self { words: vec![0u64; num_words] }
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, idx: usize) {
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.words[word] |= 1u64 << bit;
+    }
+
+    #[inline(always)]
+    fn contains(&self, idx: usize) -> bool {
+        let word = idx / 64;
+        let bit = idx % 64;
+        (self.words[word] >> bit) & 1 != 0
+    }
+
+    /// self = self | other. Returns true if self changed.
+    fn union_with(&mut self, other: &BitSet) -> bool {
+        let mut changed = false;
+        for (w, o) in self.words.iter_mut().zip(other.words.iter()) {
+            let old = *w;
+            *w |= *o;
+            changed |= *w != old;
+        }
+        changed
+    }
+
+    /// Computes: self = gen ∪ (out - kill) in one pass. Returns true if self changed.
+    fn assign_gen_union_out_minus_kill(&mut self, gen: &BitSet, out: &BitSet, kill: &BitSet) -> bool {
+        let mut changed = false;
+        for i in 0..self.words.len() {
+            let new_val = gen.words[i] | (out.words[i] & !kill.words[i]);
+            if new_val != self.words[i] {
+                self.words[i] = new_val;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Iterate over all set bits, calling f(bit_index) for each.
+    fn for_each_set_bit(&self, mut f: impl FnMut(usize)) {
+        for (word_idx, &word) in self.words.iter().enumerate() {
+            if word == 0 { continue; }
+            let base = word_idx * 64;
+            let mut w = word;
+            while w != 0 {
+                let tz = w.trailing_zeros() as usize;
+                f(base + tz);
+                w &= w - 1; // clear lowest set bit
+            }
+        }
+    }
+
+    /// Clear all bits.
+    fn clear(&mut self) {
+        for w in &mut self.words {
+            *w = 0;
+        }
+    }
+}
+
 /// Compute live intervals for all non-alloca values in a function.
 ///
 /// Uses backward dataflow analysis to correctly handle loops:
-/// - live_in[B] = (live_out[B] - defs[B]) ∪ uses[B]
+/// - live_in[B] = gen[B] ∪ (live_out[B] - kill[B])
 /// - live_out[B] = ∪ live_in[S] for all successors S of B
 ///
 /// Values that are live-in to a block have their interval extended to cover
@@ -55,16 +138,62 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
         }
     }
 
+    // Collect all non-alloca value IDs referenced in the function and build
+    // a dense remapping: sparse value_id -> dense index in [0..num_values).
+    // This makes bitsets minimal size.
+    let mut value_ids: Vec<u32> = Vec::new();
+    let mut seen: FxHashSet<u32> = FxHashSet::default();
+
+    let maybe_add = |id: u32, alloca_set: &FxHashSet<u32>, seen: &mut FxHashSet<u32>, value_ids: &mut Vec<u32>| {
+        if !alloca_set.contains(&id) && seen.insert(id) {
+            value_ids.push(id);
+        }
+    };
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Some(dest) = inst.dest() {
+                maybe_add(dest.0, &alloca_set, &mut seen, &mut value_ids);
+            }
+            for_each_operand_in_instruction(inst, |op| {
+                if let Operand::Value(v) = op {
+                    maybe_add(v.0, &alloca_set, &mut seen, &mut value_ids);
+                }
+            });
+            for_each_value_use_in_instruction(inst, |v| {
+                maybe_add(v.0, &alloca_set, &mut seen, &mut value_ids);
+            });
+        }
+        for_each_operand_in_terminator(&block.terminator, |op| {
+            if let Operand::Value(v) = op {
+                maybe_add(v.0, &alloca_set, &mut seen, &mut value_ids);
+            }
+        });
+    }
+    drop(seen);
+
+    let num_values = value_ids.len();
+    if num_values == 0 {
+        return LivenessResult { intervals: Vec::new(), num_points: 0 };
+    }
+
+    // Build sparse->dense mapping
+    let mut id_to_dense: FxHashMap<u32, usize> = FxHashMap::default();
+    id_to_dense.reserve(num_values);
+    for (dense_idx, &vid) in value_ids.iter().enumerate() {
+        id_to_dense.insert(vid, dense_idx);
+    }
+
     // Phase 1: Assign program points and record per-block information.
     let mut point: u32 = 0;
     let mut block_start_points: Vec<u32> = Vec::with_capacity(num_blocks);
     let mut block_end_points: Vec<u32> = Vec::with_capacity(num_blocks);
-    let mut def_points: FxHashMap<u32, u32> = FxHashMap::default();
-    let mut last_use_points: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut def_points: Vec<u32> = vec![u32::MAX; num_values]; // dense_idx -> program point
+    let mut last_use_points: Vec<u32> = vec![u32::MAX; num_values];
 
-    // Per-block gen (used) and kill (defined) sets for dataflow
-    let mut block_gen: Vec<FxHashSet<u32>> = Vec::with_capacity(num_blocks);
-    let mut block_kill: Vec<FxHashSet<u32>> = Vec::with_capacity(num_blocks);
+    // Per-block gen (used) and kill (defined) sets as bitsets
+    let mut block_gen: Vec<BitSet> = Vec::with_capacity(num_blocks);
+    let mut block_kill: Vec<BitSet> = Vec::with_capacity(num_blocks);
 
     // Block ID -> index mapping
     let mut block_id_to_idx: FxHashMap<u32, usize> = FxHashMap::default();
@@ -75,21 +204,24 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
     for block in &func.blocks {
         let block_start = point;
         block_start_points.push(block_start);
-        let mut gen = FxHashSet::default();
-        let mut kill = FxHashSet::default();
+        let mut gen = BitSet::new(num_values);
+        let mut kill = BitSet::new(num_values);
 
         for inst in &block.instructions {
-            // Record uses before defs (an instruction can use a value it also defines,
-            // but in SSA that doesn't happen -- dests are always fresh values)
-            record_instruction_uses(inst, point, &alloca_set, &mut last_use_points);
+            // Record uses before defs
+            record_instruction_uses_dense(inst, point, &alloca_set, &id_to_dense, &mut last_use_points);
 
             // Collect gen/kill for dataflow
-            collect_instruction_gen(inst, &alloca_set, &kill, &mut gen);
+            collect_instruction_gen_dense(inst, &alloca_set, &id_to_dense, &kill, &mut gen);
 
             if let Some(dest) = inst.dest() {
                 if !alloca_set.contains(&dest.0) {
-                    def_points.entry(dest.0).or_insert(point);
-                    kill.insert(dest.0);
+                    if let Some(&dense) = id_to_dense.get(&dest.0) {
+                        if def_points[dense] == u32::MAX {
+                            def_points[dense] = point;
+                        }
+                        kill.insert(dense);
+                    }
                 }
             }
 
@@ -97,8 +229,8 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
         }
 
         // Record uses in terminator.
-        record_terminator_uses(&block.terminator, point, &alloca_set, &mut last_use_points);
-        collect_terminator_gen(&block.terminator, &alloca_set, &kill, &mut gen);
+        record_terminator_uses_dense(&block.terminator, point, &alloca_set, &id_to_dense, &mut last_use_points);
+        collect_terminator_gen_dense(&block.terminator, &alloca_set, &id_to_dense, &kill, &mut gen);
         let block_end = point;
         block_end_points.push(block_end);
         point += 1;
@@ -122,8 +254,11 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
     // Phase 3: Backward dataflow to compute live-in/live-out per block.
     // live_in[B] = gen[B] ∪ (live_out[B] - kill[B])
     // live_out[B] = ∪ live_in[S] for all successors S of B
-    let mut live_in: Vec<FxHashSet<u32>> = vec![FxHashSet::default(); num_blocks];
-    let mut live_out: Vec<FxHashSet<u32>> = vec![FxHashSet::default(); num_blocks];
+    //
+    // Using bitsets: union = OR, (out - kill) = out AND NOT kill.
+    let mut live_in: Vec<BitSet> = (0..num_blocks).map(|_| BitSet::new(num_values)).collect();
+    let mut live_out: Vec<BitSet> = (0..num_blocks).map(|_| BitSet::new(num_values)).collect();
+    let mut tmp_out = BitSet::new(num_values);
 
     // Iterate until fixpoint (backward order converges faster).
     // For reducible CFGs, convergence is guaranteed in O(loop_nesting_depth) iterations.
@@ -138,68 +273,67 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
 
         for idx in (0..num_blocks).rev() {
             // Compute live_out = union of live_in of all successors
-            let mut new_out = FxHashSet::default();
+            tmp_out.clear();
             for &succ in &successors[idx] {
-                for &v in &live_in[succ] {
-                    new_out.insert(v);
-                }
+                tmp_out.union_with(&live_in[succ]);
+            }
+
+            // Check if live_out changed
+            if tmp_out.words != live_out[idx].words {
+                live_out[idx].words.copy_from_slice(&tmp_out.words);
+                changed = true;
             }
 
             // Compute live_in = gen ∪ (live_out - kill)
-            let mut new_in = block_gen[idx].clone();
-            for &v in &new_out {
-                if !block_kill[idx].contains(&v) {
-                    new_in.insert(v);
-                }
-            }
-
-            if new_in != live_in[idx] || new_out != live_out[idx] {
-                changed = true;
-                live_in[idx] = new_in;
-                live_out[idx] = new_out;
-            }
+            let in_changed = live_in[idx].assign_gen_union_out_minus_kill(
+                &block_gen[idx], &live_out[idx], &block_kill[idx]
+            );
+            changed |= in_changed;
         }
     }
 
     // Phase 4: Extend intervals for values that are live-in or live-out of blocks.
-    // If a value is live-in to block B, it must be alive at block B's start point.
-    // If a value is live-out of block B, it must be alive at block B's end point.
     for idx in 0..num_blocks {
         let start = block_start_points[idx];
         let end = block_end_points[idx];
 
-        for &v in &live_in[idx] {
-            // Extend start point: the value is alive at this block's start
-            let entry = last_use_points.entry(v).or_insert(start);
+        live_in[idx].for_each_set_bit(|dense_idx| {
+            let entry = &mut last_use_points[dense_idx];
+            if *entry == u32::MAX {
+                *entry = start;
+            }
             if end > *entry {
                 *entry = end;
             }
-            // Also make sure def_points covers this (for values defined earlier)
-            // The def_point is already recorded; we just need the interval to
-            // include this block's range.
-        }
+        });
 
-        for &v in &live_out[idx] {
-            let entry = last_use_points.entry(v).or_insert(end);
+        live_out[idx].for_each_set_bit(|dense_idx| {
+            let entry = &mut last_use_points[dense_idx];
+            if *entry == u32::MAX {
+                *entry = end;
+            }
             if end > *entry {
                 *entry = end;
             }
-        }
+        });
     }
 
     // Phase 5: Build intervals.
     let mut intervals: Vec<LiveInterval> = Vec::new();
-    for (&value_id, &start) in &def_points {
-        let end = last_use_points.get(&value_id).copied().unwrap_or(start);
+    for (dense_idx, &vid) in value_ids.iter().enumerate() {
+        let start = def_points[dense_idx];
+        if start == u32::MAX { continue; } // no definition found
+        let end = last_use_points[dense_idx];
+        let end = if end == u32::MAX { start } else { end.max(start) };
         intervals.push(LiveInterval {
             start,
-            end: end.max(start),
-            value_id,
+            end,
+            value_id: vid,
         });
     }
 
     // Sort by start point (required by linear scan).
-    intervals.sort_by_key(|iv| iv.start);
+    intervals.sort_unstable_by_key(|iv| iv.start);
 
     LivenessResult {
         intervals,
@@ -207,65 +341,73 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
     }
 }
 
-/// Record uses of operands in an instruction.
-fn record_instruction_uses(
+/// Record uses of operands in an instruction (dense index version).
+fn record_instruction_uses_dense(
     inst: &Instruction,
     point: u32,
     alloca_set: &FxHashSet<u32>,
-    last_use: &mut FxHashMap<u32, u32>,
+    id_to_dense: &FxHashMap<u32, usize>,
+    last_use: &mut [u32],
 ) {
-    for_each_operand_in_instruction(inst, |op| {
-        if let Operand::Value(v) = op {
-            if !alloca_set.contains(&v.0) {
-                let entry = last_use.entry(v.0).or_insert(point);
-                if point > *entry {
+    let mut record = |vid: u32| {
+        if !alloca_set.contains(&vid) {
+            if let Some(&dense) = id_to_dense.get(&vid) {
+                let entry = &mut last_use[dense];
+                if *entry == u32::MAX || point > *entry {
                     *entry = point;
                 }
             }
         }
+    };
+
+    for_each_operand_in_instruction(inst, |op| {
+        if let Operand::Value(v) = op {
+            record(v.0);
+        }
     });
 
-    // Also record value-type uses that aren't in Operand wrappers.
-    // Store, Load, GEP, Memcpy, VaArg etc. use Value directly for pointers.
     for_each_value_use_in_instruction(inst, |v| {
-        if !alloca_set.contains(&v.0) {
-            let entry = last_use.entry(v.0).or_insert(point);
-            if point > *entry {
-                *entry = point;
-            }
-        }
+        record(v.0);
     });
 }
 
-/// Record uses in a terminator.
-fn record_terminator_uses(
+/// Record uses in a terminator (dense index version).
+fn record_terminator_uses_dense(
     term: &Terminator,
     point: u32,
     alloca_set: &FxHashSet<u32>,
-    last_use: &mut FxHashMap<u32, u32>,
+    id_to_dense: &FxHashMap<u32, usize>,
+    last_use: &mut [u32],
 ) {
     for_each_operand_in_terminator(term, |op| {
         if let Operand::Value(v) = op {
             if !alloca_set.contains(&v.0) {
-                let entry = last_use.entry(v.0).or_insert(point);
-                if point > *entry {
-                    *entry = point;
+                if let Some(&dense) = id_to_dense.get(&v.0) {
+                    let entry = &mut last_use[dense];
+                    if *entry == u32::MAX || point > *entry {
+                        *entry = point;
+                    }
                 }
             }
         }
     });
 }
 
-/// Collect gen set (used-before-defined) for a block's instruction.
-fn collect_instruction_gen(
+/// Collect gen set for a block's instruction (dense bitset version).
+fn collect_instruction_gen_dense(
     inst: &Instruction,
     alloca_set: &FxHashSet<u32>,
-    kill: &FxHashSet<u32>,
-    gen: &mut FxHashSet<u32>,
+    id_to_dense: &FxHashMap<u32, usize>,
+    kill: &BitSet,
+    gen: &mut BitSet,
 ) {
-    let mut add_use = |v: u32| {
-        if !alloca_set.contains(&v) && !kill.contains(&v) {
-            gen.insert(v);
+    let mut add_use = |vid: u32| {
+        if !alloca_set.contains(&vid) {
+            if let Some(&dense) = id_to_dense.get(&vid) {
+                if !kill.contains(dense) {
+                    gen.insert(dense);
+                }
+            }
         }
     };
 
@@ -280,17 +422,22 @@ fn collect_instruction_gen(
     });
 }
 
-/// Collect gen set for a terminator.
-fn collect_terminator_gen(
+/// Collect gen set for a terminator (dense bitset version).
+fn collect_terminator_gen_dense(
     term: &Terminator,
     alloca_set: &FxHashSet<u32>,
-    kill: &FxHashSet<u32>,
-    gen: &mut FxHashSet<u32>,
+    id_to_dense: &FxHashMap<u32, usize>,
+    kill: &BitSet,
+    gen: &mut BitSet,
 ) {
     for_each_operand_in_terminator(term, |op| {
         if let Operand::Value(v) = op {
-            if !alloca_set.contains(&v.0) && !kill.contains(&v.0) {
-                gen.insert(v.0);
+            if !alloca_set.contains(&v.0) {
+                if let Some(&dense) = id_to_dense.get(&v.0) {
+                    if !kill.contains(dense) {
+                        gen.insert(dense);
+                    }
+                }
             }
         }
     });
