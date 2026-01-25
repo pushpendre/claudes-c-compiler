@@ -9,6 +9,22 @@ use crate::backend::call_emit::{ParamClass, classify_params};
 use crate::backend::cast::{CastKind, classify_cast, FloatOp};
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand, emit_inline_asm_common};
 
+/// Map an IrCmpOp to its AArch64 integer condition code suffix.
+fn arm_int_cond_code(op: IrCmpOp) -> &'static str {
+    match op {
+        IrCmpOp::Eq => "eq",
+        IrCmpOp::Ne => "ne",
+        IrCmpOp::Slt => "lt",
+        IrCmpOp::Sle => "le",
+        IrCmpOp::Sgt => "gt",
+        IrCmpOp::Sge => "ge",
+        IrCmpOp::Ult => "lo",
+        IrCmpOp::Ule => "ls",
+        IrCmpOp::Ugt => "hi",
+        IrCmpOp::Uge => "hs",
+    }
+}
+
 /// AArch64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses AAPCS64 calling convention with stack-based allocation.
 pub struct ArmCodegen {
@@ -47,6 +63,23 @@ impl ArmCodegen {
 
     pub fn generate(mut self, module: &IrModule) -> String {
         generate_module(&mut self, module)
+    }
+
+    /// Emit the integer comparison preamble: load lhs->x1, rhs->x0, then
+    /// emit `cmp w1,w0` or `cmp x1,x0` based on type width.
+    /// Used by both emit_cmp and emit_fused_cmp_branch.
+    fn emit_int_cmp_insn(&mut self, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32
+            || ty == IrType::I8 || ty == IrType::U8
+            || ty == IrType::I16 || ty == IrType::U16;
+        if use_32bit {
+            self.state.emit("    cmp w1, w0");
+        } else {
+            self.state.emit("    cmp x1, x0");
+        }
     }
 
     // --- AArch64 large-offset helpers ---
@@ -1313,30 +1346,9 @@ impl ArchCodegen for ArmCodegen {
             return;
         }
 
-        self.operand_to_x0(lhs);
-        self.state.emit("    mov x1, x0");
-        self.operand_to_x0(rhs);
-        let use_32bit = ty == IrType::I32 || ty == IrType::U32
-            || ty == IrType::I8 || ty == IrType::U8
-            || ty == IrType::I16 || ty == IrType::U16;
-        if use_32bit {
-            self.state.emit("    cmp w1, w0");
-        } else {
-            self.state.emit("    cmp x1, x0");
-        }
+        self.emit_int_cmp_insn(lhs, rhs, ty);
 
-        let cond = match op {
-            IrCmpOp::Eq => "eq",
-            IrCmpOp::Ne => "ne",
-            IrCmpOp::Slt => "lt",
-            IrCmpOp::Sle => "le",
-            IrCmpOp::Sgt => "gt",
-            IrCmpOp::Sge => "ge",
-            IrCmpOp::Ult => "lo",
-            IrCmpOp::Ule => "ls",
-            IrCmpOp::Ugt => "hi",
-            IrCmpOp::Uge => "hs",
-        };
+        let cond = arm_int_cond_code(op);
         self.state.emit_fmt(format_args!("    cset x0, {}", cond));
         self.store_x0_to(dest);
     }
@@ -1351,32 +1363,9 @@ impl ArchCodegen for ArmCodegen {
         true_label: &str,
         false_label: &str,
     ) {
-        // Load operands: lhs -> x1, rhs -> x0
-        self.operand_to_x0(lhs);
-        self.state.emit("    mov x1, x0");
-        self.operand_to_x0(rhs);
-        let use_32bit = ty == IrType::I32 || ty == IrType::U32
-            || ty == IrType::I8 || ty == IrType::U8
-            || ty == IrType::I16 || ty == IrType::U16;
-        if use_32bit {
-            self.state.emit("    cmp w1, w0");
-        } else {
-            self.state.emit("    cmp x1, x0");
-        }
+        self.emit_int_cmp_insn(lhs, rhs, ty);
 
-        // Emit conditional branch directly
-        let cc = match op {
-            IrCmpOp::Eq  => "eq",
-            IrCmpOp::Ne  => "ne",
-            IrCmpOp::Slt => "lt",
-            IrCmpOp::Sle => "le",
-            IrCmpOp::Sgt => "gt",
-            IrCmpOp::Sge => "ge",
-            IrCmpOp::Ult => "lo",
-            IrCmpOp::Ule => "ls",
-            IrCmpOp::Ugt => "hi",
-            IrCmpOp::Uge => "hs",
-        };
+        let cc = arm_int_cond_code(op);
         self.state.emit_fmt(format_args!("    b.{} {}", cc, true_label));
         self.state.emit_fmt(format_args!("    b {}", false_label));
         self.state.reg_cache.invalidate_all();

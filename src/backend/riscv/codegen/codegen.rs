@@ -69,6 +69,28 @@ impl RiscvCodegen {
         generate_module(&mut self, module)
     }
 
+    /// Load comparison operands into t1 and t2, then sign/zero-extend
+    /// sub-64-bit types. Shared by emit_cmp and emit_fused_cmp_branch.
+    fn emit_cmp_operand_load(&mut self, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        self.operand_to_t0(lhs);
+        self.state.emit("    mv t1, t0");
+        self.operand_to_t0(rhs);
+        self.state.emit("    mv t2, t0");
+
+        let is_sub64 = ty == IrType::I32 || ty == IrType::U32
+            || ty == IrType::I8 || ty == IrType::U8
+            || ty == IrType::I16 || ty == IrType::U16;
+        if is_sub64 && ty.is_unsigned() {
+            self.state.emit("    slli t1, t1, 32");
+            self.state.emit("    srli t1, t1, 32");
+            self.state.emit("    slli t2, t2, 32");
+            self.state.emit("    srli t2, t2, 32");
+        } else if is_sub64 {
+            self.state.emit("    sext.w t1, t1");
+            self.state.emit("    sext.w t2, t2");
+        }
+    }
+
     // --- RISC-V helpers ---
 
     /// Check if an immediate fits in a 12-bit signed field.
@@ -1440,13 +1462,13 @@ impl ArchCodegen for RiscvCodegen {
             return;
         }
 
-        self.operand_to_t0(lhs);
-        self.state.emit("    mv t1, t0");
-        self.operand_to_t0(rhs);
-        self.state.emit("    mv t2, t0");
-
         if ty.is_float() {
-            // F128 uses F64 instructions (long double computed at double precision)
+            // Float comparison: load operands into t1/t2, then move to float regs.
+            // F128 uses F64 instructions (long double computed at double precision).
+            self.operand_to_t0(lhs);
+            self.state.emit("    mv t1, t0");
+            self.operand_to_t0(rhs);
+            self.state.emit("    mv t2, t0");
             let s = if ty == IrType::F64 || ty == IrType::F128 { "d" } else { "s" };
             let fmv = if s == "d" { "fmv.d.x" } else { "fmv.w.x" };
             self.state.emit_fmt(format_args!("    {} ft0, t1", fmv));
@@ -1466,20 +1488,8 @@ impl ArchCodegen for RiscvCodegen {
             return;
         }
 
-        // For sub-64-bit types, sign/zero-extend before comparison
-        let is_32bit = ty == IrType::I32 || ty == IrType::U32
-            || ty == IrType::I8 || ty == IrType::U8
-            || ty == IrType::I16 || ty == IrType::U16;
-        if is_32bit && ty.is_unsigned() {
-            self.state.emit("    slli t1, t1, 32");
-            self.state.emit("    srli t1, t1, 32");
-            self.state.emit("    slli t2, t2, 32");
-            self.state.emit("    srli t2, t2, 32");
-        } else if is_32bit {
-            self.state.emit("    sext.w t1, t1");
-            self.state.emit("    sext.w t2, t2");
-        }
-
+        // Integer comparison: load + sign/zero-extend, then compare
+        self.emit_cmp_operand_load(lhs, rhs, ty);
         match op {
             IrCmpOp::Eq => {
                 self.state.emit("    sub t0, t1, t2");
@@ -1525,25 +1535,8 @@ impl ArchCodegen for RiscvCodegen {
         true_label: &str,
         false_label: &str,
     ) {
-        // Load operands: lhs -> t1, rhs -> t2
-        self.operand_to_t0(lhs);
-        self.state.emit("    mv t1, t0");
-        self.operand_to_t0(rhs);
-        self.state.emit("    mv t2, t0");
-
-        // For sub-64-bit types, sign/zero-extend before comparison
-        let is_32bit = ty == IrType::I32 || ty == IrType::U32
-            || ty == IrType::I8 || ty == IrType::U8
-            || ty == IrType::I16 || ty == IrType::U16;
-        if is_32bit && ty.is_unsigned() {
-            self.state.emit("    slli t1, t1, 32");
-            self.state.emit("    srli t1, t1, 32");
-            self.state.emit("    slli t2, t2, 32");
-            self.state.emit("    srli t2, t2, 32");
-        } else if is_32bit {
-            self.state.emit("    sext.w t1, t1");
-            self.state.emit("    sext.w t2, t2");
-        }
+        // Load operands into t1, t2 (with sign/zero-extension for sub-64-bit types)
+        self.emit_cmp_operand_load(lhs, rhs, ty);
 
         // RISC-V has 6 compare-and-branch instructions:
         //   beq, bne, blt, bge, bltu, bgeu
