@@ -1,0 +1,13 @@
+Fix va_arg with complex types (_Complex float/double/long double)
+
+Problem:
+- va_arg(ap, double _Complex) segfaults on ARM and produces wrong output on x86
+- Complex types map to IrType::Ptr in the IR, so the backend treats them as
+  integer/pointer types, loading only 8 bytes from the GP register area
+- For complex types, we actually need two floating-point component values
+
+Fix approach:
+- In lower_va_arg, detect when the requested type is a complex type
+- Decompose into two va_arg instructions for the component type (F32, F64, or F128)
+- Allocate stack space and store both components, returning the alloca pointer
+- This matches how complex types are decomposed for regular function calls
