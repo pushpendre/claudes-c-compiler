@@ -1,0 +1,6 @@
+Task: Use &'static str for preprocessor conditional operator tokens
+
+ExprToken::Op(String) allocates 22 heap Strings per #if expression parse,
+all for static operator literals like "!=", "&&", "+". Change to Op(&'static str).
+
+Status: in progress
