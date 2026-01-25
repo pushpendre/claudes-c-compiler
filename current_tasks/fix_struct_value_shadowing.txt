@@ -1,7 +1,0 @@
-Task: Fix struct_value_size local/global variable shadowing
-Owner: agent
-Status: in-progress
-Description: struct_value_size fell through from local non-struct vars to
-global struct vars with the same name, causing struct memcpy semantics
-to be used for scalar assignments.
-Files: src/ir/lowering/expr_types.rs
