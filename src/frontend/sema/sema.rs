@@ -26,6 +26,19 @@ use super::type_context::{TypeContext, FunctionTypedefInfo};
 use std::cell::Cell;
 use crate::common::fx_hash::FxHashMap;
 
+/// Map from AST expression node identity to its inferred CType.
+///
+/// Uses the raw pointer address of `Expr` nodes as a stable key. This works
+/// because the AST is allocated once during parsing and is not moved or
+/// reallocated before the lowerer consumes it. The lowerer can look up any
+/// expression node's CType in O(1) without re-computing it.
+///
+/// This is the core data structure for Step 3 of the typed-AST plan: sema
+/// annotates every expression it can type-check, and the lowerer consults
+/// these annotations as a fallback before doing its own (more expensive)
+/// type inference.
+pub type ExprTypeMap = FxHashMap<usize, CType>;
+
 /// Information about a function collected during semantic analysis.
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
@@ -46,6 +59,11 @@ pub struct SemaResult {
     pub type_context: TypeContext,
     /// Warnings collected during analysis (non-fatal).
     pub warnings: Vec<String>,
+    /// Expression type annotations: maps AST Expr node addresses to their
+    /// inferred CTypes. Populated during sema's analyze_expr walk using
+    /// ExprTypeChecker. The lowerer consults this as a fallback in
+    /// get_expr_ctype() after its own lowering-state-based inference fails.
+    pub expr_types: ExprTypeMap,
 }
 
 impl Default for SemaResult {
@@ -54,6 +72,7 @@ impl Default for SemaResult {
             functions: FxHashMap::default(),
             type_context: TypeContext::new(),
             warnings: Vec::new(),
+            expr_types: ExprTypeMap::default(),
         }
     }
 }
@@ -556,6 +575,26 @@ impl SemanticAnalyzer {
             Expr::LabelAddr(_, _) => {}
             // __builtin_types_compatible_p(type1, type2) - compile-time constant
             Expr::BuiltinTypesCompatibleP(_, _, _) => {}
+        }
+
+        // After analyzing sub-expressions, infer this expression's CType using
+        // the ExprTypeChecker and store it in the annotation map. The lowerer
+        // will consult this map as a fast O(1) fallback before doing its own
+        // (more expensive) type inference that requires lowering state.
+        self.annotate_expr_type(expr);
+    }
+
+    /// Infer the CType of an expression via ExprTypeChecker and record it
+    /// in the expr_types annotation map, keyed by the expression's pointer address.
+    fn annotate_expr_type(&mut self, expr: &Expr) {
+        let checker = super::type_checker::ExprTypeChecker {
+            symbols: &self.symbol_table,
+            types: &self.result.type_context,
+            functions: &self.result.functions,
+        };
+        if let Some(ctype) = checker.infer_expr_ctype(expr) {
+            let key = expr as *const Expr as usize;
+            self.result.expr_types.insert(key, ctype);
         }
     }
 

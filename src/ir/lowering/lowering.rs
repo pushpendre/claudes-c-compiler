@@ -13,7 +13,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
-use crate::frontend::sema::FunctionInfo;
+use crate::frontend::sema::{FunctionInfo, ExprTypeMap};
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
 use crate::backend::Target;
@@ -51,6 +51,11 @@ pub struct Lowerer {
     /// Used as authoritative source for function return types and parameter types,
     /// reducing the lowerer's need to re-derive type information from the raw AST.
     pub(super) sema_functions: FxHashMap<String, FunctionInfo>,
+    /// Expression type annotations from semantic analysis.
+    /// Maps AST Expr node addresses (as usize) to their sema-inferred CTypes.
+    /// Consulted as a fast O(1) fallback in get_expr_ctype() before the lowerer
+    /// does its own (more expensive) type inference using lowering-specific state.
+    pub(super) sema_expr_types: ExprTypeMap,
 }
 
 impl Lowerer {
@@ -64,10 +69,15 @@ impl Lowerer {
     /// - Pre-populate `known_functions` so function names are recognized immediately
     /// - Pre-populate `func_return_ctypes` for function call return type resolution
     /// - Provide authoritative CType info for `get_expr_ctype` fallback
+    ///
+    /// The sema-provided expr_types map contains CType annotations for AST expression
+    /// nodes, keyed by their pointer address. The lowerer consults this as a fast
+    /// fallback in get_expr_ctype() before doing its own type inference.
     pub fn with_type_context(
         target: Target,
         type_context: TypeContext,
         sema_functions: FxHashMap<String, FunctionInfo>,
+        sema_expr_types: ExprTypeMap,
     ) -> Self {
         // Pre-populate known_functions from sema's function map.
         // This means the lowerer knows about all functions before the first pass,
@@ -93,6 +103,7 @@ impl Lowerer {
             func_meta: FunctionMeta::default(),
             emitted_global_names: FxHashSet::default(),
             sema_functions,
+            sema_expr_types,
         }
     }
 

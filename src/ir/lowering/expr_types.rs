@@ -1078,9 +1078,38 @@ impl Lowerer {
         }
     }
 
+    /// Look up the CType of an expression from sema's pre-computed annotation map.
+    /// Returns None if sema did not annotate this expression (e.g., because the
+    /// type depends on lowering-specific state like alloca info).
+    fn lookup_sema_expr_type(&self, expr: &Expr) -> Option<CType> {
+        let key = expr as *const Expr as usize;
+        self.sema_expr_types.get(&key).cloned()
+    }
+
     /// Get the full CType of an expression by recursion.
     /// Returns None if the type cannot be determined from CType tracking.
+    ///
+    /// Resolution order:
+    /// 1. Lowerer-specific inference (uses locals, globals, func_meta, etc.)
+    /// 2. Sema annotation fallback (pre-computed ExprTypeMap from sema pass)
+    ///
+    /// The lowerer-specific path is checked first because it has access to
+    /// lowering state (variable allocas, global metadata) that may produce
+    /// more precise types than sema's symbol-table-only inference.
     pub(super) fn get_expr_ctype(&self, expr: &Expr) -> Option<CType> {
+        // Try lowerer-specific inference first
+        let result = self.get_expr_ctype_lowerer(expr);
+        if result.is_some() {
+            return result;
+        }
+        // Fall back to sema's pre-computed type annotation
+        self.lookup_sema_expr_type(expr)
+    }
+
+    /// Lowerer-specific CType inference using lowering state (locals, globals, func_meta).
+    /// This is the original get_expr_ctype logic, now separated so the public
+    /// get_expr_ctype can add a sema fallback after it.
+    fn get_expr_ctype_lowerer(&self, expr: &Expr) -> Option<CType> {
         match expr {
             Expr::Identifier(name, _) => {
                 if let Some(vi) = self.lookup_var_info(name) {

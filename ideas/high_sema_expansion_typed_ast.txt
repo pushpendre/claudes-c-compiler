@@ -1,14 +1,15 @@
 HIGH PRIORITY: Expand sema to produce a typed AST, reducing lowering responsibilities
 
-Current state (after TypeContext move, type_checker addition, and function sig sharing):
+Current state (after Steps 1-4 complete):
 The sema pass collects type information (typedefs, struct layouts, enum constants,
-function signatures) and now has ExprTypeChecker for CType inference. The lowerer
-now receives sema's function signatures (FunctionInfo map) and uses them as the
-authoritative source for function return types and parameter CTypes. It does NOT yet:
-- Annotate AST nodes with inferred types (typed AST)
+function signatures), has ExprTypeChecker for CType inference, and now annotates
+every analyzable expression with its CType via an ExprTypeMap. The lowerer receives
+this map and uses it as a fallback in get_expr_ctype(), so sema's type inference
+is consulted before the lowerer falls back to its own inference. It does NOT yet:
 - Reject type errors with diagnostics
 - Replace the lowerer's expr_types.rs entirely (lowerer still needs its own
-  get_expr_ctype for lowering-specific state like locals/globals)
+  get_expr_ctype_lowerer for lowering-specific state like locals/globals)
+- Unify constant expression evaluation between sema and lowerer
 
 The lowerer (ir/lowering/) is ~18K lines and handles both type inference AND IR
 emission. Key type-inference code that should move to sema:
@@ -49,12 +50,18 @@ Step 2.5: (DONE) Pass sema function signatures to lowerer
         - Falls back to sema function info in get_expr_ctype, get_call_return_type,
           get_function_return_ctype for function return type resolution
         - Eliminates redundant type_spec_to_ctype calls in register_function_meta
-Step 3: Have sema annotate expressions with CTypes during its walk
-        - Add a HashMap<ExprId, CType> or modify AST nodes to carry type info
-        - Populate during analyze_expr using ExprTypeChecker
-Step 4: Have lowerer consume sema's type annotations instead of re-computing
-        - Lowerer's get_expr_ctype delegates to sema annotations when available
-        - Falls back to its own inference only for lowering-generated expressions
+Step 3: (DONE) Have sema annotate expressions with CTypes during its walk
+        - Added ExprTypeMap (FxHashMap<usize, CType>) to SemaResult
+        - Uses raw pointer address of Expr nodes as stable key (AST is immutable)
+        - Sema's analyze_expr() calls ExprTypeChecker::infer_expr_ctype() for each
+          expression and stores results in expr_types map
+        - ExprTypeMap type exported from sema module
+Step 4: (DONE) Have lowerer consume sema's type annotations instead of re-computing
+        - Lowerer receives ExprTypeMap in with_type_context() constructor
+        - get_expr_ctype() now tries lowerer-specific inference first, then falls
+          back to sema's pre-computed annotations via lookup_sema_expr_type()
+        - Original logic moved to get_expr_ctype_lowerer() internal method
+        - Zero regressions across all three backends (x86, ARM, RISC-V)
 Step 5: Move constant evaluation to sema (unify the two const_eval implementations)
 Step 6: Add actual type error diagnostics in sema
 Step 7: Simplify lowering to assume types are correct
