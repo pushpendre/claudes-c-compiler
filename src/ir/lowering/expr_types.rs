@@ -20,25 +20,35 @@ fn promote_integer(ty: IrType) -> IrType {
 }
 
 /// Apply C11 6.3.1.1p2 integer promotion for bitfield types.
-/// A bitfield of type unsigned int with width < 32 promotes to int (I32),
-/// because int can represent all values of the bitfield.
-/// Non-bitfield types or full-width bitfields are returned unchanged.
+/// "If an int can represent all values of the original type (as restricted by the
+/// width, for a bit-field), the value is converted to an int; otherwise, it is
+/// converted to an unsigned int."
+///
+/// This applies regardless of the declared storage type of the bitfield. A
+/// `uint64_t arg_count : 16` bitfield has values 0..65535, which fit in int,
+/// so it promotes to int (I32).
 fn bitfield_promoted_type(field_ty: IrType, bf_info: Option<(u32, u32)>) -> IrType {
     if let Some((_bit_offset, bit_width)) = bf_info {
-        // Per C11 6.3.1.1p2: if int can represent all values of the bitfield,
-        // it promotes to int; otherwise unsigned int.
-        // For signed bitfields with width <= 32, int can always represent the values.
-        // For unsigned bitfields with width < 32 (i.e., fewer bits than int),
-        // int can represent all values (0..2^width-1 fits in signed 32-bit).
-        // For unsigned bitfields with width == 32, int cannot represent all values,
-        // so it stays unsigned int.
-        match field_ty {
-            IrType::U32 if bit_width < 32 => IrType::I32,
-            IrType::I32 | IrType::U32 if bit_width <= 16 => IrType::I32,
-            IrType::U16 if bit_width < 16 => IrType::I32,
-            IrType::I16 | IrType::U16 => IrType::I32,
-            IrType::U8 | IrType::I8 => IrType::I32,
-            _ => field_ty,
+        let is_signed = field_ty.is_signed();
+        if is_signed {
+            // Signed bitfield: values range is -(2^(w-1)) to 2^(w-1)-1.
+            // int (32-bit signed) can represent all values if width <= 32.
+            if bit_width <= 32 {
+                IrType::I32
+            } else {
+                field_ty
+            }
+        } else {
+            // Unsigned bitfield: values range is 0 to 2^w - 1.
+            // int (32-bit signed, max 2^31-1) can represent all values if width <= 31.
+            if bit_width <= 31 {
+                IrType::I32
+            } else if bit_width == 32 {
+                // int cannot represent 0..2^32-1, so promote to unsigned int.
+                IrType::U32
+            } else {
+                field_ty
+            }
         }
     } else {
         field_ty
