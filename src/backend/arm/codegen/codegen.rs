@@ -862,7 +862,7 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Store stack-passed params (above callee's frame).
-        for (i, param) in func.params.iter().enumerate() {
+        for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
             if !class.is_stack() { continue; }
 
@@ -1346,37 +1346,44 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
-                 _is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>]) {
-        // For indirect calls, spill the function pointer to a dedicated stack slot.
-        // x17 is used as scratch by emit_load_from_sp/emit_store_to_sp/emit_add_sp_offset
-        // for large stack offsets, so we spill to stack and reload before blr.
-        let indirect_call = func_ptr.is_some() && direct_name.is_none();
-        if indirect_call {
-            self.operand_to_x0(func_ptr.unwrap());
-            self.state.emit("    str x0, [sp, #-16]!");
-        }
+    // emit_call: uses shared default from ArchCodegen trait (traits.rs)
 
-        // Use shared classification for AAPCS64
-        let config = CallAbiConfig {
+    fn call_abi_config(&self) -> CallAbiConfig {
+        CallAbiConfig {
             max_int_regs: 8, max_float_regs: 8,
             align_i128_pairs: true,
             f128_in_fp_regs: true, f128_in_gp_pairs: false,
-            variadic_floats_in_gp: false, // AAPCS64: all floats use FP regs
-        };
-        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, _is_variadic, &config);
-        let stack_arg_space = compute_stack_arg_space(&arg_classes);
-        let fptr_spill: i64 = if indirect_call { 16 } else { 0 };
+            variadic_floats_in_gp: false,
+        }
+    }
 
-        // Phase 1: Handle stack args FIRST (before GP temp regs are populated).
+    fn emit_call_compute_stack_space(&self, arg_classes: &[CallArgClass]) -> usize {
+        compute_stack_arg_space(arg_classes)
+    }
+
+    fn emit_call_spill_fptr(&mut self, func_ptr: &Operand) {
+        self.operand_to_x0(func_ptr);
+        self.state.emit("    str x0, [sp, #-16]!");
+    }
+
+    fn emit_call_fptr_spill_size(&self) -> usize { 16 }
+
+    fn emit_call_f128_pre_convert(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                                   _arg_types: &[IrType], _stack_arg_space: usize) -> usize {
+        // ARM F128 pre-conversion is handled inside emit_call_reg_args for this arch
+        // because it's interleaved with FP register loading.
+        let _ = (args, arg_classes);
+        0
+    }
+
+    fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                            _arg_types: &[IrType], stack_arg_space: usize, fptr_spill: usize, _f128_temp_space: usize) -> i64 {
         if stack_arg_space > 0 {
             self.emit_sub_sp(stack_arg_space as i64);
             let mut stack_offset = 0i64;
             for (arg_idx, arg) in args.iter().enumerate() {
                 if !arg_classes[arg_idx].is_stack() { continue; }
                 let cls = arg_classes[arg_idx];
-                // Align for 16-byte types
                 if matches!(cls, CallArgClass::F128Stack | CallArgClass::I128Stack) {
                     stack_offset = (stack_offset + 15) & !15;
                 }
@@ -1386,7 +1393,7 @@ impl ArchCodegen for ArmCodegen {
                         match arg {
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill;
+                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1422,7 +1429,7 @@ impl ArchCodegen for ArmCodegen {
                             }
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill;
+                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                         self.emit_store_to_sp("x0", stack_offset, "str");
@@ -1461,7 +1468,7 @@ impl ArchCodegen for ArmCodegen {
                             }
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill;
+                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1483,7 +1490,7 @@ impl ArchCodegen for ArmCodegen {
                         match arg {
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill;
+                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1502,9 +1509,11 @@ impl ArchCodegen for ArmCodegen {
                 }
             }
         }
+        stack_arg_space as i64 + fptr_spill as i64
+    }
 
-        let total_sp_adjust = stack_arg_space as i64 + fptr_spill;
-
+    fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                          arg_types: &[IrType], total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize) {
         // Phase 2a: Load GP integer register args into temp registers (x9-x16).
         let mut gp_tmp_idx = 0usize;
         for (i, arg) in args.iter().enumerate() {
@@ -1533,12 +1542,7 @@ impl ArchCodegen for ArmCodegen {
             gp_tmp_idx += 1;
         }
 
-        // Phase 2b: Load FP register args.
-        // F128 args need __extenddftf2 which clobbers all FP regs, so:
-        // 1. Convert F128 variable args, save to temp stack
-        // 2. Load F128 constants directly
-        // 3. Restore F128 variable results
-        // 4. Load non-F128 float/double args last
+        // Phase 2b: Load FP register args (F128 needs __extenddftf2 which clobbers FP regs).
         let fp_reg_assignments: Vec<(usize, usize)> = args.iter().enumerate()
             .filter(|(i, _)| matches!(arg_classes[*i], CallArgClass::FloatReg { .. } | CallArgClass::F128Reg { .. }))
             .map(|(i, _)| {
@@ -1613,7 +1617,7 @@ impl ArchCodegen for ArmCodegen {
             self.emit_add_sp(f128_temp_space_aligned as i64);
         }
 
-        // Load non-F128 FP args last (after __extenddftf2 clobbers are done)
+        // Load non-F128 FP args last (after __extenddftf2 clobbers)
         for &(arg_i, reg_i) in &fp_reg_assignments {
             if matches!(arg_classes[arg_i], CallArgClass::F128Reg { .. }) { continue; }
             let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
@@ -1639,7 +1643,6 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Move GP int args from temp regs to actual arg registers.
-        // Skip over i128 and struct-by-val register slots when counting GP index.
         let mut int_reg_idx = 0usize;
         gp_tmp_idx = 0;
         for (i, _) in args.iter().enumerate() {
@@ -1662,34 +1665,33 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Phase 3b: Load i128 register pair args directly into target registers.
+        // Phase 3b: Load i128 register pair args.
         for (i, arg) in args.iter().enumerate() {
             if let CallArgClass::I128RegPair { base_reg_idx } = arg_classes[i] {
-                let pair_reg_idx = base_reg_idx;
                 if total_sp_adjust > 0 {
                     match arg {
                         Operand::Value(v) => {
                             if let Some(slot) = self.state.get_slot(v.0) {
                                 let adjusted = slot.0 + total_sp_adjust;
                                 if self.state.is_alloca(v.0) {
-                                    self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], adjusted, "ldr");
-                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], adjusted, "ldr");
+                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
                                 } else {
-                                    self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], adjusted, "ldr");
-                                    self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx + 1], adjusted + 8, "ldr");
+                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], adjusted, "ldr");
+                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx + 1], adjusted + 8, "ldr");
                                 }
                             }
                         }
                         Operand::Const(c) => {
                             if let IrConst::I128(v) = c {
-                                self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx], *v as u64 as i64);
-                                self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx + 1], (*v >> 64) as u64 as i64);
+                                self.emit_load_imm64(ARM_ARG_REGS[base_reg_idx], *v as u64 as i64);
+                                self.emit_load_imm64(ARM_ARG_REGS[base_reg_idx + 1], (*v >> 64) as u64 as i64);
                             } else {
                                 self.operand_to_x0(arg);
-                                if pair_reg_idx != 0 {
-                                    self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[pair_reg_idx]));
+                                if base_reg_idx != 0 {
+                                    self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[base_reg_idx]));
                                 }
-                                self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
                             }
                         }
                     }
@@ -1698,24 +1700,24 @@ impl ArchCodegen for ArmCodegen {
                         Operand::Value(v) => {
                             if let Some(slot) = self.state.get_slot(v.0) {
                                 if self.state.is_alloca(v.0) {
-                                    self.emit_add_sp_offset(ARM_ARG_REGS[pair_reg_idx], slot.0);
-                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                    self.emit_add_sp_offset(ARM_ARG_REGS[base_reg_idx], slot.0);
+                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
                                 } else {
-                                    self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], slot.0, "ldr");
-                                    self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx + 1], slot.0 + 8, "ldr");
+                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], slot.0, "ldr");
+                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx + 1], slot.0 + 8, "ldr");
                                 }
                             }
                         }
                         Operand::Const(c) => {
                             if let IrConst::I128(v) = c {
-                                self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx], *v as u64 as i64);
-                                self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx + 1], (*v >> 64) as u64 as i64);
+                                self.emit_load_imm64(ARM_ARG_REGS[base_reg_idx], *v as u64 as i64);
+                                self.emit_load_imm64(ARM_ARG_REGS[base_reg_idx + 1], (*v >> 64) as u64 as i64);
                             } else {
                                 self.operand_to_x0(arg);
-                                if pair_reg_idx != 0 {
-                                    self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[pair_reg_idx]));
+                                if base_reg_idx != 0 {
+                                    self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[base_reg_idx]));
                                 }
-                                self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
                             }
                         }
                     }
@@ -1723,11 +1725,10 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Phase 3c: Load struct-by-value register args into target registers.
+        // Phase 3c: Load struct-by-value register args.
         for (i, arg) in args.iter().enumerate() {
             if let CallArgClass::StructByValReg { base_reg_idx, size } = arg_classes[i] {
                 let regs_needed = if size <= 8 { 1 } else { 2 };
-                // Load struct address into x17 (scratch)
                 if total_sp_adjust > 0 {
                     match arg {
                         Operand::Value(v) => {
@@ -1772,39 +1773,43 @@ impl ArchCodegen for ArmCodegen {
                 }
             }
         }
+    }
 
-        // Emit call instruction
+    fn emit_call_instruction(&mut self, direct_name: Option<&str>, _func_ptr: Option<&Operand>, indirect: bool, stack_arg_space: usize) {
         if let Some(name) = direct_name {
             self.state.emit(&format!("    bl {}", name));
-        } else if indirect_call {
+        } else if indirect {
+            // fptr was spilled with "str x0, [sp, #-16]!" before stack args were allocated.
+            // After sub_sp(stack_arg_space), the fptr is at sp + stack_arg_space.
             let spill_offset = stack_arg_space as i64;
             self.emit_load_from_sp("x17", spill_offset, "ldr");
             self.state.emit("    blr x17");
         }
+    }
 
-        // Clean up stack
-        let total_call_stack = stack_arg_space as i64 + fptr_spill;
-        if total_call_stack > 0 {
-            self.emit_add_sp(total_call_stack);
+    fn emit_call_cleanup(&mut self, stack_arg_space: usize, _f128_temp_space: usize, indirect: bool) {
+        let fptr_spill = if indirect { 16usize } else { 0 };
+        let total = stack_arg_space + fptr_spill;
+        if total > 0 {
+            self.emit_add_sp(total as i64);
         }
+    }
 
-        // Store return value
-        if let Some(dest) = dest {
-            if is_i128_type(return_type) {
-                self.store_x0_x1_to(&dest);
-            } else if return_type.is_long_double() {
-                self.state.emit("    bl __trunctfdf2");
-                self.state.emit("    fmov x0, d0");
-                self.store_x0_to(&dest);
-            } else if return_type == IrType::F32 {
-                self.state.emit("    fmov w0, s0");
-                self.store_x0_to(&dest);
-            } else if return_type.is_float() {
-                self.state.emit("    fmov x0, d0");
-                self.store_x0_to(&dest);
-            } else {
-                self.store_x0_to(&dest);
-            }
+    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
+        if is_i128_type(return_type) {
+            self.store_x0_x1_to(dest);
+        } else if return_type.is_long_double() {
+            self.state.emit("    bl __trunctfdf2");
+            self.state.emit("    fmov x0, d0");
+            self.store_x0_to(dest);
+        } else if return_type == IrType::F32 {
+            self.state.emit("    fmov w0, s0");
+            self.store_x0_to(dest);
+        } else if return_type.is_float() {
+            self.state.emit("    fmov x0, d0");
+            self.store_x0_to(dest);
+        } else {
+            self.store_x0_to(dest);
         }
     }
 

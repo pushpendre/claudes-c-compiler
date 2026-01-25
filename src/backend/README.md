@@ -15,7 +15,7 @@ Each target architecture (x86-64, AArch64, RISC-V 64) implements the `ArchCodege
 The shared framework is split into focused modules to keep each under ~400 lines:
 
 - **`state.rs`** — `CodegenState` (stack slots, alloca tracking, PIC/GOT/PLT), `StackSlot`, `SlotAddr` enum with `resolve_slot_addr()` for unified alloca address resolution. All mutable state shared across backends lives here.
-- **`traits.rs`** — `ArchCodegen` trait: ~100 required methods + ~20 default implementations built from small primitives. This is the interface each backend implements. Default methods handle store/load dispatch, cast handling, i128 operations, control flow, memcpy, GEP, and dynamic alloca.
+- **`traits.rs`** — `ArchCodegen` trait: ~100 required methods + ~20 default implementations built from small primitives. This is the interface each backend implements. Default methods handle store/load dispatch, cast handling, i128 operations, control flow, memcpy, GEP, dynamic alloca, and **function call emission**. The `emit_call` default orchestrates the 6-phase call sequence (classify → spill fptr → stack args → reg args → call → cleanup → store result) via ~10 arch-specific hook methods.
 - **`generation.rs`** — `generate_module()`, `generate_function()`, `generate_instruction()`, `generate_terminator()`: arch-independent entry points that dispatch IR to trait methods. Also `calculate_stack_space_common()` and `find_param_alloca()`.
 - **`call_abi.rs`** — `CallArgClass` enum, `CallAbiConfig`, `classify_call_args()`, `compute_stack_arg_space()`, `compute_stack_push_bytes()`. Shared function call argument classification parameterized by arch-specific register counts.
 - **`cast.rs`** — `CastKind` enum, `classify_cast()`, `FloatOp`, `classify_float_binop()`. Shared cast decision logic (Ptr normalization, F128 reduction, float↔int, widen/narrow).
@@ -40,7 +40,9 @@ Per-architecture backends:
   - **i128 ops**: Dispatch to per-op primitives, shared divrem function-name selection
   - **Control flow**: Compose `jump_mnemonic()`, `emit_branch_nonzero()`, etc.
 
-- **Call argument classification**: `classify_call_args()` captures the shared arg-walking algorithm. `CallAbiConfig` parameterizes per-arch details (register counts, pair alignment, F128 handling, variadic float rules).
+- **Call argument classification**: `classify_call_args()` captures the shared arg-walking algorithm. `CallAbiConfig` parameterizes per-arch details (register counts, pair alignment, F128 handling, variadic float rules). Each backend implements `call_abi_config()` to provide its ABI parameters.
+
+- **Shared emit_call default**: The trait provides a default `emit_call` that implements the shared 6-phase call algorithm. Each backend implements ~10 small hook methods (`emit_call_compute_stack_space`, `emit_call_spill_fptr`, `emit_call_stack_args`, `emit_call_reg_args`, `emit_call_instruction`, `emit_call_cleanup`, `emit_call_store_result`, etc.) that provide the arch-specific instruction emission for each phase. This eliminates ~300 lines of structural duplication per backend.
 
 - **Stack-based codegen**: All backends use a stack-based strategy (no register allocator yet). Each IR value gets a stack slot. Instructions load to accumulator, operate, store back.
 

@@ -208,9 +208,87 @@ pub trait ArchCodegen {
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a function call (direct or indirect).
+    ///
+    /// The default implementation provides the shared algorithmic skeleton that all three
+    /// architectures follow: classify args → emit stack args → load register args → call → cleanup → store result.
+    /// Backends override the small `emit_call_*` hook methods instead of reimplementing this entire method.
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
-                 is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: &[Option<usize>]);
+                 is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>]) {
+        use super::call_abi::*;
+        let config = self.call_abi_config();
+        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, is_variadic, &config);
+
+        // Phase 0: Spill indirect function pointer before any stack manipulation.
+        let indirect = func_ptr.is_some() && direct_name.is_none();
+        if indirect {
+            self.emit_call_spill_fptr(func_ptr.unwrap());
+        }
+
+        // Compute stack space needed for overflow args.
+        let stack_arg_space = self.emit_call_compute_stack_space(&arg_classes);
+
+        // Phase 1: Pre-convert F128 values that need helper calls (before stack args clobber regs).
+        let f128_temp_space = self.emit_call_f128_pre_convert(args, &arg_classes, arg_types, stack_arg_space);
+
+        // Phase 2: Emit stack overflow args.
+        let total_sp_adjust = self.emit_call_stack_args(args, &arg_classes, arg_types, stack_arg_space,
+                                                        if indirect { self.emit_call_fptr_spill_size() } else { 0 },
+                                                        f128_temp_space);
+
+        // Phase 3: Load register args (GP, FP, i128, struct-by-val, F128).
+        self.emit_call_reg_args(args, &arg_classes, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space);
+
+        // Phase 4: Emit the actual call instruction.
+        self.emit_call_instruction(direct_name, func_ptr, indirect, stack_arg_space);
+
+        // Phase 5: Clean up stack.
+        self.emit_call_cleanup(stack_arg_space, f128_temp_space, indirect);
+
+        // Phase 6: Store return value.
+        if let Some(dest) = dest {
+            self.emit_call_store_result(&dest, return_type);
+        }
+    }
+
+    // ---- Call hook methods (overridden by each backend) ----
+
+    /// Return the ABI configuration for this architecture's function calls.
+    fn call_abi_config(&self) -> super::call_abi::CallAbiConfig;
+
+    /// Compute how much stack space to allocate for overflow arguments.
+    /// x86 returns raw push bytes; ARM/RISC-V return pre-allocated SP space.
+    fn emit_call_compute_stack_space(&self, arg_classes: &[super::call_abi::CallArgClass]) -> usize;
+
+    /// Spill an indirect function pointer to a safe location before stack manipulation.
+    /// No-op on x86 (uses r10). ARM/RISC-V spill to stack.
+    fn emit_call_spill_fptr(&mut self, func_ptr: &Operand) { let _ = func_ptr; }
+
+    /// Size of the function pointer spill slot (0 for x86, 16 for ARM).
+    fn emit_call_fptr_spill_size(&self) -> usize { 0 }
+
+    /// Pre-convert F128 variable arguments that need __extenddftf2/__trunctfdf2.
+    /// Returns the temp stack space allocated for converted results.
+    fn emit_call_f128_pre_convert(&mut self, _args: &[Operand], _arg_classes: &[super::call_abi::CallArgClass],
+                                   _arg_types: &[IrType], _stack_arg_space: usize) -> usize { 0 }
+
+    /// Emit stack overflow arguments. Returns total SP adjustment (stack_arg_space + fptr_spill + f128_temp).
+    fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[super::call_abi::CallArgClass],
+                            arg_types: &[IrType], stack_arg_space: usize, fptr_spill: usize, f128_temp_space: usize) -> i64;
+
+    /// Load arguments into registers (GP, FP, i128, struct-by-val, F128).
+    fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[super::call_abi::CallArgClass],
+                          arg_types: &[IrType], total_sp_adjust: i64, f128_temp_space: usize, stack_arg_space: usize);
+
+    /// Emit the call/bl/jalr instruction.
+    /// `stack_arg_space` is passed so ARM can reload the spilled fptr at the correct offset.
+    fn emit_call_instruction(&mut self, direct_name: Option<&str>, func_ptr: Option<&Operand>, indirect: bool, stack_arg_space: usize);
+
+    /// Clean up stack space after the call returns.
+    fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, indirect: bool);
+
+    /// Store the function's return value from ABI registers to the destination slot.
+    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType);
 
     /// Emit a global address load.
     fn emit_global_addr(&mut self, dest: &Value, name: &str);

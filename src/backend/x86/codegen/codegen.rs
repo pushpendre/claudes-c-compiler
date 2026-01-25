@@ -1380,27 +1380,32 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
-                 _is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>]) {
-        // Use shared classification for x86-64 SysV ABI
-        let config = CallAbiConfig {
+    // emit_call: uses shared default from ArchCodegen trait (traits.rs)
+
+    fn call_abi_config(&self) -> CallAbiConfig {
+        CallAbiConfig {
             max_int_regs: 6, max_float_regs: 8,
             align_i128_pairs: false,
             f128_in_fp_regs: false, f128_in_gp_pairs: false,
             variadic_floats_in_gp: false,
-        };
-        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, _is_variadic, &config);
+        }
+    }
 
-        // x86 uses pushq instructions (not pre-allocated SP space), so compute raw
-        // push bytes. Alignment padding is handled separately via subq $8, %rsp.
-        let call_stack_bytes = compute_stack_push_bytes(&arg_classes);
-        let need_align_pad = call_stack_bytes % 16 != 0;
+    fn emit_call_compute_stack_space(&self, arg_classes: &[CallArgClass]) -> usize {
+        // x86 uses pushq instructions; compute raw bytes pushed (alignment handled separately).
+        compute_stack_push_bytes(arg_classes)
+    }
+
+    // emit_call_spill_fptr: uses default no-op (x86 uses r10 scratch, no spill needed)
+    // emit_call_fptr_spill_size: uses default 0
+
+    fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                            _arg_types: &[IrType], stack_arg_space: usize, _fptr_spill: usize, _f128_temp_space: usize) -> i64 {
+        // x86 pushes in reverse order, with alignment padding if needed.
+        let need_align_pad = stack_arg_space % 16 != 0;
         if need_align_pad {
             self.state.emit("    subq $8, %rsp");
         }
-
-        // Push stack args in reverse order.
         let stack_indices: Vec<usize> = (0..args.len())
             .filter(|&i| arg_classes[i].is_stack())
             .collect();
@@ -1464,8 +1469,12 @@ impl ArchCodegen for X86Codegen {
                 _ => {}
             }
         }
+        // Return total SP adjustment (for x86 this doesn't affect register arg loading)
+        0
+    }
 
-        // Load register args.
+    fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                          _arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize) {
         let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         let mut float_count = 0usize;
         for (i, arg) in args.iter().enumerate() {
@@ -1500,17 +1509,18 @@ impl ArchCodegen for X86Codegen {
                     self.operand_to_rax(arg);
                     self.state.emit(&format!("    movq %rax, %{}", X86_ARG_REGS[reg_idx]));
                 }
-                _ => {} // stack args already handled
+                _ => {}
             }
         }
-
-        // Set AL = number of float args for variadic functions (SysV ABI)
+        // Set AL = number of float args for variadic functions (SysV ABI requirement)
         if float_count > 0 {
             self.state.emit(&format!("    movb ${}, %al", float_count));
         } else {
             self.state.emit("    xorl %eax, %eax");
         }
+    }
 
+    fn emit_call_instruction(&mut self, direct_name: Option<&str>, func_ptr: Option<&Operand>, _indirect: bool, _stack_arg_space: usize) {
         if let Some(name) = direct_name {
             if self.state.needs_plt(name) {
                 self.state.emit(&format!("    call {}@PLT", name));
@@ -1518,36 +1528,39 @@ impl ArchCodegen for X86Codegen {
                 self.state.emit(&format!("    call {}", name));
             }
         } else if let Some(ptr) = func_ptr {
-            self.state.emit("    pushq %rax"); // save AL
+            self.state.emit("    pushq %rax"); // save AL (float count)
             self.operand_to_rax(ptr);
             self.state.emit("    movq %rax, %r10");
             self.state.emit("    popq %rax"); // restore AL
             self.state.emit("    call *%r10");
         }
+    }
 
-        let total_cleanup = call_stack_bytes + if need_align_pad { 8 } else { 0 };
+    fn emit_call_cleanup(&mut self, stack_arg_space: usize, _f128_temp_space: usize, _indirect: bool) {
+        let need_align_pad = stack_arg_space % 16 != 0;
+        let total_cleanup = stack_arg_space + if need_align_pad { 8 } else { 0 };
         if total_cleanup > 0 {
             self.state.emit(&format!("    addq ${}, %rsp", total_cleanup));
         }
+    }
 
-        if let Some(dest) = dest {
-            if is_i128_type(return_type) {
-                self.store_rax_rdx_to(&dest);
-            } else if return_type == IrType::F32 {
-                self.state.emit("    movd %xmm0, %eax");
-                self.store_rax_to(&dest);
-            } else if return_type == IrType::F128 {
-                self.state.emit("    subq $8, %rsp");
-                self.state.emit("    fstpl (%rsp)");
-                self.state.emit("    movq (%rsp), %rax");
-                self.state.emit("    addq $8, %rsp");
-                self.store_rax_to(&dest);
-            } else if return_type == IrType::F64 {
-                self.state.emit("    movq %xmm0, %rax");
-                self.store_rax_to(&dest);
-            } else {
-                self.store_rax_to(&dest);
-            }
+    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
+        if is_i128_type(return_type) {
+            self.store_rax_rdx_to(dest);
+        } else if return_type == IrType::F32 {
+            self.state.emit("    movd %xmm0, %eax");
+            self.store_rax_to(dest);
+        } else if return_type == IrType::F128 {
+            self.state.emit("    subq $8, %rsp");
+            self.state.emit("    fstpl (%rsp)");
+            self.state.emit("    movq (%rsp), %rax");
+            self.state.emit("    addq $8, %rsp");
+            self.store_rax_to(dest);
+        } else if return_type == IrType::F64 {
+            self.state.emit("    movq %xmm0, %rax");
+            self.store_rax_to(dest);
+        } else {
+            self.store_rax_to(dest);
         }
     }
 

@@ -1330,50 +1330,55 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
-    fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
-                 is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>]) {
-        let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+    // emit_call: uses shared default from ArchCodegen trait (traits.rs)
 
-        // Use shared classification for RISC-V LP64D ABI
-        let config = CallAbiConfig {
+    fn call_abi_config(&self) -> CallAbiConfig {
+        CallAbiConfig {
             max_int_regs: 8, max_float_regs: 8,
             align_i128_pairs: true,
             f128_in_fp_regs: false, f128_in_gp_pairs: true,
             variadic_floats_in_gp: true,
-        };
-        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, is_variadic, &config);
-        let stack_arg_space = compute_stack_arg_space(&arg_classes);
+        }
+    }
 
-        // Phase 1: Handle F128 register args that need __extenddftf2.
-        // Convert f64 -> f128 via __extenddftf2, save results to stack temporaries.
-        let mut f128_var_temps: Vec<(usize, i64)> = Vec::new();
+    fn emit_call_compute_stack_space(&self, arg_classes: &[CallArgClass]) -> usize {
+        compute_stack_arg_space(arg_classes)
+    }
+
+    // emit_call_spill_fptr: uses default no-op (RISC-V loads fptr inline before jalr)
+    // emit_call_fptr_spill_size: uses default 0
+
+    fn emit_call_f128_pre_convert(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                                   _arg_types: &[IrType], _stack_arg_space: usize) -> usize {
+        // RISC-V: pre-convert F128 variable args via __extenddftf2, saving to temp stack.
         let mut f128_temp_space: i64 = 0;
         for (i, arg) in args.iter().enumerate() {
             if matches!(arg_classes[i], CallArgClass::F128Reg { .. }) {
                 if let Operand::Value(_) = arg {
                     f128_temp_space += 16;
-                    f128_var_temps.push((i, 0));
                 }
             }
         }
-
         if f128_temp_space > 0 {
             self.emit_addi_sp(-f128_temp_space);
             let mut temp_offset: i64 = 0;
-            for item in &mut f128_var_temps {
-                item.1 = temp_offset;
-                let arg = &args[item.0];
-                self.operand_to_t0(arg);
-                self.state.emit("    fmv.d.x fa0, t0");
-                self.state.emit("    call __extenddftf2");
-                self.emit_store_to_sp("a0", temp_offset, "sd");
-                self.emit_store_to_sp("a1", temp_offset + 8, "sd");
-                temp_offset += 16;
+            for (i, arg) in args.iter().enumerate() {
+                if !matches!(arg_classes[i], CallArgClass::F128Reg { .. }) { continue; }
+                if let Operand::Value(_) = arg {
+                    self.operand_to_t0(arg);
+                    self.state.emit("    fmv.d.x fa0, t0");
+                    self.state.emit("    call __extenddftf2");
+                    self.emit_store_to_sp("a0", temp_offset, "sd");
+                    self.emit_store_to_sp("a1", temp_offset + 8, "sd");
+                    temp_offset += 16;
+                }
             }
         }
+        f128_temp_space as usize
+    }
 
-        // Phase 2: Handle stack overflow args.
+    fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                            _arg_types: &[IrType], stack_arg_space: usize, _fptr_spill: usize, _f128_temp_space: usize) -> i64 {
         if stack_arg_space > 0 {
             self.emit_addi_sp(-(stack_arg_space as i64));
             let mut offset: usize = 0;
@@ -1471,10 +1476,15 @@ impl ArchCodegen for RiscvCodegen {
                 }
             }
         }
+        // RISC-V doesn't spill fptr to stack, so total_sp_adjust is just stack + f128 temp
+        0 // RISC-V loads operands from s0-relative slots (not SP-relative), so no SP adjust needed
+    }
 
-        // Phase 3: Load non-F128 register args.
+    fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
+                          arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, stack_arg_space: usize) {
+        let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+
         // GP args go to temps first, then FP args, then move GP from temp to aX.
-        // t6 is reserved for large-offset stack scratch, so it's excluded from temp pool.
         let temp_regs = ["t3", "t4", "t5", "s2", "s3", "s4", "s5", "s6"];
         let mut gp_temps: Vec<(usize, &str)> = Vec::new();
         let mut temp_i = 0usize;
@@ -1506,7 +1516,9 @@ impl ArchCodegen for RiscvCodegen {
             self.state.emit(&format!("    mv {}, {}", RISCV_ARG_REGS[*target_idx], temp_reg));
         }
 
-        // Phase 4: Load F128 register pair args
+        // Load F128 register pair args
+        // Need to rebuild f128_var_temps info to find temp stack offsets
+        let mut f128_var_temp_offset: i64 = 0;
         for (i, arg) in args.iter().enumerate() {
             if let CallArgClass::F128Reg { reg_idx: base_reg } = arg_classes[i] {
                 match arg {
@@ -1523,16 +1535,16 @@ impl ArchCodegen for RiscvCodegen {
                         self.state.emit(&format!("    li {}, {}", RISCV_ARG_REGS[base_reg + 1], hi));
                     }
                     Operand::Value(_) => {
-                        let temp_info = f128_var_temps.iter().find(|t| t.0 == i).unwrap();
-                        let offset = temp_info.1 + stack_arg_space as i64;
+                        let offset = f128_var_temp_offset + stack_arg_space as i64;
                         self.emit_load_from_sp(RISCV_ARG_REGS[base_reg], offset, "ld");
                         self.emit_load_from_sp(RISCV_ARG_REGS[base_reg + 1], offset + 8, "ld");
+                        f128_var_temp_offset += 16;
                     }
                 }
             }
         }
 
-        // Phase 5: Load i128 register pair args
+        // Load i128 register pair args
         for (i, arg) in args.iter().enumerate() {
             if let CallArgClass::I128RegPair { base_reg_idx } = arg_classes[i] {
                 match arg {
@@ -1561,7 +1573,7 @@ impl ArchCodegen for RiscvCodegen {
             }
         }
 
-        // Phase 6: Load struct-by-value register args
+        // Load struct-by-value register args
         for (i, arg) in args.iter().enumerate() {
             if let CallArgClass::StructByValReg { base_reg_idx, size } = arg_classes[i] {
                 let regs_needed = if size <= 8 { 1 } else { 2 };
@@ -1585,13 +1597,9 @@ impl ArchCodegen for RiscvCodegen {
                 }
             }
         }
+    }
 
-        // Clean up F128 temp space before call (only if no stack args below it)
-        if f128_temp_space > 0 && stack_arg_space == 0 {
-            self.emit_addi_sp(f128_temp_space);
-        }
-
-        // Emit call
+    fn emit_call_instruction(&mut self, direct_name: Option<&str>, func_ptr: Option<&Operand>, _indirect: bool, _stack_arg_space: usize) {
         if let Some(name) = direct_name {
             self.state.emit(&format!("    call {}", name));
         } else if let Some(ptr) = func_ptr {
@@ -1599,32 +1607,36 @@ impl ArchCodegen for RiscvCodegen {
             self.state.emit("    mv t2, t0");
             self.state.emit("    jalr ra, t2, 0");
         }
+    }
 
-        // Clean up stack
+    fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, _indirect: bool) {
+        // Clean up F128 temp space if no stack args below it (already cleaned in that case)
+        if f128_temp_space > 0 && stack_arg_space == 0 {
+            self.emit_addi_sp(f128_temp_space as i64);
+        }
         if stack_arg_space > 0 {
-            let cleanup = (stack_arg_space as i64) + f128_temp_space;
+            let cleanup = stack_arg_space as i64 + f128_temp_space as i64;
             self.emit_addi_sp(cleanup);
         }
+    }
 
-        // Store return value
-        if let Some(dest) = dest {
-            if let Some(slot) = self.state.get_slot(dest.0) {
-                if is_i128_type(return_type) {
-                    self.emit_store_to_s0("a0", slot.0, "sd");
-                    self.emit_store_to_s0("a1", slot.0 + 8, "sd");
-                } else if return_type.is_long_double() {
-                    self.state.emit("    call __trunctfdf2");
-                    self.state.emit("    fmv.x.d t0, fa0");
-                    self.emit_store_to_s0("t0", slot.0, "sd");
-                } else if return_type == IrType::F32 {
-                    self.state.emit("    fmv.x.w t0, fa0");
-                    self.emit_store_to_s0("t0", slot.0, "sd");
-                } else if return_type.is_float() {
-                    self.state.emit("    fmv.x.d t0, fa0");
-                    self.emit_store_to_s0("t0", slot.0, "sd");
-                } else {
-                    self.emit_store_to_s0("a0", slot.0, "sd");
-                }
+    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            if is_i128_type(return_type) {
+                self.emit_store_to_s0("a0", slot.0, "sd");
+                self.emit_store_to_s0("a1", slot.0 + 8, "sd");
+            } else if return_type.is_long_double() {
+                self.state.emit("    call __trunctfdf2");
+                self.state.emit("    fmv.x.d t0, fa0");
+                self.emit_store_to_s0("t0", slot.0, "sd");
+            } else if return_type == IrType::F32 {
+                self.state.emit("    fmv.x.w t0, fa0");
+                self.emit_store_to_s0("t0", slot.0, "sd");
+            } else if return_type.is_float() {
+                self.state.emit("    fmv.x.d t0, fa0");
+                self.emit_store_to_s0("t0", slot.0, "sd");
+            } else {
+                self.emit_store_to_s0("a0", slot.0, "sd");
             }
         }
     }
