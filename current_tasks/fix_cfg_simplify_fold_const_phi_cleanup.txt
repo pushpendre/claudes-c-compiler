@@ -1,0 +1,21 @@
+Fix CFG simplify: fold_constant_cond_branches doesn't clean up phi nodes
+
+Problem:
+When fold_constant_cond_branches folds a CondBranch with a constant condition
+into an unconditional Branch, it removes a control-flow edge but does NOT
+clean up phi nodes in the not-taken target block. This leaves stale phi
+entries referencing a predecessor that no longer branches to that block.
+
+Later, remove_dead_blocks removes the stale phi entries only if the not-taken
+block becomes completely unreachable. But if the not-taken block is still
+reachable from other predecessors, the stale phi entries remain and can
+produce wrong values.
+
+Impact:
+Causes kernel boot failures (miscompilation of many .c files). Confirmed by
+bisecting: disabling fold_constant_cond_branches OR remove_dead_blocks fixes
+the kernel boot for the affected files.
+
+Fix:
+When folding a CondBranch to Branch, clean up phi nodes in the not-taken
+target block by removing entries that reference the current block.
