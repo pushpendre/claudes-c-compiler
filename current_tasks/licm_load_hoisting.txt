@@ -1,0 +1,22 @@
+Task: LICM Load Hoisting for Loop-Invariant Loads
+==================================================
+
+Currently, LICM only hoists pure instructions (BinOp, UnaryOp, Cmp, Cast, GEP, Copy).
+Loads are never hoisted, even when they load from addresses that are never modified
+inside the loop (e.g., parameter allocas).
+
+This causes severe performance degradation in loops that access function parameters
+or other loop-invariant memory locations - each access re-loads from the stack slot
+every iteration instead of keeping the value in a register.
+
+Plan:
+1. Extend LICM to identify loads that are safe to hoist:
+   - Load from an alloca whose address is loop-invariant
+   - The alloca is not stored to anywhere within the loop body
+   - The loop body contains no calls (which could alias the alloca)
+   OR: The alloca is never address-taken, so no call could modify it
+2. Hoist such loads to the loop preheader block
+3. Replace uses of the hoisted load's result within the loop
+
+Expected impact: Major improvement on loops accessing function parameters
+(array_sum, matrix multiply, etc.) - up to 6-12x speedup on tight loops.
