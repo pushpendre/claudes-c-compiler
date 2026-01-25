@@ -1,0 +1,16 @@
+Task: Optimize IR with redundant cast elimination and extended simplification
+
+Goal: Reduce generated code size and improve runtime performance by eliminating
+redundant Cast instructions at the IR level. This benefits all three backends.
+
+Key optimizations:
+1. Cast chain elimination: Cast(Cast(x, A->B), B->C) patterns
+   - Widen then narrow back: Cast(Cast(x, i32->i64), i64->i32) => x
+   - Double narrow: Cast(Cast(x, i64->i32), i32->i16) => Cast(x, i64->i16)
+   - Double widen: Cast(Cast(x, i16->i32), i32->i64) => Cast(x, i16->i64)
+2. Same-size signed/unsigned casts as noop: Cast(x, I32->U32) => Copy
+3. Extended simplify patterns in the simplify pass
+4. Redundant comparison elimination
+
+Baseline: zlib minigzip compression takes ~7.4s with CCC vs ~1.9s with GCC -O2
+(3.9x gap). Goal is to measurably reduce this gap.
