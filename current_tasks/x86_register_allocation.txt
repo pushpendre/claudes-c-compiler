@@ -1,0 +1,18 @@
+Task: x86 Register Allocation -- Linear Scan with Callee-Saved Registers
+
+Port the RISC-V linear scan register allocator to the x86-64 backend.
+
+The x86 backend currently stores every IR value on the stack (accumulator machine model).
+The shared regalloc infrastructure (liveness.rs, regalloc.rs) is already implemented.
+The RISC-V backend has a working integration that provides a clear template.
+
+Changes needed:
+1. Add reg_assignments and used_callee_saved fields to X86Codegen
+2. Define x86 callee-saved register table (rbx, r12-r15) and name mapper
+3. Call regalloc::allocate_registers in calculate_stack_space
+4. Save/restore callee-saved regs in prologue/epilogue
+5. Modify operand_to_rax, operand_to_rcx, store_rax_to for register assignments
+6. Update value_to_reg to check reg_assignments
+
+Expected impact: Significant runtime improvement for emitted code by keeping
+hot values in registers instead of always spilling to stack.
