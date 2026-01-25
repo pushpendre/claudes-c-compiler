@@ -38,6 +38,10 @@ pub type ConstMap = FxHashMap<usize, IrConst>;
 ///
 /// This evaluator is created fresh for each expression evaluation, borrowing
 /// the sema state it needs. It is stateless and does not modify anything.
+///
+/// When `const_values` and `expr_types` caches are provided, previously-computed
+/// results are returned in O(1) instead of re-traversing the AST. This prevents
+/// exponential blowup on deeply nested expressions.
 pub struct SemaConstEval<'a> {
     /// Type context for typedef, enum, and struct layout resolution.
     pub types: &'a TypeContext,
@@ -45,6 +49,10 @@ pub struct SemaConstEval<'a> {
     pub symbols: &'a SymbolTable,
     /// Function signatures for return type resolution in sizeof(expr).
     pub functions: &'a FxHashMap<String, FunctionInfo>,
+    /// Pre-computed constant values from bottom-up sema walk (memoization cache).
+    pub const_values: Option<&'a FxHashMap<usize, IrConst>>,
+    /// Pre-computed expression types from bottom-up sema walk.
+    pub expr_types: Option<&'a FxHashMap<usize, CType>>,
 }
 
 impl<'a> SemaConstEval<'a> {
@@ -54,6 +62,15 @@ impl<'a> SemaConstEval<'a> {
     /// sema state. Returns `None` for expressions that require lowering state
     /// (global addresses, runtime values, etc.).
     pub fn eval_const_expr(&self, expr: &Expr) -> Option<IrConst> {
+        // Memoization: if this expression's constant value was already computed
+        // during the bottom-up sema walk, return it in O(1).
+        if let Some(cache) = self.const_values {
+            let key = expr as *const Expr as usize;
+            if let Some(cached) = cache.get(&key) {
+                return Some(cached.clone());
+            }
+        }
+
         match expr {
             // Integer literals
             Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => {
@@ -479,6 +496,7 @@ impl<'a> SemaConstEval<'a> {
             symbols: self.symbols,
             types: self.types,
             functions: self.functions,
+            expr_types: self.expr_types,
         };
         checker.infer_expr_ctype(expr)
     }

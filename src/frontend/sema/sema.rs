@@ -623,6 +623,7 @@ impl SemanticAnalyzer {
             symbols: &self.symbol_table,
             types: &self.result.type_context,
             functions: &self.result.functions,
+            expr_types: Some(&self.result.expr_types),
         };
         if let Some(ctype) = checker.infer_expr_ctype(expr) {
             let key = expr as *const Expr as usize;
@@ -638,6 +639,8 @@ impl SemanticAnalyzer {
             types: &self.result.type_context,
             symbols: &self.symbol_table,
             functions: &self.result.functions,
+            const_values: Some(&self.result.const_values),
+            expr_types: Some(&self.result.expr_types),
         };
         if let Some(val) = evaluator.eval_const_expr(expr) {
             let key = expr as *const Expr as usize;
@@ -710,6 +713,8 @@ impl SemanticAnalyzer {
             types: &self.result.type_context,
             symbols: &self.symbol_table,
             functions: &self.result.functions,
+            const_values: Some(&self.result.const_values),
+            expr_types: Some(&self.result.expr_types),
         };
         evaluator.eval_const_expr(expr)?.to_i64()
     }
@@ -852,6 +857,7 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
             symbols: &self.symbol_table,
             types: &self.result.type_context,
             functions: &self.result.functions,
+            expr_types: Some(&self.result.expr_types),
         };
         checker.infer_expr_ctype(expr).unwrap_or(CType::Int)
     }

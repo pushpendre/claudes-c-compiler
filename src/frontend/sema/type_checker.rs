@@ -27,6 +27,11 @@ use super::sema::FunctionInfo;
 /// methods to compute the CType of any expression. Unlike the lowerer's
 /// `get_expr_ctype`, this does not depend on IR-level state (allocas, IR types,
 /// global variable metadata).
+///
+/// When `expr_types` is provided, previously-computed types are looked up in O(1)
+/// instead of re-traversing the AST. This prevents exponential blowup on deeply
+/// nested expressions like `1+1+1+...+1` where `infer_binop_ctype` would
+/// otherwise recursively re-evaluate lhs/rhs types multiple times per node.
 pub struct ExprTypeChecker<'a> {
     /// Symbol table for variable/function type lookup.
     pub symbols: &'a SymbolTable,
@@ -34,6 +39,9 @@ pub struct ExprTypeChecker<'a> {
     pub types: &'a TypeContext,
     /// Function signatures for return type resolution.
     pub functions: &'a FxHashMap<String, FunctionInfo>,
+    /// Pre-computed expression types from bottom-up sema walk (memoization cache).
+    /// When set, `infer_expr_ctype` checks this map before recursing.
+    pub expr_types: Option<&'a FxHashMap<usize, CType>>,
 }
 
 impl<'a> ExprTypeChecker<'a> {
@@ -43,6 +51,16 @@ impl<'a> ExprTypeChecker<'a> {
     /// `None` when the type depends on lowering-specific information (e.g.,
     /// complex expression chains through typeof).
     pub fn infer_expr_ctype(&self, expr: &Expr) -> Option<CType> {
+        // Memoization: if this expression's type was already computed during
+        // the bottom-up sema walk, return it in O(1) instead of re-traversing.
+        // This prevents O(2^N) blowup on deep expression chains.
+        if let Some(cache) = self.expr_types {
+            let key = expr as *const Expr as usize;
+            if let Some(cached) = cache.get(&key) {
+                return Some(cached.clone());
+            }
+        }
+
         match expr {
             // Literals have well-defined types
             Expr::IntLiteral(_, _) | Expr::CharLiteral(_, _) => Some(CType::Int),
