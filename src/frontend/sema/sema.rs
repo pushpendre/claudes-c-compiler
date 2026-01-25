@@ -449,6 +449,12 @@ impl SemanticAnalyzer {
         self.enum_counter = 0;
         for variant in variants {
             if let Some(val_expr) = &variant.value {
+                // Walk the enum value expression through analyze_expr first to
+                // populate the expr_types cache. Without this, infer_expr_ctype
+                // called from eval_const_expr would have no cached sub-expression
+                // types and could exhibit O(2^N) blowup on deep expression chains
+                // (e.g., `enum { NUM = +1+1+1+...+1 }`).
+                self.analyze_expr(val_expr);
                 // Try to evaluate constant expression
                 if let Some(val) = self.eval_const_expr(val_expr) {
                     self.enum_counter = val;

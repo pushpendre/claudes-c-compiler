@@ -114,9 +114,16 @@ impl<'a> SemaConstEval<'a> {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
                 let r = self.eval_const_expr(rhs)?;
-                // Use CType from both operands for proper usual arithmetic conversions
-                let lhs_ctype = self.infer_expr_ctype(lhs);
-                let rhs_ctype = self.infer_expr_ctype(rhs);
+                // Derive operand CTypes for usual arithmetic conversions.
+                // First try to derive from the IrConst values themselves (O(1)),
+                // falling back to infer_expr_ctype only when needed.
+                // This avoids O(2^N) blowup on deep expression chains like
+                // enum { NUM = +1+1+1+...+1 } where infer_expr_ctype would
+                // recursively re-evaluate types at every node.
+                let lhs_ctype = Self::ctype_from_ir_const(&l)
+                    .or_else(|| self.infer_expr_ctype(lhs));
+                let rhs_ctype = Self::ctype_from_ir_const(&r)
+                    .or_else(|| self.infer_expr_ctype(rhs));
                 self.eval_const_binop(op, &l, &r, lhs_ctype.as_ref(), rhs_ctype.as_ref())
             }
 
@@ -333,6 +340,23 @@ impl<'a> SemaConstEval<'a> {
     }
 
     // === Type helper methods ===
+
+    /// Derive a CType from an IrConst value.
+    /// This is O(1) and avoids the potentially exponential infer_expr_ctype()
+    /// when we already have the evaluated constant value.
+    fn ctype_from_ir_const(c: &IrConst) -> Option<CType> {
+        match c {
+            IrConst::I8(_) => Some(CType::Char),
+            IrConst::I16(_) => Some(CType::Short),
+            IrConst::I32(_) => Some(CType::Int),
+            IrConst::I64(_) => Some(CType::Long),
+            IrConst::I128(_) => Some(CType::Int128),
+            IrConst::F32(_) => Some(CType::Float),
+            IrConst::F64(_) => Some(CType::Double),
+            IrConst::LongDouble(_) => Some(CType::LongDouble),
+            IrConst::Zero => Some(CType::Int),
+        }
+    }
 
     /// Convert a TypeSpecifier to CType using sema's type resolution.
     fn type_spec_to_ctype(&self, spec: &TypeSpecifier) -> CType {

@@ -191,6 +191,11 @@ impl X86Codegen {
                 result.push_str(sym);
             } else if let Some(imm) = has_imm {
                 result.push_str(&format!("{}", imm));
+            } else if op_is_memory[idx] {
+                // Memory operands with %P/%c emit their address directly.
+                // Without this, we'd fall through to the register branch
+                // and incorrectly emit just the register name.
+                result.push_str(&op_mem_addrs[idx]);
             } else {
                 // Register: emit without % prefix
                 result.push_str(&op_regs[idx]);

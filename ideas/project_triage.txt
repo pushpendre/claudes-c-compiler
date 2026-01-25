@@ -17,7 +17,7 @@ PASSING (13):
   - libffi:        PASS (all backends)
   - musl:          PASS (all backends)
   - tcc:           PASS (all backends)
-  - jq:            PASS (all backends — fixed type checker double evaluation)
+  - jq:            PASS (all backends — fixed exponential const eval hang)
 
 PARTIAL:
   mbedtls:
