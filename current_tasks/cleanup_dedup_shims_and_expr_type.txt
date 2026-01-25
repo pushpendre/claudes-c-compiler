@@ -1,0 +1,17 @@
+Cleanup: Remove backward-compat shims and deduplicate expr type inference
+
+1. Remove codegen_shared.rs re-export shim - update 5 backend files to import
+   from individual modules (state, traits, generation, call_abi, call_emit, cast,
+   inline_asm) instead of using the glob re-export.
+
+2. Remove dead type_context.rs in ir/lowering/ - it's a 9-line re-export shim
+   that has no consumers (mod.rs already re-exports TypeContext directly).
+
+3. Unify infer_expr_type() and get_expr_type() - two parallel ~100-line match
+   dispatches over the same Expr enum with subtle differences. Merge into a
+   single function.
+
+4. Unify the duplicated helper functions (wrap_result, unsigned_op, bool_to_i64)
+   between sema/const_eval.rs and lowering/const_eval.rs into a shared module.
+
+Status: in progress
