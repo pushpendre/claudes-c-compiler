@@ -1,0 +1,15 @@
+Task: Expand sema type system - move type inference utilities from lowering to shared code
+
+Goal: First step toward making sema produce a typed AST (addresses high_sema_expansion_typed_ast.txt)
+
+Plan:
+1. Move C type arithmetic conversion functions (usual_arithmetic_conversion,
+   integer_rank, is_unsigned) from ir/lowering/expr_types.rs to CType methods
+   in common/types.rs, making them available to sema.
+2. Add standalone expr_ctype_from_type_context() in sema that can infer
+   expression CTypes using only sema-available information (typedefs, enum
+   constants, struct layouts) without depending on lowering state.
+3. Update lowerer to delegate to these shared utilities.
+
+This establishes the pattern that type-system logic belongs in sema, not lowering,
+and directly enables future steps (typed AST, type error diagnostics).
