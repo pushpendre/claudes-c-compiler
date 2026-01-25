@@ -928,6 +928,24 @@ impl IrFunction {
             stack_size: 0,
         }
     }
+
+    /// Return the highest Value ID defined (as a destination) in this function, or 0 if empty.
+    /// Useful for sizing flat lookup tables indexed by Value ID.
+    /// Note: only considers instruction destinations; callers should handle
+    /// out-of-bounds IDs for values that are used but not defined here (e.g., parameters).
+    pub fn max_value_id(&self) -> u32 {
+        let mut max_id: u32 = 0;
+        for block in &self.blocks {
+            for inst in &block.instructions {
+                if let Some(v) = inst.dest() {
+                    if v.0 > max_id {
+                        max_id = v.0;
+                    }
+                }
+            }
+        }
+        max_id
+    }
 }
 
 impl Default for IrModule {

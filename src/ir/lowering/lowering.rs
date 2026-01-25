@@ -386,19 +386,18 @@ impl Lowerer {
 
         // Compute the return CType once. Prefer sema's authoritative CType if available,
         // falling back to re-computing from the AST TypeSpecifier.
-        let base_ret_ctype = if let Some(func_info) = self.sema_functions.get(name) {
+        // When sema provides the return type, it already includes pointer levels from
+        // the declarator chain, so we must NOT add ptr_count layers again.
+        // Only the AST fallback path needs ptr_count wrapping, since type_spec_to_ctype
+        // only resolves the base type specifier without pointer derivators.
+        let full_ret_ctype = if let Some(func_info) = self.sema_functions.get(name) {
             func_info.return_type.clone()
         } else {
-            self.type_spec_to_ctype(ret_type_spec)
-        };
-        let full_ret_ctype = if ptr_count > 0 {
-            let mut ct = base_ret_ctype.clone();
+            let mut ct = self.type_spec_to_ctype(ret_type_spec);
             for _ in 0..ptr_count {
                 ct = CType::Pointer(Box::new(ct));
             }
             ct
-        } else {
-            base_ret_ctype.clone()
         };
 
         // Compute return type, wrapping with pointer levels if needed

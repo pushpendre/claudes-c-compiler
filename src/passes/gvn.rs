@@ -35,9 +35,12 @@ pub fn run(module: &mut IrModule) -> usize {
 
 /// Run local value numbering on a function (per-block).
 fn run_lvn_function(func: &mut IrFunction) -> usize {
+    let max_id = func.max_value_id() as usize;
+    // Allocate the value number table once and reuse across blocks
+    let mut value_numbers: Vec<u32> = vec![u32::MAX; max_id + 1];
     let mut total = 0;
     for block in &mut func.blocks {
-        total += run_lvn_block(block);
+        total += run_lvn_block(block, &mut value_numbers);
     }
     total
 }
@@ -45,23 +48,32 @@ fn run_lvn_function(func: &mut IrFunction) -> usize {
 /// Run local value numbering on a single basic block.
 /// Replaces redundant computations with Copy instructions referencing
 /// the first computation of that expression.
-fn run_lvn_block(block: &mut BasicBlock) -> usize {
+fn run_lvn_block(block: &mut BasicBlock, value_numbers: &mut [u32]) -> usize {
     // Maps expression keys to the Value that first computed them
     let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
-    // Maps Value IDs to their value numbers (for canonicalization)
-    let mut value_numbers: FxHashMap<u32, u32> = FxHashMap::default();
     let mut next_vn: u32 = 0;
+    // Track which value_numbers slots we set so we can clear them at the end
+    let mut assigned_slots: Vec<usize> = Vec::new();
 
     let mut eliminated = 0;
     let mut new_instructions = Vec::with_capacity(block.instructions.len());
 
     for inst in block.instructions.drain(..) {
-        match make_expr_key(&inst, &value_numbers) {
+        match make_expr_key(&inst, value_numbers) {
             Some((expr_key, dest)) => {
                 if let Some(&existing_value) = expr_to_value.get(&expr_key) {
                     // This expression was already computed - replace with copy
-                    let existing_vn = value_numbers.get(&existing_value.0).copied().unwrap_or(existing_value.0);
-                    value_numbers.insert(dest.0, existing_vn);
+                    let idx = existing_value.0 as usize;
+                    let existing_vn = if idx < value_numbers.len() && value_numbers[idx] != u32::MAX {
+                        value_numbers[idx]
+                    } else {
+                        existing_value.0
+                    };
+                    let dest_idx = dest.0 as usize;
+                    if dest_idx < value_numbers.len() {
+                        value_numbers[dest_idx] = existing_vn;
+                        assigned_slots.push(dest_idx);
+                    }
                     new_instructions.push(Instruction::Copy {
                         dest,
                         src: Operand::Value(existing_value),
@@ -71,7 +83,11 @@ fn run_lvn_block(block: &mut BasicBlock) -> usize {
                     // New expression - assign value number and record it
                     let vn = next_vn;
                     next_vn += 1;
-                    value_numbers.insert(dest.0, vn);
+                    let dest_idx = dest.0 as usize;
+                    if dest_idx < value_numbers.len() {
+                        value_numbers[dest_idx] = vn;
+                        assigned_slots.push(dest_idx);
+                    }
                     expr_to_value.insert(expr_key, dest);
                     new_instructions.push(inst);
                 }
@@ -82,7 +98,11 @@ fn run_lvn_block(block: &mut BasicBlock) -> usize {
                 if let Some(dest) = inst.dest() {
                     let vn = next_vn;
                     next_vn += 1;
-                    value_numbers.insert(dest.0, vn);
+                    let dest_idx = dest.0 as usize;
+                    if dest_idx < value_numbers.len() {
+                        value_numbers[dest_idx] = vn;
+                        assigned_slots.push(dest_idx);
+                    }
                 }
                 new_instructions.push(inst);
             }
@@ -90,13 +110,19 @@ fn run_lvn_block(block: &mut BasicBlock) -> usize {
     }
 
     block.instructions = new_instructions;
+
+    // Reset value_numbers slots we used (so the table is clean for the next block)
+    for &idx in &assigned_slots {
+        value_numbers[idx] = u32::MAX;
+    }
+
     eliminated
 }
 
 /// Try to create an ExprKey for an instruction (for value numbering).
 /// Returns the expression key and the destination value, or None if
 /// the instruction is not eligible for value numbering.
-fn make_expr_key(inst: &Instruction, value_numbers: &FxHashMap<u32, u32>) -> Option<(ExprKey, Value)> {
+fn make_expr_key(inst: &Instruction, value_numbers: &[u32]) -> Option<(ExprKey, Value)> {
     match inst {
         Instruction::BinOp { dest, op, lhs, rhs, .. } => {
             let lhs_vn = operand_to_vn(lhs, value_numbers);
@@ -126,11 +152,16 @@ fn make_expr_key(inst: &Instruction, value_numbers: &FxHashMap<u32, u32>) -> Opt
 }
 
 /// Convert an Operand to a VNOperand for hashing.
-fn operand_to_vn(op: &Operand, value_numbers: &FxHashMap<u32, u32>) -> VNOperand {
+fn operand_to_vn(op: &Operand, value_numbers: &[u32]) -> VNOperand {
     match op {
         Operand::Const(c) => VNOperand::Const(c.to_hash_key()),
         Operand::Value(v) => {
-            let vn = value_numbers.get(&v.0).copied().unwrap_or(v.0);
+            let idx = v.0 as usize;
+            let vn = if idx < value_numbers.len() && value_numbers[idx] != u32::MAX {
+                value_numbers[idx]
+            } else {
+                v.0
+            };
             VNOperand::ValueNum(vn)
         }
     }
@@ -186,7 +217,8 @@ mod tests {
             terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
         };
 
-        let eliminated = run_lvn_block(&mut block);
+        let mut vn_table = vec![u32::MAX; 16];
+        let eliminated = run_lvn_block(&mut block, &mut vn_table);
         assert_eq!(eliminated, 1);
 
         // Second instruction should be a Copy
@@ -223,7 +255,8 @@ mod tests {
             terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
         };
 
-        let eliminated = run_lvn_block(&mut block);
+        let mut vn_table = vec![u32::MAX; 16];
+        let eliminated = run_lvn_block(&mut block, &mut vn_table);
         assert_eq!(eliminated, 0); // Should NOT eliminate
     }
 
@@ -251,7 +284,8 @@ mod tests {
             terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
         };
 
-        let eliminated = run_lvn_block(&mut block);
+        let mut vn_table = vec![u32::MAX; 16];
+        let eliminated = run_lvn_block(&mut block, &mut vn_table);
         assert_eq!(eliminated, 1);
     }
 

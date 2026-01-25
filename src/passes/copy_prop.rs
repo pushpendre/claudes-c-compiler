@@ -11,8 +11,11 @@
 //! store-to-new-slot in codegen, wasting both instructions and stack space.
 //!
 //! After this pass runs, the dead Copy instructions are cleaned up by DCE.
+//!
+//! Performance: Uses a flat Vec<Option<Operand>> indexed by Value ID instead of
+//! FxHashMap, since Value IDs are dense sequential u32s. This eliminates hashing
+//! overhead and gives O(1) lookups with better cache locality.
 
-use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 
 /// Run copy propagation on the entire module.
@@ -23,10 +26,13 @@ pub fn run(module: &mut IrModule) -> usize {
 
 /// Propagate copies within a single function.
 fn propagate_copies(func: &mut IrFunction) -> usize {
-    // Phase 1: Build the copy map (dest -> resolved source)
-    let copy_map = build_copy_map(func);
+    let max_id = func.max_value_id() as usize;
 
-    if copy_map.is_empty() {
+    // Phase 1: Build the copy map as a flat lookup table (dest -> resolved source)
+    let copy_map = build_copy_map(func, max_id);
+
+    // Check if any copies exist
+    if !copy_map.iter().any(|e| e.is_some()) {
         return 0;
     }
 
@@ -43,30 +49,35 @@ fn propagate_copies(func: &mut IrFunction) -> usize {
     replacements
 }
 
-/// Build a map from Copy destinations to their ultimate sources.
+/// Build a flat lookup table from Copy destinations to their ultimate sources.
 /// Follows chains: if %a = Copy %b and %b = Copy %c, resolves %a -> %c.
-fn build_copy_map(func: &IrFunction) -> FxHashMap<u32, Operand> {
-    // First pass: collect direct copy relationships
-    let mut direct_copies: FxHashMap<u32, Operand> = FxHashMap::default();
+fn build_copy_map(func: &IrFunction, max_id: usize) -> Vec<Option<Operand>> {
+    // First pass: collect direct copy relationships into flat table
+    let mut direct: Vec<Option<Operand>> = vec![None; max_id + 1];
+    let mut has_copies = false;
 
     for block in &func.blocks {
         for inst in &block.instructions {
             if let Instruction::Copy { dest, src } = inst {
-                direct_copies.insert(dest.0, src.clone());
+                let id = dest.0 as usize;
+                if id < direct.len() {
+                    direct[id] = Some(*src);
+                    has_copies = true;
+                }
             }
         }
     }
 
-    if direct_copies.is_empty() {
-        return direct_copies;
+    if !has_copies {
+        return direct; // all None
     }
 
     // Second pass: resolve chains with cycle detection
-    let mut resolved: FxHashMap<u32, Operand> = FxHashMap::default();
-
-    for &start_dest in direct_copies.keys() {
-        let resolved_src = resolve_chain(start_dest, &direct_copies);
-        resolved.insert(start_dest, resolved_src);
+    let mut resolved: Vec<Option<Operand>> = vec![None; max_id + 1];
+    for i in 0..=max_id {
+        if direct[i].is_some() {
+            resolved[i] = Some(resolve_chain(i as u32, &direct));
+        }
     }
 
     resolved
@@ -75,33 +86,29 @@ fn build_copy_map(func: &IrFunction) -> FxHashMap<u32, Operand> {
 /// Follow a chain of copies to find the ultimate source.
 /// Handles chains like: %a = Copy %b, %b = Copy %c => %a resolves to %c's source.
 /// Limits depth to prevent infinite loops from cycles.
-fn resolve_chain(start: u32, copies: &FxHashMap<u32, Operand>) -> Operand {
+fn resolve_chain(start: u32, copies: &[Option<Operand>]) -> Operand {
     let mut current = start;
     let mut depth = 0;
     const MAX_DEPTH: usize = 64;
 
     loop {
         if depth >= MAX_DEPTH {
-            // Safety limit: return what we have
             return Operand::Value(Value(current));
         }
 
-        match copies.get(&current) {
+        let idx = current as usize;
+        match if idx < copies.len() { copies[idx] } else { None } {
             Some(Operand::Value(v)) => {
                 if v.0 == current {
-                    // Self-copy, stop here
                     return Operand::Value(Value(current));
                 }
-                // Follow the chain
                 current = v.0;
                 depth += 1;
             }
             Some(Operand::Const(c)) => {
-                // Chain ends at a constant
-                return Operand::Const(c.clone());
+                return Operand::Const(c);
             }
             None => {
-                // Chain ends at a non-copy value
                 return Operand::Value(Value(current));
             }
         }
@@ -110,7 +117,7 @@ fn resolve_chain(start: u32, copies: &FxHashMap<u32, Operand>) -> Operand {
 
 /// Replace operands in an instruction that reference copied values.
 /// Returns the number of replacements made.
-fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &FxHashMap<u32, Operand>) -> usize {
+fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &[Option<Operand>]) -> usize {
     let mut count = 0;
 
     match inst {
@@ -222,7 +229,7 @@ fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &FxHashMap<
 }
 
 /// Replace operands in a terminator.
-fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &FxHashMap<u32, Operand>) -> usize {
+fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &[Option<Operand>]) -> usize {
     let mut count = 0;
     match term {
         Terminator::Return(Some(val)) => {
@@ -243,10 +250,12 @@ fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &FxHashMap<u3
 
 /// Replace an Operand if it references a copied value.
 /// Returns 1 if a replacement was made, 0 otherwise.
-fn replace_operand(op: &mut Operand, copy_map: &FxHashMap<u32, Operand>) -> usize {
+#[inline]
+fn replace_operand(op: &mut Operand, copy_map: &[Option<Operand>]) -> usize {
     if let Operand::Value(v) = op {
-        if let Some(replacement) = copy_map.get(&v.0) {
-            *op = replacement.clone();
+        let idx = v.0 as usize;
+        if let Some(Some(replacement)) = copy_map.get(idx) {
+            *op = *replacement;
             return 1;
         }
     }
@@ -256,13 +265,12 @@ fn replace_operand(op: &mut Operand, copy_map: &FxHashMap<u32, Operand>) -> usiz
 /// Replace a Value in-place if it references a copied value.
 /// Only replaces if the resolved source is also a Value (not a Const).
 /// Returns 1 if a replacement was made, 0 otherwise.
-fn replace_value_in_place(val: &mut Value, copy_map: &FxHashMap<u32, Operand>) -> usize {
-    if let Some(replacement) = copy_map.get(&val.0) {
-        if let Operand::Value(new_val) = replacement {
-            *val = *new_val;
-            return 1;
-        }
-        // Can't replace a Value field with a Const - skip
+#[inline]
+fn replace_value_in_place(val: &mut Value, copy_map: &[Option<Operand>]) -> usize {
+    let idx = val.0 as usize;
+    if let Some(Some(Operand::Value(new_val))) = copy_map.get(idx) {
+        *val = *new_val;
+        return 1;
     }
     0
 }

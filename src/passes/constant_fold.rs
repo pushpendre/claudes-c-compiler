@@ -27,25 +27,17 @@ fn fold_function(func: &mut IrFunction) -> usize {
 }
 
 /// Single pass of constant folding over a function.
+/// Edits instructions in-place to avoid allocating a new Vec per block.
 fn fold_function_once(func: &mut IrFunction) -> usize {
     let mut folded = 0;
 
     for block in &mut func.blocks {
-        let mut new_instructions = Vec::with_capacity(block.instructions.len());
-
-        for inst in block.instructions.drain(..) {
-            match try_fold(&inst) {
-                Some(folded_inst) => {
-                    new_instructions.push(folded_inst);
-                    folded += 1;
-                }
-                None => {
-                    new_instructions.push(inst);
-                }
+        for inst in &mut block.instructions {
+            if let Some(folded_inst) = try_fold(inst) {
+                *inst = folded_inst;
+                folded += 1;
             }
         }
-
-        block.instructions = new_instructions;
     }
 
     folded

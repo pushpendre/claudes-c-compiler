@@ -6,8 +6,11 @@
 //! dead values.
 //!
 //! Side-effecting instructions (stores, calls) are never removed.
+//!
+//! Performance: Uses a flat bitvector indexed by Value ID instead of a HashSet,
+//! since Value IDs are dense sequential u32s. This gives O(1) set/check with
+//! no hashing overhead and excellent cache locality.
 
-use crate::common::fx_hash::FxHashSet;
 use crate::ir::ir::*;
 
 /// Run dead code elimination on the entire module.
@@ -19,9 +22,35 @@ pub fn run(module: &mut IrModule) -> usize {
 /// Eliminate dead code in a single function.
 /// Iterates until no more dead code is found (fixpoint).
 fn eliminate_dead_code(func: &mut IrFunction) -> usize {
+    let max_id = func.max_value_id() as usize;
+    // Allocate the bitvector once and reuse across fixpoint iterations
+    let mut used = vec![false; max_id + 1];
     let mut total = 0;
     loop {
-        let removed = eliminate_dead_code_once(func);
+        // Clear for this iteration
+        for slot in used.iter_mut() {
+            *slot = false;
+        }
+        collect_used_values(func, &mut used);
+
+        let mut removed = 0;
+        for block in &mut func.blocks {
+            let original_len = block.instructions.len();
+            block.instructions.retain(|inst| {
+                if has_side_effects(inst) {
+                    return true;
+                }
+                match inst.dest() {
+                    Some(dest) => {
+                        let id = dest.0 as usize;
+                        id < used.len() && used[id]
+                    }
+                    None => true,
+                }
+            });
+            removed += original_len - block.instructions.len();
+        }
+
         if removed == 0 {
             break;
         }
@@ -30,183 +59,162 @@ fn eliminate_dead_code(func: &mut IrFunction) -> usize {
     total
 }
 
-/// Single pass of dead code elimination.
-fn eliminate_dead_code_once(func: &mut IrFunction) -> usize {
-    // Step 1: Collect all used values
-    let used_values = collect_used_values(func);
-
-    // Step 2: Remove instructions that define unused values (and have no side effects)
-    let mut removed = 0;
-    for block in &mut func.blocks {
-        let original_len = block.instructions.len();
-        block.instructions.retain(|inst| {
-            if has_side_effects(inst) {
-                return true; // never remove side-effecting instructions
-            }
-            match inst.dest() {
-                Some(dest) => used_values.contains(&dest.0),
-                None => true, // no dest means it's side-effecting (already covered above)
-            }
-        });
-        removed += original_len - block.instructions.len();
+/// Collect all Value IDs that are used in the function into a bitvector.
+fn collect_used_values(func: &IrFunction, used: &mut [bool]) {
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            collect_instruction_uses(inst, used);
+        }
+        collect_terminator_uses(&block.terminator, used);
     }
-
-    removed
 }
 
-/// Collect all Value IDs that are used in the function.
-fn collect_used_values(func: &IrFunction) -> FxHashSet<u32> {
-    let mut used = FxHashSet::default();
-
-    for block in &func.blocks {
-        // Collect uses from instructions
-        for inst in &block.instructions {
-            collect_instruction_uses(inst, &mut used);
-        }
-
-        // Collect uses from terminators
-        collect_terminator_uses(&block.terminator, &mut used);
+/// Mark a value as used in the bitvector.
+#[inline(always)]
+fn mark_used(used: &mut [bool], id: u32) {
+    let idx = id as usize;
+    if idx < used.len() {
+        used[idx] = true;
     }
+}
 
-    used
+/// Mark all values used by an operand.
+#[inline(always)]
+fn mark_operand_used(op: &Operand, used: &mut [bool]) {
+    if let Operand::Value(v) = op {
+        mark_used(used, v.0);
+    }
 }
 
 /// Record all values used by an instruction.
-fn collect_instruction_uses(inst: &Instruction, used: &mut FxHashSet<u32>) {
+fn collect_instruction_uses(inst: &Instruction, used: &mut [bool]) {
     match inst {
         Instruction::Alloca { .. } => {}
         Instruction::DynAlloca { size, .. } => {
-            collect_operand_uses(size, used);
+            mark_operand_used(size, used);
         }
         Instruction::Store { val, ptr, .. } => {
-            collect_operand_uses(val, used);
-            used.insert(ptr.0);
+            mark_operand_used(val, used);
+            mark_used(used, ptr.0);
         }
         Instruction::Load { ptr, .. } => {
-            used.insert(ptr.0);
+            mark_used(used, ptr.0);
         }
         Instruction::BinOp { lhs, rhs, .. } => {
-            collect_operand_uses(lhs, used);
-            collect_operand_uses(rhs, used);
+            mark_operand_used(lhs, used);
+            mark_operand_used(rhs, used);
         }
         Instruction::UnaryOp { src, .. } => {
-            collect_operand_uses(src, used);
+            mark_operand_used(src, used);
         }
         Instruction::Cmp { lhs, rhs, .. } => {
-            collect_operand_uses(lhs, used);
-            collect_operand_uses(rhs, used);
+            mark_operand_used(lhs, used);
+            mark_operand_used(rhs, used);
         }
         Instruction::Call { args, .. } => {
             for arg in args {
-                collect_operand_uses(arg, used);
+                mark_operand_used(arg, used);
             }
         }
         Instruction::CallIndirect { func_ptr, args, .. } => {
-            collect_operand_uses(func_ptr, used);
+            mark_operand_used(func_ptr, used);
             for arg in args {
-                collect_operand_uses(arg, used);
+                mark_operand_used(arg, used);
             }
         }
         Instruction::GetElementPtr { base, offset, .. } => {
-            used.insert(base.0);
-            collect_operand_uses(offset, used);
+            mark_used(used, base.0);
+            mark_operand_used(offset, used);
         }
         Instruction::Cast { src, .. } => {
-            collect_operand_uses(src, used);
+            mark_operand_used(src, used);
         }
         Instruction::Copy { src, .. } => {
-            collect_operand_uses(src, used);
+            mark_operand_used(src, used);
         }
         Instruction::GlobalAddr { .. } => {}
         Instruction::Memcpy { dest, src, .. } => {
-            used.insert(dest.0);
-            used.insert(src.0);
+            mark_used(used, dest.0);
+            mark_used(used, src.0);
         }
         Instruction::VaArg { va_list_ptr, .. } => {
-            used.insert(va_list_ptr.0);
+            mark_used(used, va_list_ptr.0);
         }
         Instruction::VaStart { va_list_ptr } => {
-            used.insert(va_list_ptr.0);
+            mark_used(used, va_list_ptr.0);
         }
         Instruction::VaEnd { va_list_ptr } => {
-            used.insert(va_list_ptr.0);
+            mark_used(used, va_list_ptr.0);
         }
         Instruction::VaCopy { dest_ptr, src_ptr } => {
-            used.insert(dest_ptr.0);
-            used.insert(src_ptr.0);
+            mark_used(used, dest_ptr.0);
+            mark_used(used, src_ptr.0);
         }
         Instruction::AtomicRmw { ptr, val, .. } => {
-            collect_operand_uses(ptr, used);
-            collect_operand_uses(val, used);
+            mark_operand_used(ptr, used);
+            mark_operand_used(val, used);
         }
         Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
-            collect_operand_uses(ptr, used);
-            collect_operand_uses(expected, used);
-            collect_operand_uses(desired, used);
+            mark_operand_used(ptr, used);
+            mark_operand_used(expected, used);
+            mark_operand_used(desired, used);
         }
         Instruction::AtomicLoad { ptr, .. } => {
-            collect_operand_uses(ptr, used);
+            mark_operand_used(ptr, used);
         }
         Instruction::AtomicStore { ptr, val, .. } => {
-            collect_operand_uses(ptr, used);
-            collect_operand_uses(val, used);
+            mark_operand_used(ptr, used);
+            mark_operand_used(val, used);
         }
         Instruction::Fence { .. } => {}
         Instruction::Phi { incoming, .. } => {
             for (op, _label) in incoming {
-                collect_operand_uses(op, used);
+                mark_operand_used(op, used);
             }
         }
         Instruction::LabelAddr { .. } => {}
         Instruction::GetReturnF64Second { .. } => {}
         Instruction::GetReturnF32Second { .. } => {}
         Instruction::SetReturnF64Second { src } => {
-            collect_operand_uses(src, used);
+            mark_operand_used(src, used);
         }
         Instruction::SetReturnF32Second { src } => {
-            collect_operand_uses(src, used);
+            mark_operand_used(src, used);
         }
         Instruction::InlineAsm { outputs, inputs, .. } => {
             for (_, ptr, _) in outputs {
-                used.insert(ptr.0);
+                mark_used(used, ptr.0);
             }
             for (_, op, _) in inputs {
-                collect_operand_uses(op, used);
+                mark_operand_used(op, used);
             }
         }
         Instruction::Intrinsic { dest_ptr, args, .. } => {
             if let Some(ptr) = dest_ptr {
-                used.insert(ptr.0);
+                mark_used(used, ptr.0);
             }
             for arg in args {
-                collect_operand_uses(arg, used);
+                mark_operand_used(arg, used);
             }
         }
     }
 }
 
 /// Record all values used by a terminator.
-fn collect_terminator_uses(term: &Terminator, used: &mut FxHashSet<u32>) {
+fn collect_terminator_uses(term: &Terminator, used: &mut [bool]) {
     match term {
         Terminator::Return(Some(val)) => {
-            collect_operand_uses(val, used);
+            mark_operand_used(val, used);
         }
         Terminator::Return(None) => {}
         Terminator::Branch(_) => {}
         Terminator::CondBranch { cond, .. } => {
-            collect_operand_uses(cond, used);
+            mark_operand_used(cond, used);
         }
         Terminator::IndirectBranch { target, .. } => {
-            collect_operand_uses(target, used);
+            mark_operand_used(target, used);
         }
         Terminator::Unreachable => {}
-    }
-}
-
-/// Record value uses from an operand.
-fn collect_operand_uses(op: &Operand, used: &mut FxHashSet<u32>) {
-    if let Operand::Value(v) = op {
-        used.insert(v.0);
     }
 }
 
@@ -280,13 +288,15 @@ mod tests {
     #[test]
     fn test_collect_used_values() {
         let func = make_simple_func();
-        let used = collect_used_values(&func);
+        let max_id = func.max_value_id() as usize;
+        let mut used = vec![false; max_id + 1];
+        collect_used_values(&func, &mut used);
         // Value(0) is used by Store and Load
-        assert!(used.contains(&0));
+        assert!(used[0]);
         // Value(1) is dead (not used anywhere)
-        assert!(!used.contains(&1));
+        assert!(!used[1]);
         // Value(2) is used by Return
-        assert!(used.contains(&2));
+        assert!(used[2]);
     }
 
     #[test]

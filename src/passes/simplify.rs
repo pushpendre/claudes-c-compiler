@@ -32,19 +32,12 @@ pub fn run(module: &mut IrModule) -> usize {
 fn simplify_function(func: &mut IrFunction) -> usize {
     let mut total = 0;
     for block in &mut func.blocks {
-        let mut new_instructions = Vec::with_capacity(block.instructions.len());
-        for inst in block.instructions.drain(..) {
-            match try_simplify(&inst) {
-                Some(simplified) => {
-                    new_instructions.push(simplified);
-                    total += 1;
-                }
-                None => {
-                    new_instructions.push(inst);
-                }
+        for inst in &mut block.instructions {
+            if let Some(simplified) = try_simplify(inst) {
+                *inst = simplified;
+                total += 1;
             }
         }
-        block.instructions = new_instructions;
     }
     total
 }
