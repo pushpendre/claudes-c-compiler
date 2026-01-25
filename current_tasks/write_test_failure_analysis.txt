@@ -1,0 +1,9 @@
+Task: Write comprehensive test failure analysis files for all three architectures
+Status: In Progress
+Date: 2026-01-25
+
+Goal: Run the full test suite on x86, ARM, and RISC-V, categorize all failures,
+and write ideas/fix_remaining_{x86,arm,riscv}_tests.txt with actionable analysis.
+
+Additionally, identify and fix one category of failures (likely __label__ local labels
+support, which causes compile errors across all 3 architectures).
