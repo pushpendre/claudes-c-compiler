@@ -1,24 +1,21 @@
 //! x86-64 peephole optimizer for assembly text.
 //!
-//! This pass operates on the generated assembly text, scanning for and eliminating
-//! common redundant instruction patterns that arise from the stack-based codegen:
+//! Operates on generated assembly text to eliminate redundant patterns from the
+//! stack-based codegen. Lines are pre-parsed into `LineInfo` structs so hot-path
+//! pattern matching uses integer/enum comparisons instead of string parsing.
 //!
-//! 1. Redundant store/load: `movq %rax, N(%rbp)` followed by `movq N(%rbp), %rax`
-//!    -> eliminates the load (value is already in %rax)
+//! ## Pass structure
 //!
-//! 2. Store then load to different reg: `movq %rax, N(%rbp)` followed by
-//!    `movq N(%rbp), %rcx` -> replaces load with `movq %rax, %rcx`
+//! 1. **Local passes** (iterative, up to 8 rounds): `combined_local_pass` merges
+//!    5 single-scan patterns (adjacent store/load, redundant jumps, self-moves,
+//!    redundant cltq, redundant zero/sign extensions) plus push/pop elimination
+//!    and binary-op push/pop rewriting.
 //!
-//! 3. Redundant jump: `jmp .Lfoo` where `.Lfoo:` is the very next label
-//!    -> eliminates the jump
+//! 2. **Global passes** (once): compare-and-branch fusion, global store forwarding
+//!    (across fallthrough labels), and dead store elimination.
 //!
-//! 4. Push/pop elimination: `pushq %rax` / `movq %rax, %rcx` / `popq %rax`
-//!    -> replaces with `movq %rax, %rcx` (saves the push/pop pair when the
-//!    pushed value is immediately restored)
-//!
-//! Performance: Lines are pre-parsed into `LineInfo` structs on entry. Pattern
-//! matching uses integer/enum comparisons instead of repeated string parsing.
-//! When a line is mutated, only that line's `LineInfo` is re-parsed.
+//! 3. **Local cleanup** (up to 4 rounds): re-run local passes to clean up
+//!    opportunities exposed by global passes.
 
 // ── Pre-parsed line metadata ─────────────────────────────────────────────────
 
@@ -268,20 +265,28 @@ fn fast_parse_i32(s: &str) -> i32 {
 
 // ── Existing string-level parsers (used once during classify and for mutations) ──
 
+/// Strip a `mov*` prefix from an instruction, returning the remainder and size.
+/// Handles movq, movl, movw, movb, and optionally movslq (for load parsing).
+fn strip_mov_prefix(s: &str, allow_slq: bool) -> Option<(&str, MoveSize)> {
+    if let Some(r) = s.strip_prefix("movq ") {
+        Some((r, MoveSize::Q))
+    } else if let Some(r) = s.strip_prefix("movl ") {
+        Some((r, MoveSize::L))
+    } else if let Some(r) = s.strip_prefix("movw ") {
+        Some((r, MoveSize::W))
+    } else if let Some(r) = s.strip_prefix("movb ") {
+        Some((r, MoveSize::B))
+    } else if allow_slq {
+        s.strip_prefix("movslq ").map(|r| (r, MoveSize::SLQ))
+    } else {
+        None
+    }
+}
+
 /// Parse `movX %reg, offset(%rbp)` (store to rbp-relative slot).
 /// Returns (register_str, offset_str, size).
 fn parse_store_to_rbp_str(s: &str) -> Option<(&str, &str, MoveSize)> {
-    let (rest, size) = if let Some(r) = s.strip_prefix("movq ") {
-        (r, MoveSize::Q)
-    } else if let Some(r) = s.strip_prefix("movl ") {
-        (r, MoveSize::L)
-    } else if let Some(r) = s.strip_prefix("movw ") {
-        (r, MoveSize::W)
-    } else if let Some(r) = s.strip_prefix("movb ") {
-        (r, MoveSize::B)
-    } else {
-        return None;
-    };
+    let (rest, size) = strip_mov_prefix(s, false)?;
 
     let (src, dst) = rest.split_once(',')?;
     let src = src.trim();
@@ -301,19 +306,7 @@ fn parse_store_to_rbp_str(s: &str) -> Option<(&str, &str, MoveSize)> {
 /// Parse `movX offset(%rbp), %reg` or `movslq offset(%rbp), %reg` (load from rbp).
 /// Returns (offset_str, register_str, size).
 fn parse_load_from_rbp_str(s: &str) -> Option<(&str, &str, MoveSize)> {
-    let (rest, size) = if let Some(r) = s.strip_prefix("movq ") {
-        (r, MoveSize::Q)
-    } else if let Some(r) = s.strip_prefix("movl ") {
-        (r, MoveSize::L)
-    } else if let Some(r) = s.strip_prefix("movw ") {
-        (r, MoveSize::W)
-    } else if let Some(r) = s.strip_prefix("movb ") {
-        (r, MoveSize::B)
-    } else if let Some(r) = s.strip_prefix("movslq ") {
-        (r, MoveSize::SLQ)
-    } else {
-        return None;
-    };
+    let (rest, size) = strip_mov_prefix(s, true)?;
 
     let (src, dst) = rest.split_once(',')?;
     let src = src.trim();
@@ -535,20 +528,7 @@ fn combined_local_pass(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
             let next = trim_asm(&lines[ext_idx]);
             let prev = trim_asm(&lines[i]);
 
-            // --- Pattern: redundant cltq after movslq/movq$ ---
-            if next == "cltq" {
-                // movslq already sign-extends, cltq is redundant
-                if (prev.starts_with("movslq ") && prev.contains("%rax"))
-                    || (prev.starts_with("movq $") && prev.ends_with("%rax"))
-                {
-                    mark_nop(&mut lines[ext_idx], &mut infos[ext_idx]);
-                    changed = true;
-                    i += 1;
-                    continue;
-                }
-            }
-
-            // --- Pattern: redundant zero/sign extension ---
+            // --- Pattern: redundant zero/sign extension (including cltq) ---
             let is_redundant_ext = {
                 if next == "movzbq %al, %rax" {
                     prev.starts_with("movzbq ") && prev.ends_with("%rax")
@@ -591,83 +571,7 @@ fn combined_local_pass(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     changed
 }
 
-// ── Adjacent store/load optimization (kept for reference but no longer called
-// directly from the main loop — merged into combined_local_pass) ──────────────
-//   movq %rax, -8(%rbp); movq -8(%rbp), %rax  →  movq %rax, -8(%rbp)   [eliminated]
-//   movq %rax, -8(%rbp); movq -8(%rbp), %rcx  →  movq %rax, -8(%rbp); movq %rax, %rcx
-
-#[allow(dead_code)]
-fn eliminate_adjacent_store_load(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
-    let mut changed = false;
-    let len = lines.len();
-
-    for i in 0..len.saturating_sub(1) {
-        if infos[i].is_nop() || infos[i + 1].is_nop() {
-            continue;
-        }
-
-        if let LineKind::StoreRbp { reg: sr, offset: so, size: ss } = infos[i].kind {
-            if let LineKind::LoadRbp { reg: lr, offset: lo, size: ls } = infos[i + 1].kind {
-                if so == lo && ss == ls {
-                    if sr == lr {
-                        // Same register: load is redundant
-                        mark_nop(&mut lines[i + 1], &mut infos[i + 1]);
-                        changed = true;
-                    } else {
-                        // Different register: replace with reg-to-reg move
-                        let store_line = trim_asm(&lines[i]);
-                        let (store_reg, _, _) = parse_store_to_rbp_str(store_line).unwrap();
-                        let load_line = trim_asm(&lines[i + 1]);
-                        let (_, load_reg, _) = parse_load_from_rbp_str(load_line).unwrap();
-                        let new_text = format!("    {} {}, {}", ss.mnemonic(), store_reg, load_reg);
-                        replace_line(&mut lines[i + 1], &mut infos[i + 1], new_text);
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    changed
-}
-
-// ── Pattern 3: Redundant jumps (merged into combined_local_pass) ─────────────
-
-#[allow(dead_code)]
-fn eliminate_redundant_jumps(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
-    let mut changed = false;
-    let len = lines.len();
-
-    for i in 0..len.saturating_sub(1) {
-        if infos[i].kind != LineKind::Jmp {
-            continue;
-        }
-
-        let jmp_line = trim_asm(&lines[i]);
-        if let Some(target) = jmp_line.strip_prefix("jmp ") {
-            let target = target.trim();
-            // Find the next non-NOP, non-empty line
-            for j in (i + 1)..len {
-                if infos[j].is_nop() || infos[j].kind == LineKind::Empty {
-                    continue;
-                }
-                // Check if it's the target label
-                if infos[j].kind == LineKind::Label {
-                    let next = trim_asm(&lines[j]);
-                    if let Some(label) = next.strip_suffix(':') {
-                        if label == target {
-                            mark_nop(&mut lines[i], &mut infos[i]);
-                            changed = true;
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    }
-    changed
-}
-
-// ── Pattern 4: Push/pop pair elimination ─────────────────────────────────────
+// ── Push/pop pair elimination ─────────────────────────────────────────────────
 
 fn eliminate_push_pop_pairs(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
@@ -745,7 +649,7 @@ fn instruction_modifies_reg_id(info: &LineInfo, reg_id: RegId) -> bool {
     }
 }
 
-// ── Pattern 5: Binary-op push/pop pattern ────────────────────────────────────
+// ── Binary-op push/pop pattern ────────────────────────────────────────────────
 
 fn eliminate_binop_push_pop_pattern(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
@@ -809,25 +713,7 @@ fn eliminate_binop_push_pop_pattern(lines: &mut [String], infos: &mut [LineInfo]
     changed
 }
 
-// ── Pattern 6: Redundant self-moves (merged into combined_local_pass) ────────
-
-#[allow(dead_code)]
-fn eliminate_redundant_movq_self(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
-    let mut changed = false;
-    for i in 0..lines.len() {
-        if infos[i].is_nop() {
-            continue;
-        }
-        let trimmed = trim_asm(&lines[i]);
-        if is_self_move(trimmed) {
-            mark_nop(&mut lines[i], &mut infos[i]);
-            changed = true;
-        }
-    }
-    changed
-}
-
-// ── Pattern 7: Compare-and-branch fusion ─────────────────────────────────────
+// ── Compare-and-branch fusion ─────────────────────────────────────────────────
 
 fn fuse_compare_and_branch(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
@@ -941,43 +827,7 @@ fn fuse_compare_and_branch(lines: &mut [String], infos: &mut [LineInfo]) -> bool
 }
 
 
-// ── Pattern 9: Redundant cltq after movslq (merged into combined_local_pass) ──
-
-#[allow(dead_code)]
-fn eliminate_redundant_cltq(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
-    let mut changed = false;
-    let len = lines.len();
-
-    for i in 0..len.saturating_sub(1) {
-        if infos[i].is_nop() || infos[i + 1].is_nop() {
-            continue;
-        }
-
-        let curr_is_cltq = trim_asm(&lines[i + 1]) == "cltq";
-        if !curr_is_cltq {
-            continue;
-        }
-
-        let prev = trim_asm(&lines[i]);
-
-        // movslq already sign-extends, cltq is redundant
-        if prev.starts_with("movslq ") && prev.contains("%rax") {
-            mark_nop(&mut lines[i + 1], &mut infos[i + 1]);
-            changed = true;
-            continue;
-        }
-
-        // movq $IMM, %rax followed by cltq is also redundant
-        if prev.starts_with("movq $") && prev.ends_with("%rax") {
-            mark_nop(&mut lines[i + 1], &mut infos[i + 1]);
-            changed = true;
-        }
-    }
-
-    changed
-}
-
-// ── Pattern 10: Dead store elimination ───────────────────────────────────────
+// ── Dead store elimination ────────────────────────────────────────────────────
 
 fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
@@ -1224,115 +1074,6 @@ fn invert_cc(cc: &str) -> &str {
     }
 }
 
-/// Pattern 10b: Eliminate redundant zero/sign-extension after instructions that
-/// already produce a fully extended result.
-///
-/// Examples:
-///   movzbq (%rcx), %rax / movzbq %al, %rax  -> remove second movzbq
-///   movzwq (%rcx), %rax / movzwq %ax, %rax  -> remove second movzwq
-///   movsbq (%rcx), %rax / movsbq %al, %rax  -> remove second movsbq
-///   movslq (%rcx), %rax / movslq %eax, %rax -> remove second movslq
-///   addl %ecx, %eax / cltq / cltq           -> remove second cltq
-///
-/// Also: movzbq %al, %rax after cmpq/testq + setCC + movzbq is redundant
-/// (the setCC + first movzbq already produces a zero-extended result).
-///
-/// We handle the general case: if instruction N writes a zero/sign-extended
-/// value to %rax, and instruction N+1 or N+2 does the same extension again,
-/// the second one is redundant.
-#[allow(dead_code)]
-fn eliminate_redundant_zero_extend(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
-    let mut changed = false;
-    let len = lines.len();
-
-    for i in 0..len.saturating_sub(1) {
-        if infos[i].is_nop() {
-            continue;
-        }
-
-        // Find the next non-NOP instruction after i
-        let mut ext_idx = i + 1;
-        // Look through intervening stores to rbp (which don't modify %rax)
-        // Use a wider window (up to 10) to catch cases where many SSA copies
-        // create multiple stores between the producing instruction and the
-        // redundant extension.
-        while ext_idx < len && ext_idx < i + 10 {
-            if infos[ext_idx].is_nop() {
-                ext_idx += 1;
-                continue;
-            }
-            // Skip stores to rbp - they read %rax but don't modify it
-            if matches!(infos[ext_idx].kind, LineKind::StoreRbp { .. }) {
-                ext_idx += 1;
-                continue;
-            }
-            break;
-        }
-
-        if ext_idx >= len || infos[ext_idx].is_nop() {
-            continue;
-        }
-
-        let next = trim_asm(&lines[ext_idx]);
-        let prev = trim_asm(&lines[i]);
-
-        // Check if the next instruction is a redundant zero/sign extension to rax
-        let is_redundant_ext = {
-            // movzbq %al, %rax after movzbq <mem>, %rax
-            if next == "movzbq %al, %rax" {
-                prev.starts_with("movzbq ") && prev.ends_with("%rax")
-            }
-            // movzwq %ax, %rax after movzwq <mem>, %rax
-            else if next == "movzwq %ax, %rax" {
-                prev.starts_with("movzwq ") && prev.ends_with("%rax")
-            }
-            // movsbq %al, %rax after movsbq <mem>, %rax
-            else if next == "movsbq %al, %rax" {
-                prev.starts_with("movsbq ") && prev.ends_with("%rax")
-            }
-            // movslq %eax, %rax after movslq <mem>, %rax
-            else if next == "movslq %eax, %rax" {
-                prev.starts_with("movslq ") && prev.ends_with("%rax")
-            }
-            // movl %eax, %eax (zero-extend 32->64) after operations that already
-            // produce a zero-extended 32-bit result:
-            // - addl/subl/imull/andl/orl/xorl write eax (auto-zeroes upper 32 bits)
-            // - movl <mem>, %eax (auto-zeroes upper 32 bits)
-            // - movzbl/movzbq already zero-extends
-            else if next == "movl %eax, %eax" {
-                prev.starts_with("addl ") || prev.starts_with("subl ")
-                    || prev.starts_with("imull ") || prev.starts_with("andl ")
-                    || prev.starts_with("orl ") || prev.starts_with("xorl ")
-                    || prev.starts_with("shll ") || prev.starts_with("shrl ")
-                    || (prev.starts_with("movl ") && prev.ends_with("%eax"))
-                    || (prev.starts_with("movzbl ") && prev.ends_with("%eax"))
-                    || (prev.starts_with("movzbq ") && prev.ends_with("%rax"))
-                    || (prev.starts_with("movzwl ") && prev.ends_with("%eax"))
-                    || (prev.starts_with("movzwq ") && prev.ends_with("%rax"))
-                    || prev == "divl %ecx" || prev == "idivl %ecx"
-            }
-            // cltq after movslq ... %rax (sign-extend already done)
-            // Also: cltq after addl/subl etc. + cltq (already handled by eliminate_redundant_cltq)
-            else if next == "cltq" {
-                // Already covered by eliminate_redundant_cltq for adjacent, but
-                // handle through intervening stores here
-                (prev.starts_with("movslq ") && prev.ends_with("%rax"))
-                    || (prev.starts_with("movq $") && prev.ends_with("%rax"))
-            }
-            else {
-                false
-            }
-        };
-
-        if is_redundant_ext {
-            mark_nop(&mut lines[ext_idx], &mut infos[ext_idx]);
-            changed = true;
-        }
-    }
-
-    changed
-}
-
 /// Check if two register names overlap (e.g., %eax overlaps with %rax).
 fn register_overlaps(a: &str, b: &str) -> bool {
     if a == b {
@@ -1366,21 +1107,16 @@ fn register_family(reg: &str) -> Option<u8> {
     }
 }
 
-// ── Pattern 12: Global store forwarding across basic block boundaries ─────────
+// ── Global store forwarding across basic block boundaries ─────────────────────
 //
-// The existing store forwarding (Pattern 8) stops at labels and jumps.
-// This pass does a full-function scan that tracks register→slot mappings,
-// allowing store-to-load forwarding to cross fallthrough label boundaries.
+// Tracks register→slot mappings across the function, forwarding stored values
+// to subsequent loads. Key insight: at a label reached only by fallthrough (not
+// a jump target), register state from the previous instruction is fully known,
+// so we can safely forward across such labels.
 //
-// Key insight: At a label that is only reached by fallthrough (not targeted by
-// any jump), the register state from the previous instruction is fully known.
-// We can safely forward stored values across such labels.
-//
-// For labels that ARE jump targets, we must invalidate all mappings because
-// the jump source may have different register values.
-//
-// This optimization is critical for loops in the stack-based codegen model,
-// where the loop body spans multiple basic blocks separated by labels.
+// For labels that ARE jump targets, all mappings are invalidated because the
+// jump source may have different register values. This is critical for loops
+// in the stack-based codegen model.
 
 /// A tracked store mapping: we know that stack slot at `offset` contains the
 /// value that was in register `reg_id` with the given `size`.
@@ -1390,6 +1126,16 @@ struct SlotMapping {
     size: MoveSize,
     /// Index of the store instruction that created this mapping
     store_idx: usize,
+}
+
+/// Clear all slot→register mappings. Used at control flow boundaries
+/// (jump targets, returns, unconditional jumps) where register state is unknown.
+#[inline]
+fn invalidate_all_mappings(slot_entries: &mut Vec<SlotEntry>, reg_offsets: &mut [SmallVec; 16]) {
+    slot_entries.clear();
+    for rs in reg_offsets.iter_mut() {
+        rs.clear();
+    }
 }
 
 fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
@@ -1470,10 +1216,7 @@ fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool
                     // This label has multiple predecessors (jump target) or follows
                     // unreachable code (after unconditional jump). We can't know what
                     // register state the jumping block leaves, so invalidate all mappings.
-                    slot_entries.clear();
-                    for rs in reg_offsets.iter_mut() {
-                        rs.clear();
-                    }
+                    invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
                 }
                 // Fallthrough-only labels keep mappings intact.
                 prev_was_unconditional_jump = false;
@@ -1542,10 +1285,7 @@ fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool
                 // After an unconditional jump, execution continues at the target.
                 // We can't know the state at the target (it may have other
                 // predecessors), so clear everything.
-                slot_entries.clear();
-                for rs in reg_offsets.iter_mut() {
-                    rs.clear();
-                }
+                invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
                 prev_was_unconditional_jump = true;
             }
 
@@ -1566,10 +1306,7 @@ fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool
 
             LineKind::Ret => {
                 // End of function; clear everything.
-                slot_entries.clear();
-                for rs in reg_offsets.iter_mut() {
-                    rs.clear();
-                }
+                invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
                 prev_was_unconditional_jump = true;
             }
 
@@ -1607,10 +1344,7 @@ fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool
                 // Indirect memory access through a register (e.g., movl %edx, (%rcx))
                 // could write to any stack slot, invalidating all slot→register mappings.
                 if has_indirect_memory_access(trim_asm(&lines[i])) {
-                    slot_entries.clear();
-                    for rs in reg_offsets.iter_mut() {
-                        rs.clear();
-                    }
+                    invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
                 }
                 prev_was_unconditional_jump = false;
             }
