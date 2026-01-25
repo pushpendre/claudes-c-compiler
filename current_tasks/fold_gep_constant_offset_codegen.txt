@@ -1,0 +1,28 @@
+Task: Fold GEP with constant offset into Load/Store addressing modes
+
+Problem:
+Every struct field access generates a GEP with a constant offset followed by
+a Load or Store. Currently this produces 6-7 instructions:
+
+    leaq  -48(%rbp), %rcx    # base: address of struct alloca
+    movq  $8, %rax            # offset: constant field offset
+    addq  %rcx, %rax          # ptr = base + 8
+    movq  %rax, -56(%rbp)     # store GEP result
+    movq  -56(%rbp), %rcx     # reload GEP result (peephole may remove this)
+    movl  (%rcx), %eax        # load through pointer
+
+With constant offset folding, alloca+const GEP+Load becomes just:
+    movl  -40(%rbp), %eax     # load from (alloca_offset + 8)(%rbp) directly
+
+For indirect bases, GEP(indirect_ptr, N)+Load becomes:
+    movq  -16(%rbp), %rcx     # load base pointer
+    movl  N(%rcx), %eax       # load with displacement
+
+Plan:
+1. In generate_instruction, detect GEP with Const offset followed by Load/Store
+2. In the GEP case, if the offset is constant and the GEP result has exactly
+   one use (the immediately following Load or Store), fold the offset into the
+   load/store addressing mode
+3. Add new emit methods that support displacement in load/store (emit_typed_load_indirect_offset)
+4. Handle both alloca (Direct) and pointer (Indirect) base cases
+5. Works for all three backends by extending the trait
