@@ -1,0 +1,1 @@
+implement __attribute__((section("..."))) support for functions and globals
