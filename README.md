@@ -66,6 +66,9 @@ See `git log` for full history. Key milestones:
 - Inline assembly support for x86, ARM, and RISC-V
 - Transparent union ABI, `__int128`, `_Complex` arithmetic
 - Compiles Lua, zlib, mbedtls, libpng, jq, SQLite, libjpeg-turbo successfully
+- GCC-compatible query flags (-dumpmachine, -dumpversion) for autoconf support
+- Assembly file (.S/.s) passthrough to target assembler
+- XMM register "x" constraint support for x86 inline assembly
 
 ### Project Build Status
 
@@ -84,6 +87,9 @@ See `git log` for full history. Key milestones:
 | liburing | PARTIAL | Builds successfully; tests require io_uring kernel support |
 | mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | postgres | PARTIAL | Build succeeds; `make check` initdb fails during regression |
+| musl | PARTIAL | Builds successfully; test programs fail to link (missing `__attribute__((alias))` support) |
+| libffi | PARTIAL | Builds with .S passthrough; runtime tests crash (complex asm/stack manipulation) |
+| tcc | FAIL | Build fails: preprocessor/conditional compilation issues with arch-specific defines |
 
 ### What's Not Yet Implemented
 - Some GNU C extensions in system headers (partial `__attribute__` support)

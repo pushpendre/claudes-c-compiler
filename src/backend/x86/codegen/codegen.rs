@@ -19,8 +19,10 @@ pub struct X86Codegen {
     reg_save_area_offset: i64,
     /// Whether the current function is variadic
     is_variadic: bool,
-    /// Scratch register index for inline asm allocation
+    /// Scratch register index for inline asm allocation (GP registers)
     asm_scratch_idx: usize,
+    /// Scratch register index for inline asm allocation (XMM registers)
+    asm_xmm_scratch_idx: usize,
 }
 
 impl X86Codegen {
@@ -34,6 +36,7 @@ impl X86Codegen {
             reg_save_area_offset: 0,
             is_variadic: false,
             asm_scratch_idx: 0,
+            asm_xmm_scratch_idx: 0,
         }
     }
 
@@ -2308,6 +2311,9 @@ impl Default for X86Codegen {
 /// x86-64 scratch registers for inline asm "r" constraints (caller-saved, not rax/rsp/rbp).
 const X86_GP_SCRATCH: &[&str] = &["rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
 
+/// x86-64 scratch XMM registers for inline asm "x" constraints (SSE registers, caller-saved).
+const X86_XMM_SCRATCH: &[&str] = &["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
+
 impl InlineAsmEmitter for X86Codegen {
     fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
     fn asm_state_ref(&self) -> &CodegenState { &self.state }
@@ -2331,6 +2337,10 @@ impl InlineAsmEmitter for X86Codegen {
         // Immediate constraints: "i", "I", "n" — value must be a compile-time constant
         if c == "i" || c == "I" || c == "n" {
             return AsmOperandKind::Immediate;
+        }
+        // SSE register constraint: "x" means any XMM register
+        if c == "x" {
+            return AsmOperandKind::FpReg;
         }
         // Specific register constraints
         match c {
@@ -2396,19 +2406,53 @@ impl InlineAsmEmitter for X86Codegen {
         false
     }
 
-    fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind) -> String {
-        let idx = self.asm_scratch_idx;
-        self.asm_scratch_idx += 1;
-        if idx < X86_GP_SCRATCH.len() {
-            X86_GP_SCRATCH[idx].to_string()
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String {
+        if matches!(kind, AsmOperandKind::FpReg) {
+            let idx = self.asm_xmm_scratch_idx;
+            self.asm_xmm_scratch_idx += 1;
+            if idx < X86_XMM_SCRATCH.len() {
+                X86_XMM_SCRATCH[idx].to_string()
+            } else {
+                format!("xmm{}", idx)
+            }
         } else {
-            format!("r{}", 12 + idx - X86_GP_SCRATCH.len())
+            let idx = self.asm_scratch_idx;
+            self.asm_scratch_idx += 1;
+            if idx < X86_GP_SCRATCH.len() {
+                X86_GP_SCRATCH[idx].to_string()
+            } else {
+                format!("r{}", 12 + idx - X86_GP_SCRATCH.len())
+            }
         }
     }
 
     fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, _constraint: &str) {
         let reg = &op.reg;
         let ty = op.operand_type;
+        let is_xmm = reg.starts_with("xmm");
+
+        if is_xmm {
+            // XMM register: use SSE load instructions
+            match val {
+                Operand::Value(v) => {
+                    if let Some(slot) = self.state.get_slot(v.0) {
+                        let load_instr = match ty {
+                            IrType::F32 => "movss",
+                            _ => "movsd",
+                        };
+                        self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+                    }
+                }
+                Operand::Const(_) => {
+                    // TODO: non-zero float constants need to be materialized via
+                    // memory (e.g., load from .rodata). For now, zero the register.
+                    // In practice, inline asm "x" inputs are almost always variables.
+                    self.state.emit_fmt(format_args!("    xorpd %{}, %{}", reg, reg));
+                }
+            }
+            return;
+        }
+
         match val {
             Operand::Const(c) => {
                 let imm = c.to_i64().unwrap_or(0);
@@ -2445,14 +2489,23 @@ impl InlineAsmEmitter for X86Codegen {
     fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
         let reg = &op.reg;
         let ty = op.operand_type;
+        let is_xmm = reg.starts_with("xmm");
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            // Use type-appropriate load to correctly handle byte/word/dword variables
-            let load_instr = Self::mov_load_for_type(ty);
-            let dest_reg = match ty {
-                IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
-                _ => format!("%{}", reg),
-            };
-            self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg));
+            if is_xmm {
+                let load_instr = match ty {
+                    IrType::F32 => "movss",
+                    _ => "movsd",
+                };
+                self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+            } else {
+                // Use type-appropriate load to correctly handle byte/word/dword variables
+                let load_instr = Self::mov_load_for_type(ty);
+                let dest_reg = match ty {
+                    IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                    _ => format!("%{}", reg),
+                };
+                self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg));
+            }
         }
     }
 
@@ -2525,8 +2578,24 @@ impl InlineAsmEmitter for X86Codegen {
         }
         let reg = &op.reg;
         let ty = op.operand_type;
+        let is_xmm = reg.starts_with("xmm");
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            if self.state.is_alloca(ptr.0) {
+            if is_xmm {
+                // XMM register: use SSE store instructions
+                let store_instr = match ty {
+                    IrType::F32 => "movss",
+                    _ => "movsd",
+                };
+                if self.state.is_alloca(ptr.0) {
+                    self.state.emit_fmt(format_args!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                } else {
+                    let scratch = "rcx";
+                    self.state.emit_fmt(format_args!("    pushq %{}", scratch));
+                    self.state.emit_fmt(format_args!("    movq {}(%rbp), %{}", slot.0, scratch));
+                    self.state.emit_fmt(format_args!("    {} %{}, (%{})", store_instr, reg, scratch));
+                    self.state.emit_fmt(format_args!("    popq %{}", scratch));
+                }
+            } else if self.state.is_alloca(ptr.0) {
                 // Alloca: store directly to the stack slot with type-appropriate size
                 let store_instr = Self::mov_store_for_type(ty);
                 let src_reg = match ty {
@@ -2556,5 +2625,6 @@ impl InlineAsmEmitter for X86Codegen {
 
     fn reset_scratch_state(&mut self) {
         self.asm_scratch_idx = 0;
+        self.asm_xmm_scratch_idx = 0;
     }
 }

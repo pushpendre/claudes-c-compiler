@@ -197,7 +197,12 @@ impl X86Codegen {
 
     /// Format x86 register with size modifier.
     /// Modifiers: k (32-bit), w (16-bit), b (8-bit low), h (8-bit high), q (64-bit), l (32-bit alt)
+    /// XMM registers (xmm0-xmm15) have no size variants and are returned as-is.
     pub(super) fn format_x86_reg(reg: &str, modifier: Option<char>) -> String {
+        // XMM registers don't have size variants
+        if reg.starts_with("xmm") {
+            return reg.to_string();
+        }
         match modifier {
             Some('k') | Some('l') => {
                 // 32-bit version

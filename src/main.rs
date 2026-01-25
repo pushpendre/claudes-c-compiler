@@ -30,6 +30,36 @@ fn real_main() {
         Target::X86_64
     };
 
+    // Handle GCC query flags that exit immediately (before requiring input files).
+    // These are used by configure scripts to detect the compiler and target.
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "-dumpmachine" => {
+                println!("{}", target.triple());
+                return;
+            }
+            "-dumpversion" => {
+                // Report GCC 13 to satisfy configure scripts that check compiler version.
+                // This matches the system GCC version in our build environment.
+                println!("13");
+                return;
+            }
+            "--version" | "-v" if args.len() == 2 => {
+                println!("ccc 0.1.0 (GCC-compatible C compiler)");
+                println!("Target: {}", target.triple());
+                return;
+            }
+            "-print-search-dirs" => {
+                // Some configure scripts call this; output minimal info
+                println!("install: /usr/lib/gcc/{}/13/", target.triple());
+                println!("programs: /usr/bin/");
+                println!("libraries: /usr/lib/");
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let mut driver = Driver::new();
     driver.target = target;
 

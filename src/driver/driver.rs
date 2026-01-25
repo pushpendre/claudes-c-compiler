@@ -175,6 +175,38 @@ impl Driver {
 
     fn run_preprocess_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
+            if Self::is_assembly_source(input_file) {
+                // For .S files, delegate preprocessing to gcc which understands
+                // assembly-specific preprocessor behavior
+                let config = self.target.assembler_config();
+                let mut cmd = std::process::Command::new(config.command);
+                cmd.args(config.extra_args);
+                for path in &self.include_paths {
+                    cmd.arg("-I").arg(path);
+                }
+                for def in &self.defines {
+                    if def.value == "1" {
+                        cmd.arg(format!("-D{}", def.name));
+                    } else {
+                        cmd.arg(format!("-D{}={}", def.name, def.value));
+                    }
+                }
+                cmd.arg("-E").arg(input_file);
+                if self.output_path_set {
+                    cmd.arg("-o").arg(&self.output_path);
+                }
+                let result = cmd.output()
+                    .map_err(|e| format!("Failed to preprocess {}: {}", input_file, e))?;
+                if !self.output_path_set {
+                    print!("{}", String::from_utf8_lossy(&result.stdout));
+                }
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    return Err(format!("Preprocessing {} failed: {}", input_file, stderr));
+                }
+                continue;
+            }
+
             let source = std::fs::read_to_string(input_file)
                 .map_err(|e| format!("Cannot read {}: {}", input_file, e))?;
 
@@ -209,9 +241,14 @@ impl Driver {
 
     fn run_object_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
-            let asm = self.compile_to_assembly(input_file)?;
             let out_path = self.output_for_input(input_file);
-            self.target.assemble(&asm, &out_path)?;
+            if Self::is_assembly_source(input_file) {
+                // .s/.S files: pass directly to the assembler (gcc)
+                self.assemble_source_file(input_file, &out_path)?;
+            } else {
+                let asm = self.compile_to_assembly(input_file)?;
+                self.target.assemble(&asm, &out_path)?;
+            }
             if self.verbose {
                 eprintln!("Object output: {}", out_path);
             }
@@ -227,6 +264,16 @@ impl Driver {
             if Self::is_object_or_archive(input_file) {
                 // Pass .o and .a files directly to the linker
                 passthrough_objects.push(input_file.clone());
+            } else if Self::is_assembly_source(input_file) {
+                // .s/.S files: pass to assembler, then link
+                let obj_path = format!("/tmp/ccc_{}_{}.o",
+                    std::process::id(),
+                    std::path::Path::new(input_file)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("asm_out"));
+                self.assemble_source_file(input_file, &obj_path)?;
+                compiled_object_files.push(obj_path);
             } else {
                 // Compile .c files to .o
                 let asm = self.compile_to_assembly(input_file)?;
@@ -271,6 +318,46 @@ impl Driver {
     /// Check if a file is an object file or archive (pass to linker directly).
     fn is_object_or_archive(path: &str) -> bool {
         path.ends_with(".o") || path.ends_with(".a") || path.ends_with(".so")
+    }
+
+    /// Check if a file is an assembly source (.s or .S).
+    /// .S files contain assembly with C preprocessor directives.
+    /// .s files contain pure assembly.
+    /// Both are passed to the target assembler (gcc) directly.
+    fn is_assembly_source(path: &str) -> bool {
+        path.ends_with(".s") || path.ends_with(".S")
+    }
+
+    /// Assemble a .s or .S file to an object file using the target assembler.
+    /// For .S files, gcc handles preprocessing (macros, #include, etc.).
+    fn assemble_source_file(&self, input_file: &str, output_path: &str) -> Result<(), String> {
+        let config = self.target.assembler_config();
+        let mut cmd = std::process::Command::new(config.command);
+        cmd.args(config.extra_args);
+
+        // Pass through include paths and defines for .S preprocessing
+        for path in &self.include_paths {
+            cmd.arg("-I").arg(path);
+        }
+        for def in &self.defines {
+            if def.value == "1" {
+                cmd.arg(format!("-D{}", def.name));
+            } else {
+                cmd.arg(format!("-D{}={}", def.name, def.value));
+            }
+        }
+
+        cmd.args(["-c", "-o", output_path, input_file]);
+
+        let result = cmd.output()
+            .map_err(|e| format!("Failed to run assembler for {}: {}", input_file, e))?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(format!("Assembly of {} failed: {}", input_file, stderr));
+        }
+
+        Ok(())
     }
 
     /// Build linker args from collected -l, -L, -static, -shared, and -nostdlib flags.

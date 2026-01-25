@@ -27,6 +27,16 @@ pub enum Target {
 }
 
 impl Target {
+    /// Return the GCC-style target triple for this architecture.
+    /// Used by configure scripts (via -dumpmachine) to detect the target.
+    pub fn triple(&self) -> &'static str {
+        match self {
+            Target::X86_64 => "x86_64-linux-gnu",
+            Target::Aarch64 => "aarch64-linux-gnu",
+            Target::Riscv64 => "riscv64-linux-gnu",
+        }
+    }
+
     /// Get the assembler config for this target.
     pub fn assembler_config(&self) -> common::AssemblerConfig {
         match self {
