@@ -1,0 +1,19 @@
+Fix _Bool bitfield assignment: missing boolean conversion
+
+Problem:
+When assigning a non-zero/non-one integer value to a _Bool bitfield,
+the compiler truncates to the bit width (1 bit) instead of first
+converting the value to _Bool (0 or 1) as required by the C standard.
+
+Example:
+  struct { _Bool a : 1; } s;
+  s.a = 2;  // Should store 1 (bool conversion), but stores 0 (bit truncation)
+
+The C standard (6.3.1.2) requires that when converting to _Bool,
+the result is 0 if the value is 0, and 1 otherwise. This conversion
+must happen BEFORE the bitfield truncation.
+
+Fix:
+In the bitfield store lowering code, insert a bool conversion
+(compare != 0) before the bitfield mask/shift operation when the
+target bitfield type is _Bool.
