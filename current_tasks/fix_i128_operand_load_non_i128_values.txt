@@ -1,0 +1,23 @@
+Fix 128-bit binop operand_to_rax_rdx loading garbage for non-i128 values
+
+Bug: operand_to_rax_rdx always reads 16 bytes from stack slots (slot and slot+8),
+but when the operand is a non-i128 Value (e.g., an I64 shift amount), only 8 bytes
+were allocated for the stack slot. The slot+8 read picks up garbage from the
+adjacent slot or uninitialized memory.
+
+This manifests when 128-bit shifts have a non-constant shift amount:
+  u128 shl(u128 a, int n) { return a << n; }
+The shift amount 'n' is sign-extended to I64 and may be register-allocated,
+so its 8-byte stack slot is never written. operand_to_rax_rdx loads 16 bytes
+from this slot, producing garbage in %rcx (shift amount) and %rsi.
+
+Additionally, register-allocated values have their stack slots unwritten
+(the value goes directly to a callee-saved register). When operand_to_rax_rdx
+tries to load from the stack slot, it reads uninitialized memory.
+
+Fix: In operand_to_rax_rdx, check if the Value is a known i128 value. If not,
+load only 8 bytes into rax and zero rdx. Also check for register-allocated values.
+
+Affects: x86, ARM, RISC-V backends
+Impact: Fixes 128-bit shift/and/or/xor/sub when operands include non-i128 values.
+Fixes test failures: i128-basic-ops, int128-func-call, 128bit-compound-assign
