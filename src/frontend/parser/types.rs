@@ -267,9 +267,11 @@ impl Parser {
                     TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Attribute => {
-                        let (_, _, mode_ti, _) = self.parse_gcc_attributes();
+                        let (_, aligned, mode_ti, _) = self.parse_gcc_attributes();
                         *has_mode_ti = *has_mode_ti || mode_ti;
-                        // parse_gcc_attributes already sets self.parsing_constructor/destructor
+                        if let Some(a) = aligned {
+                            self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
+                        }
                     }
                     TokenKind::Extension => { self.advance(); }
                     _ => break,
@@ -453,10 +455,10 @@ impl Parser {
                     self.parsing_inline = true;
                 }
                 TokenKind::Attribute => {
-                    self.advance();
-                    let (ctor, dtor) = self.parse_attribute_params();
-                    if ctor { self.parsing_constructor = true; }
-                    if dtor { self.parsing_destructor = true; }
+                    let (_, aligned, _, _) = self.parse_gcc_attributes();
+                    if let Some(a) = aligned {
+                        self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
+                    }
                 }
                 TokenKind::Extension => {
                     self.advance();

@@ -223,6 +223,11 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         if matches!(g.init, GlobalInit::Zero) {
             continue;
         }
+        // Zero-size globals (e.g., empty arrays like `Type arr[0] = {}`) go to .bss
+        // to avoid sharing an address with the next .data global.
+        if g.size == 0 {
+            continue;
+        }
         if !has_data {
             out.emit(".section .data");
             has_data = true;
@@ -245,11 +250,15 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
     }
 
     // Zero-initialized globals -> .bss
+    // Also includes zero-size globals with empty initializers (e.g., `Type arr[0] = {}`)
+    // which were skipped from .data to avoid address overlap.
     for g in globals {
         if g.is_extern {
             continue; // extern declarations have no storage
         }
-        if !matches!(g.init, GlobalInit::Zero) {
+        let is_zero_init = matches!(g.init, GlobalInit::Zero);
+        let is_zero_size_with_init = g.size == 0 && !is_zero_init;
+        if !is_zero_init && !is_zero_size_with_init {
             continue;
         }
         if g.is_common {

@@ -412,7 +412,13 @@ impl Lowerer {
                 if let Some(base_init) = self.eval_global_addr_expr(lhs) {
                     if let Some(offset_val) = self.eval_const_expr(rhs) {
                         if let Some(offset) = self.const_to_i64(&offset_val) {
-                            let elem_size = self.get_pointer_elem_size_from_expr(lhs);
+                            // If the expression was cast to an integer type
+                            // (e.g., (uintptr_t)ptr - 1), use byte-level arithmetic.
+                            let elem_size = if self.expr_is_pointer(lhs) {
+                                self.get_pointer_elem_size_from_expr(lhs)
+                            } else {
+                                1
+                            };
                             let byte_offset = -(offset * elem_size as i64);
                             match base_init {
                                 GlobalInit::GlobalAddr(name) => {
@@ -444,7 +450,13 @@ impl Lowerer {
         let base_init = self.eval_global_addr_expr(base_expr)?;
         let offset_val = self.eval_const_expr(offset_expr)?;
         let offset = self.const_to_i64(&offset_val)?;
-        let elem_size = self.get_pointer_elem_size_from_expr(base_expr);
+        // If the expression was cast to an integer type (e.g., (uintptr_t)ptr + 1),
+        // arithmetic is byte-level (scale factor 1), not pointer-scaled.
+        let elem_size = if self.expr_is_pointer(base_expr) {
+            self.get_pointer_elem_size_from_expr(base_expr)
+        } else {
+            1
+        };
         let byte_offset = offset * elem_size as i64;
         match base_init {
             GlobalInit::GlobalAddr(name) => {
