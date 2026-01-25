@@ -1,0 +1,31 @@
+Task: Emit register-to-register operations in x86 codegen
+
+Currently, the x86 backend uses an accumulator model:
+1. Load LHS into %rax
+2. Load RHS into %rcx
+3. Perform operation (result in %rax)
+4. Store %rax to destination
+
+When values are register-allocated (in callee-saved regs rbx, r12-r15),
+this creates unnecessary moves:
+  movq %rbx, %rax    # load LHS from register
+  movq %r12, %rcx    # load RHS from register
+  addq %rcx, %rax    # operate
+  movq %rax, %r13    # store result to register
+
+We can instead emit:
+  movq %rbx, %r13    # copy LHS to dest
+  addq %r12, %r13    # operate directly on dest register
+
+Or even better when dest == LHS:
+  addq %r12, %rbx    # operate directly, no copy needed
+
+This eliminates 1-3 unnecessary register moves per operation for
+register-allocated values, significantly reducing code size and
+improving performance in hot loops.
+
+Plan:
+1. Add emit_binop_reg_to_reg() for common binary operations (add, sub, and, or, xor, shl, etc.)
+2. Modify emit_binop to detect when operands/dest are in callee-saved regs
+3. Add similar optimization for unary ops and comparisons
+4. Add peephole patterns to catch remaining cases
