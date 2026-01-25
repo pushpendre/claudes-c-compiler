@@ -1,0 +1,14 @@
+Task: Optimize codegen string allocation performance
+
+Profile shows codegen takes 0.467s for sqlite3.c (38% of compile time).
+Key bottlenecks identified:
+1. emit_string_bytes allocates a String per byte (100K+ heap allocs for sqlite3.c)
+2. AsmOutput buffer pre-allocated at 256KB but grows to 20MB (7 reallocations + 32MB memcpy)
+3. Peephole optimizer's itoa_buf allocates in dead-store inner loop
+4. Peephole optimizer classify_line can be made faster
+
+Plan:
+- Rewrite emit_string_bytes to write directly to the buffer without per-byte allocation
+- Scale AsmOutput initial capacity based on IR module size
+- Eliminate itoa_buf allocation in peephole hot loop
+- Add compilation timing support via CCC_TIME_PHASES env var
