@@ -1,0 +1,12 @@
+Task: Optimize compiler compilation speed
+
+Focus areas:
+1. Replace FxHashSet-based liveness analysis with bitvec-based sets (avoid heap allocation per set operation)
+2. Optimize peephole eliminate_dead_stores to pre-classify more line types and reduce string searches
+3. Reduce memory allocations in hot paths
+
+Profile data (SQLite 265K lines):
+- Codegen: 0.424s (39% of total 1.098s) - biggest bottleneck
+- Peephole optimizer: ~6.3% self time (peephole_optimize + combined_local_pass + eliminate_dead_stores + classify_line)
+- Liveness analysis: 1.07% self time
+- Memory allocation (malloc/free/realloc): ~10% of total time
