@@ -6,12 +6,20 @@
 /// - Variadic macros: `#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)`
 /// - Stringification: `#param`
 /// - Token pasting: `a ## b`
+///
+/// Performance: All scanning operates on byte slices (`&[u8]`) to avoid
+/// the overhead of `Vec<char>` allocation. Since C preprocessor tokens are
+/// ASCII, this is safe and correct. UTF-8 multi-byte sequences in string/char
+/// literals are copied verbatim without interpretation.
 
 use std::cell::Cell;
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 
-use super::utils::{is_ident_start, is_ident_cont, copy_literal, skip_literal};
+use super::utils::{
+    is_ident_start_byte, is_ident_cont_byte, bytes_to_str,
+    skip_literal_bytes, copy_literal_bytes_to_string,
+};
 
 /// Check if two adjacent bytes would form an unintended multi-character token
 /// when concatenated during macro expansion. Returns true if a separating space
@@ -40,14 +48,9 @@ fn would_paste_tokens(last: u8, first: u8) -> bool {
         // . followed by digit (e.g., prevent "1." + "5" pasting weirdly)
         (b'.', b'0'..=b'9') => true,
         // Identifier/number continuation: letter/digit/_ followed by letter/digit/_
-        (a, b) if is_ident_byte(a) && is_ident_byte(b) => true,
+        (a, b) if is_ident_cont_byte(a) && is_ident_cont_byte(b) => true,
         _ => false,
     }
-}
-
-#[inline]
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Represents a macro definition.
@@ -77,6 +80,8 @@ pub struct MacroTable {
     macros: FxHashMap<String, MacroDef>,
     /// Counter for the __COUNTER__ built-in macro. Increments on each expansion.
     counter: Cell<usize>,
+    /// Cached __LINE__ value. Updated by set_line(), expanded specially in expand_text.
+    line_value: Cell<usize>,
 }
 
 impl MacroTable {
@@ -84,6 +89,7 @@ impl MacroTable {
         Self {
             macros: FxHashMap::default(),
             counter: Cell::new(0),
+            line_value: Cell::new(1),
         }
     }
 
@@ -99,12 +105,18 @@ impl MacroTable {
 
     /// Check if a macro is defined.
     pub fn is_defined(&self, name: &str) -> bool {
-        name == "__COUNTER__" || self.macros.contains_key(name)
+        name == "__COUNTER__" || name == "__LINE__" || self.macros.contains_key(name)
     }
 
     /// Get a macro definition.
     pub fn get(&self, name: &str) -> Option<&MacroDef> {
         self.macros.get(name)
+    }
+
+    /// Set the current __LINE__ value without allocating a MacroDef.
+    /// This avoids per-line allocation of MacroDef { name: "__LINE__", ... }.
+    pub fn set_line(&self, line: usize) {
+        self.line_value.set(line);
     }
 
     /// Expand macros in a line of text.
@@ -116,38 +128,33 @@ impl MacroTable {
 
     /// Recursively expand macros in text, tracking which macros are
     /// currently being expanded to prevent infinite recursion.
+    ///
+    /// Operates on bytes for performance: avoids allocating Vec<char>.
     fn expand_text(&self, text: &str, expanding: &mut FxHashSet<String>) -> String {
         let mut result = String::with_capacity(text.len());
-        let chars: Vec<char> = text.chars().collect();
-        let len = chars.len();
+        let bytes = text.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
 
         while i < len {
+            let b = bytes[i];
+
             // Skip string and char literals (copy them verbatim)
-            if chars[i] == '"' || chars[i] == '\'' {
-                i = copy_literal(&chars, i, chars[i], &mut result);
+            if b == b'"' || b == b'\'' {
+                i = copy_literal_bytes_to_string(bytes, i, b, &mut result);
                 continue;
             }
 
             // Look for identifiers
-            if is_ident_start(chars[i]) {
+            if is_ident_start_byte(b) {
                 let start = i;
-                while i < len && is_ident_cont(chars[i]) {
+                i += 1;
+                while i < len && is_ident_cont_byte(bytes[i]) {
                     i += 1;
                 }
-                let ident: String = chars[start..i].iter().collect();
+                let ident = bytes_to_str(bytes, start, i);
 
                 // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
-                // A pp-number is: digit (digit|letter|.|e[+-]|p[+-])*
-                // or: . digit (digit|letter|.|e[+-]|p[+-])*
-                // We check the output built so far in 'result' to determine if the current
-                // identifier is a continuation of a pp-number token.
-                //
-                // Key insight: a pp-number must START with a digit (or .digit). So when we
-                // see a potential pp-number suffix pattern (e.g., e+<ident>), we trace back
-                // through the entire token to verify it originates from a digit. This prevents
-                // false positives like "source+D2U" where 'source' ends in 'e' but is an
-                // identifier, not a pp-number.
                 let is_ppnumber_suffix = {
                     let result_bytes = result.as_bytes();
                     let rlen = result_bytes.len();
@@ -156,16 +163,11 @@ impl MacroTable {
                     } else {
                         let prev = result_bytes[rlen - 1];
                         if prev.is_ascii_digit() {
-                            // Directly after a digit: e.g., "1f", "0x1p"
                             true
                         } else if prev == b'.' && rlen >= 2 && result_bytes[rlen - 2].is_ascii_digit() {
-                            // After digit-dot: e.g., "1.f", "3.14e"
                             true
                         } else if (prev == b'+' || prev == b'-') && rlen >= 3
                             && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P') {
-                            // Potential exponent sign (e.g., "1e+f", "0x1p-2").
-                            // Walk backwards through the result to find the start of this
-                            // pp-number token and verify it begins with a digit.
                             is_ppnumber_context(result_bytes, rlen - 3)
                         } else {
                             false
@@ -173,30 +175,26 @@ impl MacroTable {
                     }
                 };
                 if is_ppnumber_suffix {
-                    result.push_str(&ident);
+                    result.push_str(ident);
                     continue;
                 }
 
                 // Handle _Pragma("string") operator (C99 §6.10.9).
-                // _Pragma is consumed and discarded since we don't implement
-                // any pragmas that affect code generation (diagnostic push/pop, etc.)
                 if ident == "_Pragma" {
-                    // Skip whitespace to find '('
                     let mut j = i;
-                    while j < len && chars[j].is_whitespace() {
+                    while j < len && bytes[j].is_ascii_whitespace() {
                         j += 1;
                     }
-                    if j < len && chars[j] == '(' {
-                        // Skip the entire parenthesized argument
+                    if j < len && bytes[j] == b'(' {
                         let mut depth = 1;
                         j += 1;
                         while j < len && depth > 0 {
-                            if chars[j] == '(' {
+                            if bytes[j] == b'(' {
                                 depth += 1;
-                            } else if chars[j] == ')' {
+                            } else if bytes[j] == b')' {
                                 depth -= 1;
-                            } else if chars[j] == '"' || chars[j] == '\'' {
-                                j = skip_literal(&chars, j, chars[j]);
+                            } else if bytes[j] == b'"' || bytes[j] == b'\'' {
+                                j = skip_literal_bytes(bytes, j, bytes[j]);
                                 continue;
                             }
                             j += 1;
@@ -204,67 +202,63 @@ impl MacroTable {
                         i = j;
                         continue;
                     }
-                    // No '(' follows - emit _Pragma as-is (shouldn't happen in valid code)
-                    result.push_str(&ident);
+                    result.push_str(ident);
                     continue;
                 }
 
-                // Handle __COUNTER__ built-in: expands to a unique integer that
-                // increments on each expansion (GCC/Clang extension).
+                // Handle __COUNTER__ built-in
                 if ident == "__COUNTER__" {
                     let val = self.counter.get();
                     self.counter.set(val + 1);
-                    result.push_str(&val.to_string());
+                    // Format number without allocating a String on the heap for small numbers
+                    let mut buf = itoa::Buffer::new();
+                    result.push_str(buf.format(val));
+                    continue;
+                }
+
+                // Handle __LINE__ built-in (avoids hash lookup)
+                if ident == "__LINE__" {
+                    let val = self.line_value.get();
+                    let mut buf = itoa::Buffer::new();
+                    result.push_str(buf.format(val));
                     continue;
                 }
 
                 // Check if this is a macro that's not currently being expanded
-                if !expanding.contains(&ident) {
-                    if let Some(mac) = self.macros.get(&ident) {
+                if !expanding.contains(ident) {
+                    if let Some(mac) = self.macros.get(ident) {
                         if mac.is_function_like {
                             // Need to find opening paren
                             let mut j = i;
-                            // Skip whitespace
-                            while j < len && chars[j].is_whitespace() {
+                            while j < len && bytes[j].is_ascii_whitespace() {
                                 j += 1;
                             }
-                            if j < len && chars[j] == '(' {
-                                // Parse arguments
-                                let (args, end_pos) = self.parse_macro_args(&chars, j);
+                            if j < len && bytes[j] == b'(' {
+                                let (args, end_pos) = self.parse_macro_args(bytes, j);
                                 i = end_pos;
                                 let mut expanded = self.expand_function_macro(mac, &args, expanding);
 
                                 // After expansion, check if the result ends with a function-like
-                                // macro name and the remaining source starts with '('. This handles
-                                // the pattern where a macro expands to another macro name that should
-                                // be called with following args, e.g.:
-                                //   #define DISPATCH(...) SELECT(__VA_ARGS__, B, A)(__VA_ARGS__)
-                                // Here SELECT(...) expands to A or B, and then A(...) or B(...)
-                                // must be further expanded with the following parenthesized args.
+                                // macro name and the remaining source starts with '('.
                                 loop {
                                     let trailing = extract_trailing_ident(&expanded);
                                     if let Some(ref trail_ident) = trailing {
-                                        if !expanding.contains(trail_ident) {
+                                        if !expanding.contains(trail_ident.as_str()) {
                                             if let Some(trail_mac) = self.macros.get(trail_ident.as_str()) {
                                                 if trail_mac.is_function_like {
-                                                    // Check if '(' follows in the remaining text
                                                     let mut k = i;
-                                                    while k < len && chars[k].is_whitespace() {
+                                                    while k < len && bytes[k].is_ascii_whitespace() {
                                                         k += 1;
                                                     }
-                                                    if k < len && chars[k] == '(' {
-                                                        // Parse arguments from source and expand
-                                                        let (trail_args, trail_end) = self.parse_macro_args(&chars, k);
+                                                    if k < len && bytes[k] == b'(' {
+                                                        let (trail_args, trail_end) = self.parse_macro_args(bytes, k);
                                                         i = trail_end;
                                                         let trail_mac_clone = trail_mac.clone();
-                                                        // Remove the trailing macro name (and any trailing whitespace) from expanded
                                                         let trimmed_len = expanded.trim_end().len();
                                                         let prefix_len = trimmed_len - trail_ident.len();
                                                         expanded.truncate(prefix_len);
                                                         let trail_expanded = self.expand_function_macro(&trail_mac_clone, &trail_args, expanding);
                                                         expanded.push_str(&trail_expanded);
-                                                        // Continue loop to check if the new expansion
-                                                        // also ends with a callable macro
                                                         continue;
                                                     }
                                                 }
@@ -274,8 +268,6 @@ impl MacroTable {
                                     break;
                                 }
 
-                                // Add spaces around expansion to prevent token pasting
-                                // with adjacent characters (e.g., M(-) before --b)
                                 if !expanded.is_empty() {
                                     if !result.is_empty() && !result.ends_with(' ') && !result.ends_with('\t') && !result.ends_with('\n') {
                                         result.push(' ');
@@ -285,46 +277,43 @@ impl MacroTable {
                                 }
                                 continue;
                             } else {
-                                // Function-like macro without args - don't expand
-                                result.push_str(&ident);
+                                result.push_str(ident);
                                 continue;
                             }
                         } else {
                             // Object-like macro
-                            expanding.insert(ident.clone());
+                            expanding.insert(ident.to_string());
                             let expanded = self.expand_text(&mac.body, expanding);
-                            expanding.remove(&ident);
+                            expanding.remove(ident);
 
                             // Check if the expansion result is a function-like macro name
-                            // followed by '(' in the remaining text. This handles the
-                            // pattern: #define BAR FOO  then  BAR(args) -> FOO(args)
                             let expanded_trimmed = expanded.trim();
-                            if !expanded_trimmed.is_empty() && is_ident_start(expanded_trimmed.chars().next().unwrap())
-                                && expanded_trimmed.chars().all(|c| is_ident_cont(c))
-                                && !expanding.contains(expanded_trimmed)
-                            {
-                                if let Some(target_mac) = self.macros.get(expanded_trimmed) {
-                                    if target_mac.is_function_like {
-                                        // Check if '(' follows in the remaining text
-                                        let mut j = i;
-                                        while j < len && chars[j].is_whitespace() {
-                                            j += 1;
-                                        }
-                                        if j < len && chars[j] == '(' {
-                                            // Parse arguments and expand as function-like macro
-                                            let (args, end_pos) = self.parse_macro_args(&chars, j);
-                                            i = end_pos;
-                                            let target_mac_clone = target_mac.clone();
-                                            let func_expanded = self.expand_function_macro(&target_mac_clone, &args, expanding);
-                                            result.push_str(&func_expanded);
-                                            continue;
+                            if !expanded_trimmed.is_empty() {
+                                let et_bytes = expanded_trimmed.as_bytes();
+                                if is_ident_start_byte(et_bytes[0])
+                                    && et_bytes.iter().all(|&b| is_ident_cont_byte(b))
+                                    && !expanding.contains(expanded_trimmed)
+                                {
+                                    if let Some(target_mac) = self.macros.get(expanded_trimmed) {
+                                        if target_mac.is_function_like {
+                                            let mut j = i;
+                                            while j < len && bytes[j].is_ascii_whitespace() {
+                                                j += 1;
+                                            }
+                                            if j < len && bytes[j] == b'(' {
+                                                let (args, end_pos) = self.parse_macro_args(bytes, j);
+                                                i = end_pos;
+                                                let target_mac_clone = target_mac.clone();
+                                                let func_expanded = self.expand_function_macro(&target_mac_clone, &args, expanding);
+                                                result.push_str(&func_expanded);
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             // Insert space to prevent accidental token pasting
-                            // e.g., "1 -" + "-23530091311039" -> "1 - -23530091311039"
                             if !expanded.is_empty() && !result.is_empty() {
                                 let last = result.as_bytes()[result.len() - 1];
                                 let first = expanded.as_bytes()[0];
@@ -339,17 +328,19 @@ impl MacroTable {
                 }
 
                 // Not a macro or already expanding
-                result.push_str(&ident);
+                result.push_str(ident);
                 continue;
             }
 
             // Skip C-style comments
-            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
                 result.push('/');
                 result.push('*');
                 i += 2;
-                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                    result.push(chars[i]);
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    // SAFETY: We're inside a comment, just push raw bytes.
+                    // Comments can only contain ASCII or UTF-8 that we copy verbatim.
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
                 if i + 1 < len {
@@ -361,29 +352,25 @@ impl MacroTable {
             }
 
             // Skip line comments
-            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
-                while i < len && chars[i] != '\n' {
-                    result.push(chars[i]);
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+                while i < len && bytes[i] != b'\n' {
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
                 continue;
             }
 
-            // Skip numeric literals (pp-numbers): digits, '.', followed by alphanumeric suffix
-            // This prevents macro expansion of suffixes like 'I' in '205.0I'
-            if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
-                // Copy the entire pp-number token: digits, '.', 'e'/'E'/'p'/'P' with optional sign,
-                // hex prefix '0x'/'0X', and alphanumeric suffixes (f, F, l, L, u, U, i, I, j, J, ll, LL)
+            // Skip numeric literals (pp-numbers)
+            if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
                 while i < len {
-                    if chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_' {
-                        result.push(chars[i]);
+                    if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_' {
+                        result.push(bytes[i] as char);
                         i += 1;
-                    } else if (chars[i] == '+' || chars[i] == '-')
+                    } else if (bytes[i] == b'+' || bytes[i] == b'-')
                         && i > 0
-                        && (chars[i - 1] == 'e' || chars[i - 1] == 'E' || chars[i - 1] == 'p' || chars[i - 1] == 'P')
+                        && matches!(bytes[i - 1], b'e' | b'E' | b'p' | b'P')
                     {
-                        // Exponent sign: 1.0e+5, 0x1p-3
-                        result.push(chars[i]);
+                        result.push(bytes[i] as char);
                         i += 1;
                     } else {
                         break;
@@ -392,33 +379,39 @@ impl MacroTable {
                 continue;
             }
 
-            // Regular character
-            result.push(chars[i]);
-            i += 1;
+            // Regular character - for ASCII just push directly
+            if b < 0x80 {
+                result.push(b as char);
+                i += 1;
+            } else {
+                // Multi-byte UTF-8: copy the full character
+                let ch = text[i..].chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+            }
         }
 
         result
     }
 
-    /// Parse function-like macro arguments from chars starting at the opening paren.
+    /// Parse function-like macro arguments from bytes starting at the opening paren.
     /// Returns (args, position after closing paren).
-    fn parse_macro_args(&self, chars: &[char], start: usize) -> (Vec<String>, usize) {
-        let len = chars.len();
+    fn parse_macro_args(&self, bytes: &[u8], start: usize) -> (Vec<String>, usize) {
+        let len = bytes.len();
         let mut i = start + 1; // skip '('
         let mut args = Vec::new();
         let mut current_arg = String::new();
         let mut paren_depth = 0;
 
         while i < len {
-            match chars[i] {
-                '(' => {
+            match bytes[i] {
+                b'(' => {
                     paren_depth += 1;
                     current_arg.push('(');
                     i += 1;
                 }
-                ')' => {
+                b')' => {
                     if paren_depth == 0 {
-                        // End of arguments
                         let trimmed = current_arg.trim().to_string();
                         if !trimmed.is_empty() || !args.is_empty() {
                             args.push(trimmed);
@@ -430,18 +423,25 @@ impl MacroTable {
                         i += 1;
                     }
                 }
-                ',' if paren_depth == 0 => {
+                b',' if paren_depth == 0 => {
                     args.push(current_arg.trim().to_string());
                     current_arg = String::new();
                     i += 1;
                 }
-                '"' | '\'' => {
-                    // String/char literal - copy verbatim, don't split on commas inside
-                    i = copy_literal(chars, i, chars[i], &mut current_arg);
+                b'"' | b'\'' => {
+                    i = copy_literal_bytes_to_string(bytes, i, bytes[i], &mut current_arg);
+                }
+                b if b < 0x80 => {
+                    current_arg.push(b as char);
+                    i += 1;
                 }
                 _ => {
-                    current_arg.push(chars[i]);
-                    i += 1;
+                    // Multi-byte UTF-8: reconstruct string from raw bytes
+                    // SAFETY: the source text is valid UTF-8
+                    let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                    let ch = s.chars().next().unwrap();
+                    current_arg.push(ch);
+                    i += ch.len_utf8();
                 }
             }
         }
@@ -470,14 +470,10 @@ impl MacroTable {
         let paste_params = self.find_paste_and_stringify_params(&mac.body, &mac.params, mac.is_variadic);
 
         // Step 2: Prescan - expand arguments that are NOT used with # or ##
-        // Per the standard, argument prescan uses the current expanding set
-        // (but NOT the macro being expanded itself - that's only suppressed during rescan)
         let expanded_args: Vec<String> = args.iter().enumerate().map(|(idx, arg)| {
             if idx < mac.params.len() && paste_params.contains(&idx) {
-                // Used with # or ## - don't expand
                 arg.clone()
             } else {
-                // Normal argument - expand macros in it
                 self.expand_text(arg, expanding)
             }
         }).collect();
@@ -485,7 +481,6 @@ impl MacroTable {
         let mut body = mac.body.clone();
 
         // Step 3: Handle stringification (#param) and token pasting (##)
-        // These use the RAW (unexpanded) arguments
         body = self.handle_stringify_and_paste(&body, &mac.params, args, mac.is_variadic, mac.has_named_variadic);
 
         // Step 4: Substitute parameters with expanded arguments
@@ -499,52 +494,46 @@ impl MacroTable {
     }
 
     /// Find parameter indices that are used with # (stringify) or ## (token paste).
-    /// These parameters should receive raw (unexpanded) arguments.
     fn find_paste_and_stringify_params(&self, body: &str, params: &[String], is_variadic: bool) -> FxHashSet<usize> {
         let mut result = FxHashSet::default();
-        let chars: Vec<char> = body.chars().collect();
-        let len = chars.len();
+        let bytes = body.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
 
         while i < len {
-            if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
+            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] == b'#' {
                 // Token paste: ## - mark both the token before and after
-                // Find identifier before ##
                 let mut j = i;
-                // Skip whitespace before ##
-                while j > 0 && (chars[j - 1] == ' ' || chars[j - 1] == '\t') {
+                while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t') {
                     j -= 1;
                 }
-                // Read identifier backwards
                 let end = j;
-                while j > 0 && is_ident_cont(chars[j - 1]) {
+                while j > 0 && is_ident_cont_byte(bytes[j - 1]) {
                     j -= 1;
                 }
                 if j < end {
-                    let ident: String = chars[j..end].iter().collect();
-                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                    let ident = bytes_to_str(bytes, j, end);
+                    if let Some(idx) = params.iter().position(|p| p == ident) {
                         result.insert(idx);
                     }
                     if ident == "__VA_ARGS__" && is_variadic {
-                        // Mark all variadic args
                         for idx in params.len()..100 {
                             result.insert(idx);
                         }
                     }
                 }
 
-                // Find identifier after ##
                 i += 2;
-                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                     i += 1;
                 }
-                if i < len && is_ident_start(chars[i]) {
+                if i < len && is_ident_start_byte(bytes[i]) {
                     let start = i;
-                    while i < len && is_ident_cont(chars[i]) {
+                    while i < len && is_ident_cont_byte(bytes[i]) {
                         i += 1;
                     }
-                    let ident: String = chars[start..i].iter().collect();
-                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                    let ident = bytes_to_str(bytes, start, i);
+                    if let Some(idx) = params.iter().position(|p| p == ident) {
                         result.insert(idx);
                     }
                     if ident == "__VA_ARGS__" && is_variadic {
@@ -556,19 +545,18 @@ impl MacroTable {
                 continue;
             }
 
-            if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
-                // Stringification: # - mark the parameter after it
+            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] != b'#' {
                 i += 1;
-                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                     i += 1;
                 }
-                if i < len && is_ident_start(chars[i]) {
+                if i < len && is_ident_start_byte(bytes[i]) {
                     let start = i;
-                    while i < len && is_ident_cont(chars[i]) {
+                    while i < len && is_ident_cont_byte(bytes[i]) {
                         i += 1;
                     }
-                    let ident: String = chars[start..i].iter().collect();
-                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                    let ident = bytes_to_str(bytes, start, i);
+                    if let Some(idx) = params.iter().position(|p| p == ident) {
                         result.insert(idx);
                     }
                     if ident == "__VA_ARGS__" && is_variadic {
@@ -580,9 +568,8 @@ impl MacroTable {
                 continue;
             }
 
-            // Skip string/char literals
-            if chars[i] == '"' || chars[i] == '\'' {
-                i = skip_literal(&chars, i, chars[i]);
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                i = skip_literal_bytes(bytes, i, bytes[i]);
                 continue;
             }
 
@@ -593,11 +580,6 @@ impl MacroTable {
     }
 
     /// Handle # (stringify) and ## (token paste) operators.
-    ///
-    /// Per C11 §6.10.3.2 and §6.10.3.3:
-    /// - `#param` stringifies the raw argument
-    /// - `token ## token` pastes tokens together, with parameter substitution
-    ///   using raw (unexpanded) arguments for both sides of ##
     fn handle_stringify_and_paste(
         &self,
         body: &str,
@@ -606,10 +588,10 @@ impl MacroTable {
         is_variadic: bool,
         has_named_variadic: bool,
     ) -> String {
-        let chars: Vec<char> = body.chars().collect();
-        let len = chars.len();
+        let bytes = body.as_bytes();
+        let len = bytes.len();
 
-        // First, check if body contains ## or #. If not, short-circuit.
+        // Short-circuit: if body contains no '#', nothing to do
         if !body.contains('#') {
             return body.to_string();
         }
@@ -618,24 +600,18 @@ impl MacroTable {
         let mut i = 0;
 
         while i < len {
-            if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
+            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] == b'#' {
                 // Token paste operator ##
-                // Remove trailing whitespace from the left side in result
                 while result.ends_with(' ') || result.ends_with('\t') {
                     result.pop();
                 }
 
-                // The left side is the last token we added to result.
-                // Check if it was a parameter name that we should substitute.
-                // Extract the last identifier from result (if any) for parameter substitution
                 let left_token = extract_trailing_ident(&result);
                 if let Some(ref left_ident) = left_token {
                     if left_ident == "__VA_ARGS__" && is_variadic {
-                        // Replace trailing __VA_ARGS__ with raw variadic args
                         let va_args = self.get_va_args(params, args);
                         let trim_len = result.len() - "__VA_ARGS__".len();
                         result.truncate(trim_len);
-                        // For GNU extension: if VA_ARGS is empty and result ends with comma, remove comma
                         if va_args.is_empty() {
                             while result.ends_with(' ') || result.ends_with('\t') {
                                 result.pop();
@@ -646,8 +622,7 @@ impl MacroTable {
                         } else {
                             result.push_str(&va_args);
                         }
-                    } else if let Some(idx) = params.iter().position(|p| p == left_ident) {
-                        // Replace the left-side parameter with its raw argument
+                    } else if let Some(idx) = params.iter().position(|p| p == left_ident.as_str()) {
                         let trim_len = result.len() - left_ident.len();
                         result.truncate(trim_len);
                         let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
@@ -657,23 +632,20 @@ impl MacroTable {
 
                 i += 2; // skip ##
 
-                // Skip whitespace after ##
-                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                     i += 1;
                 }
 
-                // Read the right-side token
-                if i < len && is_ident_start(chars[i]) {
+                if i < len && is_ident_start_byte(bytes[i]) {
                     let start = i;
-                    while i < len && is_ident_cont(chars[i]) {
+                    while i < len && is_ident_cont_byte(bytes[i]) {
                         i += 1;
                     }
-                    let right_ident: String = chars[start..i].iter().collect();
+                    let right_ident = bytes_to_str(bytes, start, i);
 
                     if right_ident == "__VA_ARGS__" && is_variadic {
                         let va_args = self.get_va_args(params, args);
                         if va_args.is_empty() {
-                            // GNU extension: ## __VA_ARGS__ with empty args removes preceding comma
                             while result.ends_with(' ') || result.ends_with('\t') {
                                 result.pop();
                             }
@@ -683,15 +655,11 @@ impl MacroTable {
                         } else {
                             result.push_str(&va_args);
                         }
-                    } else if let Some(idx) = params.iter().position(|p| p == &right_ident) {
-                        // GNU extension: for named variadic parameters (e.g., args...),
-                        // ", ## args" with empty args removes the preceding comma,
-                        // same as ", ## __VA_ARGS__". When non-empty, use ALL variadic args.
+                    } else if let Some(idx) = params.iter().position(|p| p == right_ident) {
                         let is_named_variadic_param = is_variadic && has_named_variadic && idx == params.len() - 1;
                         if is_named_variadic_param {
                             let va_args = self.get_named_va_args(idx, args);
                             if va_args.is_empty() {
-                                // Remove preceding comma (GNU extension)
                                 while result.ends_with(' ') || result.ends_with('\t') {
                                     result.pop();
                                 }
@@ -702,11 +670,8 @@ impl MacroTable {
                                 result.push_str(&va_args);
                             }
                         } else {
-                            // Regular (non-variadic) parameter substitution
                             let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
                             if arg.is_empty() {
-                                // Empty right side: add space to prevent token merging
-                                // with subsequent macro body tokens
                                 if i < len && !result.is_empty() {
                                     result.push(' ');
                                 }
@@ -715,41 +680,34 @@ impl MacroTable {
                             }
                         }
                     } else {
-                        // Not a parameter, paste as-is
-                        result.push_str(&right_ident);
+                        result.push_str(right_ident);
                     }
                 } else if i < len {
-                    // Non-identifier token (e.g., number)
-                    result.push(chars[i]);
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
                 continue;
             }
 
-            if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
-                // Check that the next # is not part of a ## later
-                // (e.g., "# param" is stringify, but in "a # ## b" it's different)
+            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] != b'#' {
                 // Stringification operator #
                 i += 1;
-                // Skip whitespace
-                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                     i += 1;
                 }
-                // Read parameter name
-                if i < len && is_ident_start(chars[i]) {
+                if i < len && is_ident_start_byte(bytes[i]) {
                     let start = i;
-                    while i < len && is_ident_cont(chars[i]) {
+                    while i < len && is_ident_cont_byte(bytes[i]) {
                         i += 1;
                     }
-                    let param_name: String = chars[start..i].iter().collect();
+                    let param_name = bytes_to_str(bytes, start, i);
 
                     if param_name == "__VA_ARGS__" && is_variadic {
                         let va_args = self.get_va_args(params, args);
                         result.push('"');
                         result.push_str(&stringify_arg(&va_args));
                         result.push('"');
-                    } else if let Some(idx) = params.iter().position(|p| p == &param_name) {
-                        // For named variadic parameters, stringify ALL variadic args
+                    } else if let Some(idx) = params.iter().position(|p| p == param_name) {
                         let arg_str = if is_variadic && has_named_variadic && idx == params.len() - 1 {
                             self.get_named_va_args(idx, args)
                         } else {
@@ -759,9 +717,8 @@ impl MacroTable {
                         result.push_str(&stringify_arg(&arg_str));
                         result.push('"');
                     } else {
-                        // Not a parameter, keep as-is
                         result.push('#');
-                        result.push_str(&param_name);
+                        result.push_str(param_name);
                     }
                     continue;
                 } else {
@@ -770,7 +727,16 @@ impl MacroTable {
                 }
             }
 
-            result.push(chars[i]);
+            // Regular byte
+            if bytes[i] < 0x80 {
+                result.push(bytes[i] as char);
+            } else {
+                let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                let ch = s.chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+                continue;
+            }
             i += 1;
         }
 
@@ -787,30 +753,28 @@ impl MacroTable {
         has_named_variadic: bool,
     ) -> String {
         let mut result = String::new();
-        let chars: Vec<char> = body.chars().collect();
-        let len = chars.len();
+        let bytes = body.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
 
         while i < len {
-            // Skip string/char literals (copy verbatim, don't substitute inside)
-            if chars[i] == '"' || chars[i] == '\'' {
-                i = copy_literal(&chars, i, chars[i], &mut result);
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                i = copy_literal_bytes_to_string(bytes, i, bytes[i], &mut result);
                 continue;
             }
 
-            if is_ident_start(chars[i]) {
+            if is_ident_start_byte(bytes[i]) {
                 let start = i;
-                while i < len && is_ident_cont(chars[i]) {
+                i += 1;
+                while i < len && is_ident_cont_byte(bytes[i]) {
                     i += 1;
                 }
-                let ident: String = chars[start..i].iter().collect();
+                let ident = bytes_to_str(bytes, start, i);
 
                 if ident == "__VA_ARGS__" && is_variadic {
                     let va_args = self.get_va_args(params, args);
                     result.push_str(&va_args);
-                } else if let Some(idx) = params.iter().position(|p| p == &ident) {
-                    // For named variadic parameters (e.g., args...), substitute
-                    // ALL variadic args from this index onwards.
+                } else if let Some(idx) = params.iter().position(|p| p == ident) {
                     if is_variadic && has_named_variadic && idx == params.len() - 1 {
                         let va_args = self.get_named_va_args(idx, args);
                         result.push_str(&va_args);
@@ -819,12 +783,20 @@ impl MacroTable {
                         result.push_str(arg);
                     }
                 } else {
-                    result.push_str(&ident);
+                    result.push_str(ident);
                 }
                 continue;
             }
 
-            result.push(chars[i]);
+            if bytes[i] < 0x80 {
+                result.push(bytes[i] as char);
+            } else {
+                let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                let ch = s.chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+                continue;
+            }
             i += 1;
         }
 
@@ -832,9 +804,6 @@ impl MacroTable {
     }
 
     /// Get variadic arguments (__VA_ARGS__) as a comma-separated string.
-    /// For unnamed variadic (`...`), variadic args start after all named params.
-    /// For named variadic (`extra...`), the last param IS the variadic one,
-    /// so variadic args start at that param's index.
     fn get_va_args(&self, params: &[String], args: &[String]) -> String {
         let named_count = params.len();
         if args.len() > named_count {
@@ -845,7 +814,6 @@ impl MacroTable {
     }
 
     /// Get ALL arguments for a named variadic parameter (e.g., `extra...`).
-    /// The named variadic param captures args from its index onwards.
     fn get_named_va_args(&self, param_idx: usize, args: &[String]) -> String {
         if args.len() > param_idx {
             args[param_idx..].join(", ")
@@ -862,34 +830,24 @@ impl Default for MacroTable {
 }
 
 /// Check whether position `pos` in `bytes` is part of a pp-number token.
-/// A pp-number must originate from a digit (or .digit). This walks backwards
-/// through valid pp-number continuation characters to find the token start
-/// and checks if it begins with a digit.
 fn is_ppnumber_context(bytes: &[u8], pos: usize) -> bool {
-    // Walk backwards through characters that are valid pp-number continuations:
-    // digits, letters, underscores, dots, and e/E/p/P followed by +/-
     let mut j = pos;
     loop {
         let ch = bytes[j];
         if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' {
-            // Valid pp-number continuation character
             if j == 0 {
-                // Reached the start of the string; check if this char is a digit
                 return ch.is_ascii_digit();
             }
             j -= 1;
         } else if (ch == b'+' || ch == b'-') && j >= 1
             && matches!(bytes[j - 1], b'e' | b'E' | b'p' | b'P')
         {
-            // Exponent sign preceded by e/E/p/P - skip both
             if j < 2 {
                 return false;
             }
             j -= 2;
         } else {
-            // Not a pp-number character; the token starts at j+1
             let start = bytes[j + 1];
-            // A pp-number starts with a digit or with '.' followed by a digit
             return start.is_ascii_digit()
                 || (start == b'.' && j + 2 <= pos && bytes[j + 2].is_ascii_digit());
         }
@@ -898,73 +856,68 @@ fn is_ppnumber_context(bytes: &[u8], pos: usize) -> bool {
 
 /// Extract the trailing identifier from a string, if it ends with one.
 /// Returns Some(ident) if the string ends with an identifier (skipping trailing whitespace).
+/// Operates on bytes for performance (no Vec<char> allocation).
 fn extract_trailing_ident(s: &str) -> Option<String> {
-    let trimmed = s.trim_end();
-    let chars: Vec<char> = trimmed.chars().collect();
-    if chars.is_empty() {
+    let bytes = s.trim_end().as_bytes();
+    if bytes.is_empty() {
         return None;
     }
-    let end = chars.len();
-    // The last char must be part of an identifier
-    if !is_ident_cont(chars[end - 1]) {
+    let end = bytes.len();
+    if !is_ident_cont_byte(bytes[end - 1]) {
         return None;
     }
-    // Walk back to find the start of the identifier
     let mut start = end - 1;
-    while start > 0 && is_ident_cont(chars[start - 1]) {
+    while start > 0 && is_ident_cont_byte(bytes[start - 1]) {
         start -= 1;
     }
-    // Verify start is valid ident start
-    if is_ident_start(chars[start]) {
-        Some(chars[start..end].iter().collect())
+    if is_ident_start_byte(bytes[start]) {
+        Some(bytes_to_str(bytes, start, end).to_string())
     } else {
         None
     }
 }
 
-/// Stringify a macro argument per C11 6.10.3.2:
-/// - Leading and trailing whitespace is removed
-/// - Each sequence of whitespace between tokens becomes a single space
-/// - `"` and `\` characters in string/char literals are escaped with `\`
+/// Stringify a macro argument per C11 6.10.3.2.
+/// Operates on bytes to avoid Vec<char> allocation.
 fn stringify_arg(arg: &str) -> String {
     let trimmed = arg.trim();
     let mut result = String::new();
-    let chars: Vec<char> = trimmed.chars().collect();
-    let len = chars.len();
+    let bytes = trimmed.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
     while i < len {
         // Collapse whitespace sequences to a single space
-        if chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n' {
+        if bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' {
             if !result.is_empty() {
                 result.push(' ');
             }
-            while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n') {
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
                 i += 1;
             }
             continue;
         }
 
         // Handle string literals - escape " and \ inside them
-        if chars[i] == '"' {
+        if bytes[i] == b'"' {
             result.push_str("\\\"");
             i += 1;
-            while i < len && chars[i] != '"' {
-                if chars[i] == '\\' {
+            while i < len && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
                     result.push_str("\\\\");
                     i += 1;
                     if i < len {
-                        if chars[i] == '"' {
+                        if bytes[i] == b'"' {
                             result.push_str("\\\"");
-                        } else if chars[i] == '\\' {
+                        } else if bytes[i] == b'\\' {
                             result.push_str("\\\\");
                         } else {
-                            result.push(chars[i]);
+                            result.push(bytes[i] as char);
                         }
                         i += 1;
                     }
                 } else {
-                    result.push(chars[i]);
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
             }
@@ -975,30 +928,29 @@ fn stringify_arg(arg: &str) -> String {
             continue;
         }
 
-        // Handle char literals - escape \ and " inside them
-        // Per C11 6.10.3.2, " and \ in the token sequence must be escaped
-        if chars[i] == '\'' {
+        // Handle char literals
+        if bytes[i] == b'\'' {
             result.push('\'');
             i += 1;
-            while i < len && chars[i] != '\'' {
-                if chars[i] == '\\' {
+            while i < len && bytes[i] != b'\'' {
+                if bytes[i] == b'\\' {
                     result.push_str("\\\\");
                     i += 1;
                     if i < len {
-                        if chars[i] == '\\' {
+                        if bytes[i] == b'\\' {
                             result.push_str("\\\\");
-                        } else if chars[i] == '"' {
+                        } else if bytes[i] == b'"' {
                             result.push_str("\\\"");
                         } else {
-                            result.push(chars[i]);
+                            result.push(bytes[i] as char);
                         }
                         i += 1;
                     }
-                } else if chars[i] == '"' {
+                } else if bytes[i] == b'"' {
                     result.push_str("\\\"");
                     i += 1;
                 } else {
-                    result.push(chars[i]);
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
             }
@@ -1009,11 +961,11 @@ fn stringify_arg(arg: &str) -> String {
             continue;
         }
 
-        result.push(chars[i]);
+        result.push(bytes[i] as char);
         i += 1;
     }
 
-    // Trim trailing space that might have been added
+    // Trim trailing space
     if result.ends_with(' ') {
         result.pop();
     }
@@ -1023,37 +975,36 @@ fn stringify_arg(arg: &str) -> String {
 
 /// Parse a #define directive line and return a MacroDef.
 /// The line should be the text after `#define ` (with leading whitespace stripped).
+/// Operates on bytes for performance.
 pub fn parse_define(line: &str) -> Option<MacroDef> {
     let line = line.trim();
     if line.is_empty() {
         return None;
     }
 
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
+    let bytes = line.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
     // Parse macro name
-    if !is_ident_start(chars[0]) {
+    if !is_ident_start_byte(bytes[0]) {
         return None;
     }
-    while i < len && is_ident_cont(chars[i]) {
+    while i < len && is_ident_cont_byte(bytes[i]) {
         i += 1;
     }
-    let name: String = chars[0..i].iter().collect();
+    let name = bytes_to_str(bytes, 0, i).to_string();
 
     // Check if function-like (opening paren immediately after name, no space)
-    if i < len && chars[i] == '(' {
+    if i < len && bytes[i] == b'(' {
         // Function-like macro
         i += 1; // skip '('
         let mut params = Vec::new();
         let mut is_variadic = false;
         let mut has_named_variadic = false;
 
-        // Parse parameters
         loop {
-            // Skip whitespace
-            while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                 i += 1;
             }
 
@@ -1061,17 +1012,15 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
                 break;
             }
 
-            if chars[i] == ')' {
+            if bytes[i] == b')' {
                 i += 1;
                 break;
             }
 
-            if chars[i] == '.' && i + 2 < len && chars[i + 1] == '.' && chars[i + 2] == '.' {
-                // Unnamed variadic: `...` (uses __VA_ARGS__)
+            if bytes[i] == b'.' && i + 2 < len && bytes[i + 1] == b'.' && bytes[i + 2] == b'.' {
                 is_variadic = true;
                 i += 3;
-                // Skip to closing paren
-                while i < len && chars[i] != ')' {
+                while i < len && bytes[i] != b')' {
                     i += 1;
                 }
                 if i < len {
@@ -1080,22 +1029,19 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
                 break;
             }
 
-            // Read parameter name
-            if is_ident_start(chars[i]) {
+            if is_ident_start_byte(bytes[i]) {
                 let start = i;
-                while i < len && is_ident_cont(chars[i]) {
+                while i < len && is_ident_cont_byte(bytes[i]) {
                     i += 1;
                 }
-                let param: String = chars[start..i].iter().collect();
+                let param = bytes_to_str(bytes, start, i).to_string();
 
-                // Check for variadic named param: `name...`
-                if i + 2 < len && chars[i] == '.' && chars[i + 1] == '.' && chars[i + 2] == '.' {
-                    // Named variadic like `args...` - treat as regular + variadic
+                if i + 2 < len && bytes[i] == b'.' && bytes[i + 1] == b'.' && bytes[i + 2] == b'.' {
                     is_variadic = true;
                     has_named_variadic = true;
                     params.push(param);
                     i += 3;
-                    while i < len && chars[i] != ')' {
+                    while i < len && bytes[i] != b')' {
                         i += 1;
                     }
                     if i < len {
@@ -1107,19 +1053,18 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
                 params.push(param);
             }
 
-            // Skip whitespace
-            while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                 i += 1;
             }
 
-            if i < len && chars[i] == ',' {
+            if i < len && bytes[i] == b',' {
                 i += 1;
             }
         }
 
         // Rest is the body
         let body = if i < len {
-            chars[i..].iter().collect::<String>().trim().to_string()
+            line[i..].trim().to_string()
         } else {
             String::new()
         };
@@ -1136,7 +1081,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
     } else {
         // Object-like macro
         let body = if i < len {
-            chars[i..].iter().collect::<String>().trim().to_string()
+            line[i..].trim().to_string()
         } else {
             String::new()
         };
@@ -1150,5 +1095,40 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
             body,
             is_predefined: false,
         })
+    }
+}
+
+/// Inline integer-to-string formatting buffer.
+/// Avoids heap allocation for small integers (which __LINE__, __COUNTER__ produce).
+mod itoa {
+    pub struct Buffer {
+        bytes: [u8; 20], // enough for u64::MAX
+        len: usize,
+    }
+
+    impl Buffer {
+        pub fn new() -> Self {
+            Buffer { bytes: [0u8; 20], len: 0 }
+        }
+
+        pub fn format(&mut self, mut n: usize) -> &str {
+            if n == 0 {
+                self.bytes[0] = b'0';
+                self.len = 1;
+                // SAFETY: b'0' is valid UTF-8.
+                return unsafe { std::str::from_utf8_unchecked(&self.bytes[..1]) };
+            }
+            let mut pos = 20;
+            while n > 0 {
+                pos -= 1;
+                self.bytes[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            self.len = 20 - pos;
+            // Shift to beginning for simpler return
+            self.bytes.copy_within(pos..20, 0);
+            // SAFETY: All bytes are ASCII digits (b'0'..=b'9'), which are valid UTF-8.
+            unsafe { std::str::from_utf8_unchecked(&self.bytes[..self.len]) }
+        }
     }
 }

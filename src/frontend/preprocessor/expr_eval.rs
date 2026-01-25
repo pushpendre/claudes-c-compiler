@@ -3,94 +3,90 @@
 //! This module handles evaluation of preprocessor conditional expressions (`#if`, `#elif`),
 //! including `defined()` operator resolution, `__has_builtin()` and `__has_attribute()` detection,
 //! and replacing undefined identifiers with 0 per the C standard.
+//!
+//! All scanning operates on byte slices for performance (no Vec<char> allocation).
 
 use super::preprocessor::Preprocessor;
-use super::utils::{is_ident_start, is_ident_cont};
+use super::utils::{is_ident_start_byte, is_ident_cont_byte, bytes_to_str};
 
 impl Preprocessor {
     /// Replace remaining identifiers (not keywords) with 0 in a #if expression.
     /// Per C standard, after macro expansion, undefined identifiers in #if evaluate to 0.
     pub(super) fn replace_remaining_idents_with_zero(&self, expr: &str) -> String {
         let mut result = String::new();
-        let chars: Vec<char> = expr.chars().collect();
-        let len = chars.len();
+        let bytes = expr.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
 
         while i < len {
-            // Skip character literals verbatim (don't treat contents as identifiers)
-            if chars[i] == '\'' {
-                result.push(chars[i]);
+            // Skip character literals verbatim
+            if bytes[i] == b'\'' {
+                result.push(bytes[i] as char);
                 i += 1;
-                // Copy contents of char literal, handling escape sequences
-                while i < len && chars[i] != '\'' {
-                    if chars[i] == '\\' && i + 1 < len {
-                        result.push(chars[i]);
+                while i < len && bytes[i] != b'\'' {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        result.push(bytes[i] as char);
                         i += 1;
-                        result.push(chars[i]);
+                        result.push(bytes[i] as char);
                         i += 1;
                     } else {
-                        result.push(chars[i]);
+                        result.push(bytes[i] as char);
                         i += 1;
                     }
                 }
-                // Copy closing quote
-                if i < len && chars[i] == '\'' {
-                    result.push(chars[i]);
+                if i < len && bytes[i] == b'\'' {
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
                 continue;
             }
             // Skip string literals verbatim
-            if chars[i] == '"' {
-                result.push(chars[i]);
+            if bytes[i] == b'"' {
+                result.push(bytes[i] as char);
                 i += 1;
-                while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < len {
-                        result.push(chars[i]);
+                while i < len && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        result.push(bytes[i] as char);
                         i += 1;
-                        result.push(chars[i]);
+                        result.push(bytes[i] as char);
                         i += 1;
                     } else {
-                        result.push(chars[i]);
+                        result.push(bytes[i] as char);
                         i += 1;
                     }
                 }
-                if i < len && chars[i] == '"' {
-                    result.push(chars[i]);
+                if i < len && bytes[i] == b'"' {
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
                 continue;
             }
-            if chars[i].is_ascii_digit() {
-                // Skip entire number literal (hex 0x..., binary 0b..., octal, decimal)
-                // including suffixes like ULL, u, l, etc.
-                result.push(chars[i]);
+            if bytes[i].is_ascii_digit() {
+                // Skip entire number literal
+                result.push(bytes[i] as char);
                 i += 1;
-                // After '0', check for hex/binary prefix
-                if i < len && chars[i - 1] == '0' && (chars[i] == 'x' || chars[i] == 'X' || chars[i] == 'b' || chars[i] == 'B') {
-                    result.push(chars[i]);
+                if i < len && bytes[i - 1] == b'0' && (bytes[i] == b'x' || bytes[i] == b'X' || bytes[i] == b'b' || bytes[i] == b'B') {
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
-                // Consume digits and hex digits
-                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
-                    result.push(chars[i]);
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.') {
+                    result.push(bytes[i] as char);
                     i += 1;
                 }
-            } else if is_ident_start(chars[i]) {
+            } else if is_ident_start_byte(bytes[i]) {
                 let start = i;
-                while i < len && is_ident_cont(chars[i]) {
+                i += 1;
+                while i < len && is_ident_cont_byte(bytes[i]) {
                     i += 1;
                 }
-                let ident: String = chars[start..i].iter().collect();
-                // Keep "defined" as-is, replace other identifiers with 0
+                let ident = bytes_to_str(bytes, start, i);
                 if ident == "defined" || ident == "true" || ident == "false" {
-                    result.push_str(&ident);
+                    result.push_str(ident);
                 } else {
-                    // Unknown identifier in #if => 0
                     result.push('0');
                 }
             } else {
-                result.push(chars[i]);
+                result.push(bytes[i] as char);
                 i += 1;
             }
         }
@@ -100,30 +96,28 @@ impl Preprocessor {
 
     /// Replace `defined(X)`, `defined X`, `__has_builtin(X)`, `__has_attribute(X)`,
     /// `__has_feature(X)`, and `__has_extension(X)` with 0 or 1 in a #if expression.
-    /// These must be resolved BEFORE macro expansion to prevent spurious expansion.
     pub(super) fn resolve_defined_in_expr(&self, expr: &str) -> String {
         let mut result = String::new();
-        let chars: Vec<char> = expr.chars().collect();
-        let len = chars.len();
+        let bytes = expr.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
 
         while i < len {
-            if is_ident_start(chars[i]) {
+            if is_ident_start_byte(bytes[i]) {
                 let start = i;
-                while i < len && is_ident_cont(chars[i]) {
+                i += 1;
+                while i < len && is_ident_cont_byte(bytes[i]) {
                     i += 1;
                 }
-                let ident: String = chars[start..i].iter().collect();
+                let ident = bytes_to_str(bytes, start, i);
 
                 if ident == "defined" {
-                    // Handle `defined(X)` and `defined X`
-                    // Skip whitespace
-                    while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                    while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                         i += 1;
                     }
-                    let has_paren = if i < len && chars[i] == '(' {
+                    let has_paren = if i < len && bytes[i] == b'(' {
                         i += 1;
-                        while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                        while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                             i += 1;
                         }
                         true
@@ -132,115 +126,111 @@ impl Preprocessor {
                     };
 
                     let name_start = i;
-                    while i < len && is_ident_cont(chars[i]) {
+                    while i < len && is_ident_cont_byte(bytes[i]) {
                         i += 1;
                     }
-                    let name: String = chars[name_start..i].iter().collect();
+                    let name = bytes_to_str(bytes, name_start, i);
 
                     if has_paren {
-                        while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                        while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                             i += 1;
                         }
-                        if i < len && chars[i] == ')' {
+                        if i < len && bytes[i] == b')' {
                             i += 1;
                         }
                     }
 
-                    let is_def = self.macros.is_defined(&name);
+                    let is_def = self.macros.is_defined(name);
                     result.push_str(if is_def { "1" } else { "0" });
                 } else if ident == "__has_builtin" {
-                    // Handle `__has_builtin(name)` - resolve before macro expansion
-                    let val = self.resolve_has_builtin_call(&chars, &mut i);
+                    let val = self.resolve_has_builtin_call_bytes(bytes, &mut i);
                     result.push_str(val);
                 } else if ident == "__has_attribute" {
-                    let val = self.resolve_has_attribute_call(&chars, &mut i);
+                    let val = self.resolve_has_attribute_call_bytes(bytes, &mut i);
                     result.push_str(val);
                 } else if ident == "__has_feature" || ident == "__has_extension" {
-                    // Skip the parenthesized argument and return "0"
-                    self.skip_paren_arg(&chars, &mut i);
+                    self.skip_paren_arg_bytes(bytes, &mut i);
                     result.push_str("0");
                 } else {
-                    result.push_str(&ident);
+                    result.push_str(ident);
                 }
                 continue;
             }
 
-            result.push(chars[i]);
+            result.push(bytes[i] as char);
             i += 1;
         }
 
         result
     }
 
-    /// Parse `(name)` after `__has_builtin` and return "1" or "0".
-    pub(super) fn resolve_has_builtin_call(&self, chars: &[char], i: &mut usize) -> &'static str {
-        let len = chars.len();
-        // Skip whitespace
-        while *i < len && (chars[*i] == ' ' || chars[*i] == '\t') {
+    /// Parse `(name)` after `__has_builtin` and return "1" or "0" (byte-oriented).
+    fn resolve_has_builtin_call_bytes(&self, bytes: &[u8], i: &mut usize) -> &'static str {
+        let len = bytes.len();
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
             *i += 1;
         }
-        if *i >= len || chars[*i] != '(' {
-            return "0";
-        }
-        *i += 1; // skip '('
-        while *i < len && (chars[*i] == ' ' || chars[*i] == '\t') {
-            *i += 1;
-        }
-        let start = *i;
-        while *i < len && is_ident_cont(chars[*i]) {
-            *i += 1;
-        }
-        let name: String = chars[start..*i].iter().collect();
-        // Skip to closing paren
-        while *i < len && chars[*i] != ')' {
-            *i += 1;
-        }
-        if *i < len {
-            *i += 1; // skip ')'
-        }
-        if Self::is_supported_builtin(&name) { "1" } else { "0" }
-    }
-
-    /// Parse `(name)` after `__has_attribute` and return "1" or "0".
-    pub(super) fn resolve_has_attribute_call(&self, chars: &[char], i: &mut usize) -> &'static str {
-        let len = chars.len();
-        while *i < len && (chars[*i] == ' ' || chars[*i] == '\t') {
-            *i += 1;
-        }
-        if *i >= len || chars[*i] != '(' {
+        if *i >= len || bytes[*i] != b'(' {
             return "0";
         }
         *i += 1;
-        while *i < len && (chars[*i] == ' ' || chars[*i] == '\t') {
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
             *i += 1;
         }
         let start = *i;
-        while *i < len && is_ident_cont(chars[*i]) {
+        while *i < len && is_ident_cont_byte(bytes[*i]) {
             *i += 1;
         }
-        let name: String = chars[start..*i].iter().collect();
-        while *i < len && chars[*i] != ')' {
+        let name = bytes_to_str(bytes, start, *i);
+        while *i < len && bytes[*i] != b')' {
             *i += 1;
         }
         if *i < len {
             *i += 1;
         }
-        if Self::is_supported_attribute(&name) { "1" } else { "0" }
+        if Self::is_supported_builtin(name) { "1" } else { "0" }
     }
 
-    /// Skip a parenthesized argument, used for unsupported __has_* operators.
-    pub(super) fn skip_paren_arg(&self, chars: &[char], i: &mut usize) {
-        let len = chars.len();
-        while *i < len && (chars[*i] == ' ' || chars[*i] == '\t') {
+    /// Parse `(name)` after `__has_attribute` and return "1" or "0" (byte-oriented).
+    fn resolve_has_attribute_call_bytes(&self, bytes: &[u8], i: &mut usize) -> &'static str {
+        let len = bytes.len();
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
             *i += 1;
         }
-        if *i < len && chars[*i] == '(' {
+        if *i >= len || bytes[*i] != b'(' {
+            return "0";
+        }
+        *i += 1;
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
+            *i += 1;
+        }
+        let start = *i;
+        while *i < len && is_ident_cont_byte(bytes[*i]) {
+            *i += 1;
+        }
+        let name = bytes_to_str(bytes, start, *i);
+        while *i < len && bytes[*i] != b')' {
+            *i += 1;
+        }
+        if *i < len {
+            *i += 1;
+        }
+        if Self::is_supported_attribute(name) { "1" } else { "0" }
+    }
+
+    /// Skip a parenthesized argument (byte-oriented).
+    fn skip_paren_arg_bytes(&self, bytes: &[u8], i: &mut usize) {
+        let len = bytes.len();
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
+            *i += 1;
+        }
+        if *i < len && bytes[*i] == b'(' {
             *i += 1;
             let mut depth = 1;
             while *i < len && depth > 0 {
-                if chars[*i] == '(' {
+                if bytes[*i] == b'(' {
                     depth += 1;
-                } else if chars[*i] == ')' {
+                } else if bytes[*i] == b')' {
                     depth -= 1;
                 }
                 *i += 1;

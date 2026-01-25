@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use super::macro_defs::{MacroDef, MacroTable, parse_define};
 use super::conditionals::{ConditionalStack, evaluate_condition};
 use super::builtin_macros::define_builtin_macros;
-use super::utils::{is_ident_start, is_ident_cont, skip_literal, skip_literal_bytes, copy_literal_bytes_raw};
+use super::utils::{is_ident_start, is_ident_cont, skip_literal_bytes, copy_literal_bytes_raw};
 
 pub struct Preprocessor {
     pub(super) macros: MacroTable,
@@ -380,15 +380,7 @@ impl Preprocessor {
             } else {
                 source_line_num + 1
             };
-            self.macros.define(MacroDef {
-                name: "__LINE__".to_string(),
-                is_function_like: false,
-                params: Vec::new(),
-                is_variadic: false,
-                has_named_variadic: false,
-                body: effective_line.to_string(),
-                is_predefined: true,
-            });
+            self.macros.set_line(effective_line);
 
             // Directive handling: #if/#ifdef/#ifndef/#elif/#else/#endif must always
             // be processed regardless of pending multi-line accumulation. Other
@@ -1261,18 +1253,19 @@ impl Default for Preprocessor {
 }
 
 /// Strip a // comment from a directive line, but not inside string literals.
+/// Returns a String; avoids Vec<char> allocation by operating on bytes.
 fn strip_line_comment(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
+    let bytes = line.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        match chars[i] {
-            '"' | '\'' => {
-                i = skip_literal(&chars, i, chars[i]);
+        match bytes[i] {
+            b'"' | b'\'' => {
+                i = skip_literal_bytes(bytes, i, bytes[i]);
             }
-            '/' if i + 1 < len && chars[i + 1] == '/' => {
-                return chars[..i].iter().collect::<String>().trim_end().to_string();
+            b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
+                return line[..i].trim_end().to_string();
             }
             _ => i += 1,
         }

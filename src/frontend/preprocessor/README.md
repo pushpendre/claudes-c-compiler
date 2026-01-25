@@ -21,10 +21,11 @@ preprocessing into the lexer but means macro source locations are lost.
   `#endif` nesting. Includes a simple constant expression evaluator for `#if`.
 - **builtin_macros.rs** - Defines GCC-compatible builtin function-like macros
   (e.g., `__builtin_va_start`, `__builtin_types_compatible_p`).
-- **utils.rs** - Shared helpers for literal skipping (`skip_literal`,
-  `copy_literal` and their byte-oriented variants) and identifier character
-  classification. These are used by multiple modules to avoid duplicating
-  the "skip past a string/char literal respecting backslash escapes" pattern.
+- **utils.rs** - Shared helpers for literal skipping (`skip_literal_bytes`,
+  `copy_literal_bytes_to_string`, `copy_literal_bytes_raw`), identifier
+  byte classification (`is_ident_start_byte`, `is_ident_cont_byte`), and
+  zero-copy string extraction (`bytes_to_str`). All hot-path scanning
+  operates on byte slices (`&[u8]`) to avoid `Vec<char>` allocation overhead.
 
 ### Important design notes
 
@@ -34,6 +35,7 @@ preprocessing into the lexer but means macro source locations are lost.
 - **Include resolution**: Searches `-I` paths then system paths. Each included
   file gets its own conditional stack (saved/restored around inclusion).
 - **`#pragma once`**: Tracked by canonical file path to prevent re-inclusion.
-- **Predefined macros**: `__LINE__` is updated per-line; `__FILE__` is updated
-  around includes. Target-specific macros (`__x86_64__` etc.) are set by
-  `set_target()`.
+- **Predefined macros**: `__LINE__` uses a `Cell<usize>` cache in `MacroTable`
+  (set via `set_line()`) to avoid per-line `MacroDef` allocation. `__FILE__`
+  is updated around includes. Target-specific macros (`__x86_64__` etc.)
+  are set by `set_target()`.
