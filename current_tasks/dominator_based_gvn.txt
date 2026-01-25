@@ -1,0 +1,12 @@
+Dominator-based GVN with extended value numbering
+
+Task: Extend GVN from local (intra-block) to dominator-based (cross-block).
+Also extend ExprKey to value-number Cast and GetElementPtr instructions.
+
+Steps:
+1. Extract dominator tree and CFG from mem2reg into shared ir/analysis.rs
+2. Upgrade gvn.rs to walk the dominator tree with scoped hash tables
+3. Add Cast and GetElementPtr to ExprKey for value numbering
+4. Run benchmarks to verify improvement on zlib/libjpeg
+
+Related ideas: medium_global_gvn.txt, medium_extract_domtree_and_cfg.txt
