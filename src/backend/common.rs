@@ -127,8 +127,60 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
 }
 
 /// Assembly output buffer with helpers for emitting text.
+///
+/// Besides the generic `emit` and `emit_fmt` methods, this provides specialized
+/// fast-path emitters for common patterns that avoid `core::fmt` overhead.
+/// The fast integer writer (`write_i64`) uses direct digit extraction instead
+/// of going through `Display`/`write_fmt` machinery.
 pub struct AsmOutput {
     pub buf: String,
+}
+
+/// Write an i64 directly into a String buffer using manual digit extraction.
+/// This is ~3-4x faster than `write!(buf, "{}", val)` for the common case
+/// because it avoids the `core::fmt` vtable dispatch and `pad_integral` overhead.
+#[inline]
+fn write_i64_fast(buf: &mut String, val: i64) {
+    if val == 0 {
+        buf.push('0');
+        return;
+    }
+    let mut tmp = [0u8; 20]; // i64 max is 19 digits + sign
+    let negative = val < 0;
+    // Work with absolute value using wrapping to handle i64::MIN correctly
+    let mut v = if negative { (val as u64).wrapping_neg() } else { val as u64 };
+    let mut pos = 20;
+    while v > 0 {
+        pos -= 1;
+        tmp[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    if negative {
+        pos -= 1;
+        tmp[pos] = b'-';
+    }
+    // SAFETY: tmp[pos..20] contains only ASCII digits and optionally a '-' prefix
+    let s = unsafe { std::str::from_utf8_unchecked(&tmp[pos..20]) };
+    buf.push_str(s);
+}
+
+/// Write a u64 directly into a String buffer.
+#[inline]
+fn write_u64_fast(buf: &mut String, val: u64) {
+    if val == 0 {
+        buf.push('0');
+        return;
+    }
+    let mut tmp = [0u8; 20]; // u64 max is 20 digits
+    let mut v = val;
+    let mut pos = 20;
+    while v > 0 {
+        pos -= 1;
+        tmp[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    let s = unsafe { std::str::from_utf8_unchecked(&tmp[pos..20]) };
+    buf.push_str(s);
 }
 
 impl AsmOutput {
@@ -148,6 +200,150 @@ impl AsmOutput {
     #[inline]
     pub fn emit_fmt(&mut self, args: std::fmt::Arguments<'_>) {
         std::fmt::Write::write_fmt(&mut self.buf, args).unwrap();
+        self.buf.push('\n');
+    }
+
+    // ── Fast-path emitters ──────────────────────────────────────────────
+    //
+    // These avoid the overhead of `format_args!` + `core::fmt::write` for
+    // the most common codegen patterns. Each one directly pushes bytes into
+    // the buffer using `push_str` and our fast integer writer.
+
+    /// Emit: `    {mnemonic} ${imm}, %{reg}`
+    /// Used for movq/movl/movabsq with immediate to register.
+    #[inline]
+    pub fn emit_instr_imm_reg(&mut self, mnemonic: &str, imm: i64, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" $");
+        write_i64_fast(&mut self.buf, imm);
+        self.buf.push_str(", %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} %{src}, %{dst}`
+    /// Used for movq/movl/xorq register-to-register.
+    #[inline]
+    pub fn emit_instr_reg_reg(&mut self, mnemonic: &str, src: &str, dst: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" %");
+        self.buf.push_str(src);
+        self.buf.push_str(", %");
+        self.buf.push_str(dst);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} {offset}(%rbp), %{reg}`
+    /// Used for loads from stack slots.
+    #[inline]
+    pub fn emit_instr_rbp_reg(&mut self, mnemonic: &str, offset: i64, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push(' ');
+        write_i64_fast(&mut self.buf, offset);
+        self.buf.push_str("(%rbp), %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} %{reg}, {offset}(%rbp)`
+    /// Used for stores to stack slots.
+    #[inline]
+    pub fn emit_instr_reg_rbp(&mut self, mnemonic: &str, reg: &str, offset: i64) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" %");
+        self.buf.push_str(reg);
+        self.buf.push_str(", ");
+        write_i64_fast(&mut self.buf, offset);
+        self.buf.push_str("(%rbp)");
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} ${imm}, {offset}(%rbp)`
+    /// Used for stores of immediates to stack slots.
+    #[inline]
+    pub fn emit_instr_imm_rbp(&mut self, mnemonic: &str, imm: i64, offset: i64) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" $");
+        write_i64_fast(&mut self.buf, imm);
+        self.buf.push_str(", ");
+        write_i64_fast(&mut self.buf, offset);
+        self.buf.push_str("(%rbp)");
+        self.buf.push('\n');
+    }
+
+    /// Emit a block label line: `.L{id}:`
+    #[inline]
+    pub fn emit_block_label(&mut self, block_id: u32) {
+        self.buf.push_str(".L");
+        write_u64_fast(&mut self.buf, block_id as u64);
+        self.buf.push(':');
+        self.buf.push('\n');
+    }
+
+    /// Write a block label reference (no colon, no newline) into the buffer: `.L{id}`
+    #[inline]
+    pub fn write_block_ref(&mut self, block_id: u32) {
+        self.buf.push_str(".L");
+        write_u64_fast(&mut self.buf, block_id as u64);
+    }
+
+    /// Emit: `    jmp .L{block_id}`
+    #[inline]
+    pub fn emit_jmp_block(&mut self, block_id: u32) {
+        self.buf.push_str("    jmp .L");
+        write_u64_fast(&mut self.buf, block_id as u64);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {jcc} .L{block_id}` (conditional jump to block label)
+    #[inline]
+    pub fn emit_jcc_block(&mut self, jcc: &str, block_id: u32) {
+        self.buf.push_str(jcc);
+        self.buf.push_str(" .L");
+        write_u64_fast(&mut self.buf, block_id as u64);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} {reg}`  (single-register instruction like push/pop)
+    #[inline]
+    pub fn emit_instr_reg(&mut self, mnemonic: &str, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} ${imm}`  (single-immediate instruction like push)
+    #[inline]
+    pub fn emit_instr_imm(&mut self, mnemonic: &str, imm: i64) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" $");
+        write_i64_fast(&mut self.buf, imm);
+        self.buf.push('\n');
+    }
+
+    /// Write an i64 into the buffer without newline. Useful for building
+    /// custom format patterns that include integers.
+    #[inline]
+    pub fn write_i64(&mut self, val: i64) {
+        write_i64_fast(&mut self.buf, val);
+    }
+
+    /// Write a u64 into the buffer without newline.
+    #[inline]
+    pub fn write_u64(&mut self, val: u64) {
+        write_u64_fast(&mut self.buf, val);
+    }
+
+    /// Push a string slice without newline.
+    #[inline]
+    pub fn write_str(&mut self, s: &str) {
+        self.buf.push_str(s);
+    }
+
+    /// Push a newline to end the current line.
+    #[inline]
+    pub fn newline(&mut self) {
         self.buf.push('\n');
     }
 }

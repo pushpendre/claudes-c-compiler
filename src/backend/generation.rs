@@ -424,7 +424,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
             // from the previous block's fall-through is not guaranteed to be valid
             // if control arrives from a different predecessor.
             cg.state().reg_cache.invalidate_all();
-            cg.state().emit_fmt(format_args!("{}:", block.label));
+            cg.state().out.emit_block_label(block.label.0);
         }
 
         // Check for compare-branch fusion opportunity:
@@ -455,9 +455,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
             // Emit fused compare-and-branch: cmp + jCC directly
             if let Instruction::Cmp { dest: _, op, lhs, rhs, ty } = &block.instructions[fi] {
                 if let Terminator::CondBranch { cond: _, true_label, false_label } = &block.terminator {
-                    let true_str = true_label.as_label();
-                    let false_str = false_label.as_label();
-                    cg.emit_fused_cmp_branch(*op, lhs, rhs, *ty, &true_str, &false_str);
+                    cg.emit_fused_cmp_branch_blocks(*op, lhs, rhs, *ty, *true_label, *false_label);
                 }
             }
         } else {
@@ -638,13 +636,10 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
             cg.emit_return(val.as_ref(), frame_size);
         }
         Terminator::Branch(label) => {
-            let label_str = label.as_label();
-            cg.emit_branch(&label_str);
+            cg.emit_branch_to_block(*label);
         }
         Terminator::CondBranch { cond, true_label, false_label } => {
-            let true_str = true_label.as_label();
-            let false_str = false_label.as_label();
-            cg.emit_cond_branch(cond, &true_str, &false_str);
+            cg.emit_cond_branch_blocks(cond, *true_label, *false_label);
         }
         Terminator::IndirectBranch { target, .. } => {
             cg.emit_indirect_branch(target);

@@ -19,3 +19,4 @@ path = "src/main.rs"
 [[bin]]
 name = "ccc-riscv"
 path = "src/main.rs"
+

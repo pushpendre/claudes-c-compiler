@@ -668,6 +668,18 @@ pub trait ArchCodegen {
         self.state().emit_fmt(format_args!("    {} {}", mnemonic, label));
     }
 
+    /// Emit an unconditional branch to a BlockId, avoiding String allocation.
+    fn emit_branch_to_block(&mut self, block: BlockId) {
+        // Cache the mnemonic first to avoid borrow conflict with state()
+        let mnemonic = self.jump_mnemonic();
+        let out = &mut self.state().out;
+        out.write_str("    ");
+        out.write_str(mnemonic);
+        out.write_str(" .L");
+        out.write_u64(block.0 as u64);
+        out.newline();
+    }
+
     /// Emit an unreachable trap instruction.
     fn emit_unreachable(&mut self) {
         let trap = self.trap_instruction();
@@ -709,6 +721,16 @@ pub trait ArchCodegen {
         self.emit_branch(false_label);
     }
 
+    /// Emit a conditional branch to BlockIds, avoiding String allocations.
+    fn emit_cond_branch_blocks(&mut self, cond: &Operand, true_block: BlockId, false_block: BlockId) {
+        self.emit_load_operand(cond);
+        // We need the label strings for emit_branch_nonzero which takes &str.
+        // Use as_label() here since emit_branch_nonzero is arch-specific.
+        let true_label = true_block.as_label();
+        self.emit_branch_nonzero(&true_label);
+        self.emit_branch_to_block(false_block);
+    }
+
     /// Emit a fused compare-and-branch: perform the comparison and immediately
     /// branch based on the result, without materializing the boolean value.
     ///
@@ -740,6 +762,22 @@ pub trait ArchCodegen {
         self.emit_branch(false_label);
         // Invalidate cache since dummy_dest may have polluted it.
         self.state().reg_cache.invalidate_all();
+    }
+
+    /// Emit a fused compare-and-branch to BlockIds, avoiding String allocations.
+    fn emit_fused_cmp_branch_blocks(
+        &mut self,
+        op: IrCmpOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        ty: IrType,
+        true_block: BlockId,
+        false_block: BlockId,
+    ) {
+        // Default: delegate to string-based version.
+        let true_label = true_block.as_label();
+        let false_label = false_block.as_label();
+        self.emit_fused_cmp_branch(op, lhs, rhs, ty, &true_label, &false_label);
     }
 
     /// Emit an indirect branch (computed goto).
