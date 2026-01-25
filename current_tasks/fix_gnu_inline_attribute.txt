@@ -1,0 +1,15 @@
+Task: Support __attribute__((gnu_inline)) for extern inline functions
+
+Problem:
+The Linux kernel defines `inline` as `inline __attribute__((__gnu_inline__))`.
+With __gnu_inline__, extern inline functions use GNU89 semantics where they should
+NOT emit an externally-visible definition. Our compiler was ignoring the gnu_inline
+attribute, using C99 semantics where extern inline DOES emit an external definition.
+This caused "multiple definition" linker errors for functions like native_save_fl
+which are defined as extern inline in headers and have a separate .S definition.
+
+Fix:
+1. Parser: recognize gnu_inline/__gnu_inline__ attribute, set parsing_gnu_inline flag
+2. AST: add is_gnu_inline and is_extern fields to FunctionDef
+3. Lowering: treat extern inline + gnu_inline as skippable (like static inline),
+   and when emitted (because referenced), force is_static=true for local linkage
