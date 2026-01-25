@@ -1404,6 +1404,10 @@ impl ArchCodegen for X86Codegen {
         self.state.emit_fmt(format_args!("    {} (%rcx), {}", instr, dest_reg));
     }
 
+    fn emit_add_offset_to_addr_reg(&mut self, offset: i64) {
+        self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+    }
+
     fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         // Load base address directly into rcx (no push/pop needed).
         if is_alloca {
@@ -1421,6 +1425,38 @@ impl ArchCodegen for X86Codegen {
         // rcx has the base address, rax has the offset; add them.
         self.state.emit("    addq %rcx, %rax");
         // rax now has a computed address, not a value from any slot.
+        self.state.reg_cache.invalidate_acc();
+    }
+
+    fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) {
+        // Alloca base + constant offset: single lea instruction.
+        // leaq (slot+offset)(%rbp), %rax
+        let folded = slot.0 + offset;
+        self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rax", folded));
+        self.state.reg_cache.invalidate_acc();
+    }
+
+    fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) {
+        // Pointer base + constant offset: load ptr, then lea offset(ptr), %rax.
+        // First load the base pointer into rax.
+        if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rax", reg_name));
+        } else {
+            self.state.emit_fmt(format_args!("    movq {}(%rbp), %rax", slot.0));
+        }
+        // Then add constant offset. Use leaq for non-zero, skip for zero.
+        if offset != 0 {
+            self.state.emit_fmt(format_args!("    leaq {}(%rax), %rax", offset));
+        }
+        self.state.reg_cache.invalidate_acc();
+    }
+
+    fn emit_gep_add_const_to_acc(&mut self, offset: i64) {
+        // After computing base addr in rax, add constant offset.
+        if offset != 0 {
+            self.state.emit_fmt(format_args!("    addq ${}, %rax", offset));
+        }
         self.state.reg_cache.invalidate_acc();
     }
 

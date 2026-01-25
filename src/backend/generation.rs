@@ -11,10 +11,201 @@
 
 use crate::ir::ir::*;
 use crate::common::types::IrType;
-use crate::common::fx_hash::FxHashSet;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use super::common;
 use super::traits::ArchCodegen;
 use super::state::StackSlot;
+
+/// Information about a GEP with a constant offset that can be folded into
+/// Load/Store addressing modes. Instead of computing `base + offset` as a
+/// separate instruction and spilling to stack, the constant offset is merged
+/// directly into the memory operand of the subsequent load/store.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GepFoldInfo {
+    /// The base pointer value (an alloca or previously-computed pointer).
+    pub(super) base: Value,
+    /// The constant byte offset to add to the base address.
+    pub(super) offset: i64,
+}
+
+/// Build a map of GEP destinations that can be folded into Load/Store instructions.
+///
+/// A GEP is foldable when:
+/// 1. Its offset is a compile-time constant (Operand::Const)
+/// 2. The constant fits in a 32-bit signed displacement (x86 addressing limit)
+/// 3. The GEP result is only used as the ptr operand of Load/Store instructions
+///    (not used by other instructions, terminators, or as a value operand)
+///
+/// When all conditions are met, the GEP instruction is skipped during codegen,
+/// and each Load/Store that uses it receives the (base, offset) directly.
+fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, GepFoldInfo> {
+    let mut gep_map: FxHashMap<u32, GepFoldInfo> = FxHashMap::default();
+
+    // Phase 1: Collect all GEPs with constant offsets.
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::GetElementPtr { dest, base, offset: Operand::Const(c), .. } = inst {
+                let offset_val = match c {
+                    IrConst::I64(n) => *n,
+                    IrConst::I32(n) => *n as i64,
+                    IrConst::I16(n) => *n as i64,
+                    IrConst::I8(n) => *n as i64,
+                    _ => continue,
+                };
+                // Offset must fit in 32-bit signed displacement for x86.
+                // Also reasonable for ARM (signed 9-bit unscaled or 12-bit scaled)
+                // and RISC-V (signed 12-bit).
+                // Use i32 range as the safe common limit.
+                if offset_val >= i32::MIN as i64 && offset_val <= i32::MAX as i64 {
+                    gep_map.insert(dest.0, GepFoldInfo { base: *base, offset: offset_val });
+                }
+            }
+        }
+    }
+
+    if gep_map.is_empty() {
+        return gep_map;
+    }
+
+    // Phase 2: Verify that each candidate GEP dest is ONLY used as Load/Store ptr.
+    // If it's used anywhere else (as a value operand, in a call, in a terminator,
+    // or as a base of another GEP), we cannot fold it.
+    let mut non_ptr_uses: FxHashSet<u32> = FxHashSet::default();
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                // Load/Store: ptr usage is foldable, but val usage is not.
+                Instruction::Load { ptr, .. } => {
+                    // ptr usage is OK — this is exactly what we want to fold.
+                    let _ = ptr;
+                }
+                Instruction::Store { val, ptr, .. } => {
+                    // ptr usage is OK, but val usage is not foldable.
+                    let _ = ptr;
+                    if let Operand::Value(v) = val {
+                        if gep_map.contains_key(&v.0) {
+                            non_ptr_uses.insert(v.0);
+                        }
+                    }
+                }
+                // Any other instruction that references a GEP dest as a value
+                // operand means we can't fold it.
+                _ => {
+                    // Check all operand positions for references to GEP dests.
+                    let check_op = |op: &Operand, set: &mut FxHashSet<u32>| {
+                        if let Operand::Value(v) = op {
+                            if gep_map.contains_key(&v.0) {
+                                set.insert(v.0);
+                            }
+                        }
+                    };
+                    let check_val = |v: &Value, set: &mut FxHashSet<u32>| {
+                        if gep_map.contains_key(&v.0) {
+                            set.insert(v.0);
+                        }
+                    };
+                    match inst {
+                        Instruction::BinOp { lhs, rhs, .. } | Instruction::Cmp { lhs, rhs, .. } => {
+                            check_op(lhs, &mut non_ptr_uses);
+                            check_op(rhs, &mut non_ptr_uses);
+                        }
+                        Instruction::UnaryOp { src, .. } | Instruction::Cast { src, .. }
+                        | Instruction::Copy { src, .. } => {
+                            check_op(src, &mut non_ptr_uses);
+                        }
+                        Instruction::GetElementPtr { base, offset, .. } => {
+                            // GEP base: if it points to another foldable GEP, can't fold.
+                            check_val(base, &mut non_ptr_uses);
+                            check_op(offset, &mut non_ptr_uses);
+                        }
+                        Instruction::Call { args, .. } => {
+                            for a in args { check_op(a, &mut non_ptr_uses); }
+                        }
+                        Instruction::CallIndirect { func_ptr, args, .. } => {
+                            check_op(func_ptr, &mut non_ptr_uses);
+                            for a in args { check_op(a, &mut non_ptr_uses); }
+                        }
+                        Instruction::Memcpy { dest, src, .. } => {
+                            check_val(dest, &mut non_ptr_uses);
+                            check_val(src, &mut non_ptr_uses);
+                        }
+                        Instruction::Phi { incoming, .. } => {
+                            for (op, _) in incoming { check_op(op, &mut non_ptr_uses); }
+                        }
+                        Instruction::AtomicRmw { ptr, val, .. } => {
+                            check_op(ptr, &mut non_ptr_uses);
+                            check_op(val, &mut non_ptr_uses);
+                        }
+                        Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
+                            check_op(ptr, &mut non_ptr_uses);
+                            check_op(expected, &mut non_ptr_uses);
+                            check_op(desired, &mut non_ptr_uses);
+                        }
+                        Instruction::AtomicLoad { ptr, .. } => check_op(ptr, &mut non_ptr_uses),
+                        Instruction::AtomicStore { ptr, val, .. } => {
+                            check_op(ptr, &mut non_ptr_uses);
+                            check_op(val, &mut non_ptr_uses);
+                        }
+                        Instruction::DynAlloca { size, .. } => check_op(size, &mut non_ptr_uses),
+                        Instruction::VaArg { va_list_ptr, .. } | Instruction::VaStart { va_list_ptr }
+                        | Instruction::VaEnd { va_list_ptr } => check_val(va_list_ptr, &mut non_ptr_uses),
+                        Instruction::VaCopy { dest_ptr, src_ptr } => {
+                            check_val(dest_ptr, &mut non_ptr_uses);
+                            check_val(src_ptr, &mut non_ptr_uses);
+                        }
+                        Instruction::SetReturnF64Second { src } | Instruction::SetReturnF32Second { src } =>
+                            check_op(src, &mut non_ptr_uses),
+                        Instruction::InlineAsm { inputs, .. } => {
+                            for (_, op, _) in inputs { check_op(op, &mut non_ptr_uses); }
+                        }
+                        Instruction::Intrinsic { args, .. } => {
+                            for a in args { check_op(a, &mut non_ptr_uses); }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Also check terminators.
+        match &block.terminator {
+            Terminator::CondBranch { cond, .. } => {
+                if let Operand::Value(v) = cond {
+                    if gep_map.contains_key(&v.0) {
+                        non_ptr_uses.insert(v.0);
+                    }
+                }
+            }
+            Terminator::Return(Some(op)) => {
+                if let Operand::Value(v) = op {
+                    if gep_map.contains_key(&v.0) {
+                        non_ptr_uses.insert(v.0);
+                    }
+                }
+            }
+            Terminator::IndirectBranch { target, .. } => {
+                if let Operand::Value(v) = target {
+                    if gep_map.contains_key(&v.0) {
+                        non_ptr_uses.insert(v.0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Remove GEPs that have non-ptr uses.
+    for val_id in &non_ptr_uses {
+        gep_map.remove(val_id);
+    }
+
+    // Also remove GEPs that are unused (use_count == 0).
+    gep_map.retain(|val_id, _| {
+        (*val_id as usize) < use_counts.len() && use_counts[*val_id as usize] > 0
+    });
+
+    gep_map
+}
 
 /// Returns the number of times each IR Value is used as an operand in
 /// instructions or terminators. Indexed by Value ID; used to identify
@@ -324,6 +515,10 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     // single-use Cmp results eligible for compare-branch fusion.
     let value_use_counts = count_value_uses(func);
 
+    // Pre-scan: identify GEPs with constant offsets that can be folded into
+    // Load/Store addressing modes, eliminating the GEP instruction entirely.
+    let gep_fold_map = build_gep_fold_map(func, &value_use_counts);
+
     for block in &func.blocks {
         if Some(block.label) != entry_label {
             // Invalidate register cache at block boundaries: a value in a register
@@ -344,7 +539,17 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
                 // Skip this Cmp -- it will be emitted fused with the terminator
                 continue;
             }
-            generate_instruction(cg, inst);
+            // Skip GEP instructions whose offset has been folded into Load/Store.
+            // Note: Only skip when the GEP's base is an alloca (Direct or OverAligned),
+            // because alloca slots are always valid %rbp-relative. For Indirect bases
+            // (pointer in stack slot), the GEP must still execute because the register
+            // allocator may reuse the base's register between the GEP and the Load/Store.
+            if let Instruction::GetElementPtr { dest, base, .. } = inst {
+                if gep_fold_map.contains_key(&dest.0) && cg.state_ref().is_alloca(base.0) {
+                    continue;
+                }
+            }
+            generate_instruction(cg, inst, &gep_fold_map);
         }
 
         if let Some(fi) = fuse_idx {
@@ -378,7 +583,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
 ///
 /// Instructions that clobber the accumulator unpredictably (calls, stores, atomics,
 /// inline asm, va_arg, memcpy, etc.) invalidate the cache after execution.
-fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
+fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_map: &FxHashMap<u32, GepFoldInfo>) {
     match inst {
         Instruction::Alloca { .. } => {
             // Space already allocated in prologue; does not touch registers
@@ -406,6 +611,16 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         // value after execution, so we do NOT invalidate.
 
         Instruction::Load { dest, ptr, ty } => {
+            // Check if the ptr comes from a foldable GEP with constant offset.
+            // Only fold when the GEP's base is an alloca (Direct/OverAligned), where
+            // the slot address is always valid. For Indirect bases, the GEP was NOT
+            // skipped and already computed the address, so use normal load.
+            if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
+                if !is_i128_type(*ty) && cg.state_ref().is_alloca(gep_info.base.0) {
+                    cg.emit_load_with_const_offset(dest, &gep_info.base, gep_info.offset, *ty);
+                    return;
+                }
+            }
             // emit_load ends with emit_store_result(dest) for non-i128.
             // For i128, it ends with emit_store_acc_pair(dest).
             cg.emit_load(dest, ptr, *ty);
@@ -465,7 +680,19 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         _ => {
             match inst {
                 Instruction::DynAlloca { dest, size, align } => cg.emit_dyn_alloca(dest, size, *align),
-                Instruction::Store { val, ptr, ty } => cg.emit_store(val, ptr, *ty),
+                Instruction::Store { val, ptr, ty } => {
+                    // Check if the ptr comes from a foldable GEP with constant offset.
+                    // Only fold for alloca bases (see Load comment above).
+                    if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
+                        if !is_i128_type(*ty) && cg.state_ref().is_alloca(gep_info.base.0) {
+                            cg.emit_store_with_const_offset(val, &gep_info.base, gep_info.offset, *ty);
+                        } else {
+                            cg.emit_store(val, ptr, *ty);
+                        }
+                    } else {
+                        cg.emit_store(val, ptr, *ty);
+                    }
+                }
                 Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes } =>
                     cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes),
                 Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes } =>

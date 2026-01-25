@@ -1257,6 +1257,15 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit_fmt(format_args!("    {} t0, 0(t5)", instr));
     }
 
+    fn emit_add_offset_to_addr_reg(&mut self, offset: i64) {
+        if Self::fits_imm12(offset) {
+            self.state.emit_fmt(format_args!("    addi t5, t5, {}", offset));
+        } else {
+            self.state.emit_fmt(format_args!("    li t6, {}", offset));
+            self.state.emit("    add t5, t5, t6");
+        }
+    }
+
     fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.emit_addi_s0("t1", slot.0);

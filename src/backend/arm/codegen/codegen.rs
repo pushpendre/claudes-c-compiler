@@ -1040,6 +1040,17 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit_fmt(format_args!("    {} {}, [x9]", actual_instr, dest_reg));
     }
 
+    fn emit_add_offset_to_addr_reg(&mut self, offset: i64) {
+        if offset >= 0 && offset <= 4095 {
+            self.state.emit_fmt(format_args!("    add x9, x9, #{}", offset));
+        } else if offset < 0 && (-offset) <= 4095 {
+            self.state.emit_fmt(format_args!("    sub x9, x9, #{}", -offset));
+        } else {
+            self.load_large_imm("x17", offset);
+            self.state.emit("    add x9, x9, x17");
+        }
+    }
+
     fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, _val_id: u32) {
         if is_alloca {
             self.emit_add_sp_offset("x1", slot.0);

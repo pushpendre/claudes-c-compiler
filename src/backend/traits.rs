@@ -145,6 +145,67 @@ pub trait ArchCodegen {
         }
     }
 
+    /// Emit a load with a folded GEP constant offset: load from (alloca_base + const_offset).
+    ///
+    /// This is an optimization for the common pattern:
+    ///   %ptr = GEP %alloca_base, const_offset
+    ///   %val = Load %ptr
+    /// The GEP instruction is skipped and the offset is folded into the load.
+    ///
+    /// Precondition: Only called for alloca bases (Direct/OverAligned), where the slot address
+    /// is always valid %rbp-relative. Never called for Indirect bases because the GEP
+    /// would be skipped but the base register might be stale.
+    fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
+        let addr = self.state_ref().resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let load_instr = self.load_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_load_indirect(load_instr);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_load_from_slot(load_instr, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                }
+            }
+            self.emit_store_result(dest);
+        }
+    }
+
+    /// Emit a store with a folded GEP constant offset: store val to (alloca_base + const_offset).
+    ///
+    /// Precondition: Only called for alloca bases. See emit_load_with_const_offset.
+    fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
+        self.emit_load_operand(val);
+        let addr = self.state_ref().resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let store_instr = self.store_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_save_acc();
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                }
+            }
+        }
+    }
+
+    /// Add a constant offset to the address register (rcx on x86, x9 on ARM, t5 on RISC-V).
+    fn emit_add_offset_to_addr_reg(&mut self, offset: i64);
+
     /// Emit a binary operation. Default: dispatches i128/float/integer ops.
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if is_i128_type(ty) {
@@ -309,6 +370,40 @@ pub trait ArchCodegen {
 
     /// Emit a get-element-pointer (base + offset).
     fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
+        // Optimized path for constant offsets: avoid loading offset into acc
+        // and adding via secondary register. Instead, directly compute
+        // base_addr + constant using efficient addressing modes.
+        if let Operand::Const(c) = offset {
+            let const_offset = match c {
+                IrConst::I64(n) => Some(*n),
+                IrConst::I32(n) => Some(*n as i64),
+                IrConst::I16(n) => Some(*n as i64),
+                IrConst::I8(n) => Some(*n as i64),
+                _ => None,
+            };
+            if let Some(off) = const_offset {
+                if let Some(addr) = self.state_ref().resolve_slot_addr(base.0) {
+                    match addr {
+                        SlotAddr::OverAligned(slot, id) => {
+                            // Compute aligned base addr into acc, then add offset.
+                            self.emit_alloca_aligned_addr_to_acc(slot, id);
+                            self.emit_gep_add_const_to_acc(off);
+                        }
+                        SlotAddr::Direct(slot) => {
+                            // Alloca: lea (slot+offset)(%rbp), %rax — single instruction.
+                            self.emit_gep_direct_const(slot, off);
+                        }
+                        SlotAddr::Indirect(slot) => {
+                            // Pointer in slot: load ptr, then lea offset(%rax), %rax.
+                            self.emit_gep_indirect_const(slot, off, base.0);
+                        }
+                    }
+                    self.emit_store_result(dest);
+                    return;
+                }
+            }
+        }
+        // General path for non-constant offsets.
         if let Some(addr) = self.state_ref().resolve_slot_addr(base.0) {
             match addr {
                 SlotAddr::OverAligned(slot, id) => {
@@ -322,6 +417,37 @@ pub trait ArchCodegen {
         self.emit_load_operand(offset);
         self.emit_add_secondary_to_acc();
         self.emit_store_result(dest);
+    }
+
+    /// Emit optimized GEP for Direct (alloca) base + constant offset.
+    /// Default: lea (slot+offset)(%rbp), %rax — single instruction on x86.
+    fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) {
+        // Default fallback: lea slot(%rbp) to secondary, load offset to acc, add.
+        self.emit_slot_addr_to_secondary(slot, true, 0);
+        self.emit_gep_add_const_to_acc_from_secondary(offset);
+    }
+
+    /// Emit optimized GEP for Indirect base + constant offset.
+    /// Default: load ptr from slot, then lea offset(ptr), %rax — two instructions on x86.
+    fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) {
+        // Default fallback: load ptr to secondary, load offset to acc, add.
+        self.emit_slot_addr_to_secondary(slot, false, val_id);
+        self.emit_gep_add_const_to_acc_from_secondary(offset);
+    }
+
+    /// Add a constant offset to accumulator (used after computing base in acc).
+    fn emit_gep_add_const_to_acc(&mut self, offset: i64) {
+        // Default: load constant to acc as secondary, add (inefficient fallback).
+        // Backends should override with `addq $offset, %rax` or `leaq offset(%rax), %rax`.
+        self.emit_acc_to_secondary();
+        self.emit_load_operand(&Operand::Const(IrConst::I64(offset)));
+        self.emit_add_secondary_to_acc();
+    }
+
+    /// Helper for default GEP const implementations: secondary has base, need acc = base + offset.
+    fn emit_gep_add_const_to_acc_from_secondary(&mut self, offset: i64) {
+        self.emit_load_operand(&Operand::Const(IrConst::I64(offset)));
+        self.emit_add_secondary_to_acc();
     }
 
     /// Move accumulator to secondary register (push on x86).
