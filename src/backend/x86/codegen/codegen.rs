@@ -2219,8 +2219,8 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)]) {
-        emit_inline_asm_common(self, template, outputs, inputs, operand_types, goto_labels);
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>]) {
+        emit_inline_asm_common(self, template, outputs, inputs, operand_types, goto_labels, input_symbols);
         self.state.reg_cache.invalidate_all(); // inline asm may clobber rax
     }
 
@@ -2659,6 +2659,7 @@ impl InlineAsmEmitter for X86Codegen {
         let op_is_memory: Vec<bool> = operands.iter().map(|o| matches!(o.kind, AsmOperandKind::Memory)).collect();
         let op_mem_addrs: Vec<String> = operands.iter().map(|o| o.mem_addr.clone()).collect();
         let op_imm_values: Vec<Option<i64>> = operands.iter().map(|o| o.imm_value).collect();
+        let op_imm_symbols: Vec<Option<String>> = operands.iter().map(|o| o.imm_symbol.clone()).collect();
 
         // Build operand type array for register size selection
         let total = operands.len();
@@ -2675,7 +2676,7 @@ impl InlineAsmEmitter for X86Codegen {
             }
         }
 
-        Self::substitute_x86_asm_operands(line, &op_regs, &op_names, &op_is_memory, &op_mem_addrs, &op_types, gcc_to_internal, goto_labels, &op_imm_values)
+        Self::substitute_x86_asm_operands(line, &op_regs, &op_names, &op_is_memory, &op_mem_addrs, &op_types, gcc_to_internal, goto_labels, &op_imm_values, &op_imm_symbols)
     }
 
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {

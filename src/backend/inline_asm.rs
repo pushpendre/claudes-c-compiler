@@ -54,13 +54,16 @@ pub struct AsmOperand {
     pub mem_offset: i64,
     /// Immediate value for "I"/"i" constraints.
     pub imm_value: Option<i64>,
+    /// Symbol name for "i" constraint operands that reference global/function addresses.
+    /// Used by %P and %a modifiers to emit raw symbol names in inline asm templates.
+    pub imm_symbol: Option<String>,
     /// IR type of this operand, used for correctly-sized loads/stores.
     pub operand_type: IrType,
 }
 
 impl AsmOperand {
     pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
-        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, operand_type: IrType::I64 }
+        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, imm_symbol: None, operand_type: IrType::I64 }
     }
 
     /// Copy register assignment and addressing metadata from another operand.
@@ -149,6 +152,7 @@ pub fn emit_inline_asm_common(
     inputs: &[(String, Operand, Option<String>)],
     operand_types: &[IrType],
     goto_labels: &[(String, BlockId)],
+    input_symbols: &[Option<String>],
 ) {
     emitter.reset_scratch_state();
     let total_operands = outputs.len() + inputs.len();
@@ -199,6 +203,26 @@ pub fn emit_inline_asm_common(
         }
 
         operands.push(op);
+    }
+
+    // Populate symbol names for input operands from input_symbols
+    for (i, sym) in input_symbols.iter().enumerate() {
+        let op_idx = outputs.len() + i;
+        if op_idx < operands.len() {
+            if let Some(ref s) = sym {
+                operands[op_idx].imm_symbol = Some(s.clone());
+            }
+        }
+    }
+
+    // For Immediate operands that have neither an imm_value nor an imm_symbol,
+    // the value is a runtime expression (e.g., &struct.member) that couldn't be
+    // resolved to a constant or symbol. Fall back to GpReg so the value gets
+    // loaded into a register for use by %P/%a modifiers.
+    for op in operands.iter_mut() {
+        if matches!(op.kind, AsmOperandKind::Immediate) && op.imm_value.is_none() && op.imm_symbol.is_none() {
+            op.kind = AsmOperandKind::GpReg;
+        }
     }
 
     // Assign scratch registers to operands that need them

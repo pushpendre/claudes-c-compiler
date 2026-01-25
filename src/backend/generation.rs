@@ -316,8 +316,8 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
                 Instruction::SetReturnF64Second { src } => cg.emit_set_return_f64_second(src),
                 Instruction::GetReturnF32Second { dest } => cg.emit_get_return_f32_second(dest),
                 Instruction::SetReturnF32Second { src } => cg.emit_set_return_f32_second(src),
-                Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types, goto_labels } =>
-                    cg.emit_inline_asm(template, outputs, inputs, clobbers, operand_types, goto_labels),
+                Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols } =>
+                    cg.emit_inline_asm(template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols),
                 Instruction::Intrinsic { dest, op, dest_ptr, args } => cg.emit_intrinsic(dest, op, dest_ptr, args),
                 Instruction::Alloca { .. } | Instruction::Copy { .. }
                 | Instruction::Load { .. } | Instruction::BinOp { .. }

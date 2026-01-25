@@ -2,14 +2,22 @@
 //!
 //! This module provides helper methods for processing x86 inline assembly operands,
 //! including template variable substitution (%0, %[name], etc.) and register name
-//! formatting with size modifiers (b/w/k/q/h/l).
+//! formatting with size modifiers (b/w/k/q/h/l) and special modifiers (P/a/c).
 
 use crate::common::types::IrType;
 use crate::ir::ir::BlockId;
 use super::codegen::X86Codegen;
 
 impl X86Codegen {
-    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %l[name] etc. in x86 asm template.
+    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %P0, %a0, %l[name] etc.
+    /// in x86 asm template.
+    ///
+    /// Modifier summary:
+    /// - `k` (32-bit), `w` (16-bit), `b` (8-bit low), `h` (8-bit high), `q` (64-bit), `l` (32-bit alt)
+    /// - `c`: raw constant (no `$` prefix for immediates, no `%` prefix for registers)
+    /// - `P`: raw symbol/constant (like `c` — used for `call %P[func]`)
+    /// - `a`: address reference (emits `symbol(%rip)` for symbols, raw value for immediates)
+    ///
     /// Uses operand_types to determine the default register size when no modifier is given.
     pub(super) fn substitute_x86_asm_operands(
         line: &str,
@@ -21,6 +29,7 @@ impl X86Codegen {
         gcc_to_internal: &[usize],
         goto_labels: &[(String, BlockId)],
         op_imm_values: &[Option<i64>],
+        op_imm_symbols: &[Option<String>],
     ) -> String {
         let mut result = String::new();
         let chars: Vec<char> = line.chars().collect();
@@ -35,7 +44,8 @@ impl X86Codegen {
                     continue;
                 }
                 // Check for x86 size/format modifiers:
-                //   k (32), w (16), b (8-low), h (8-high), q (64), l (32-alt), c (raw constant)
+                //   k (32), w (16), b (8-low), h (8-high), q (64), l (32-alt),
+                //   c (raw constant), P (raw symbol), a (address)
                 // But 'l' followed by '[' may be a goto label reference %l[name]
                 let mut modifier = None;
                 if chars[i] == 'l' && i + 1 < chars.len() && chars[i + 1] == '[' && !goto_labels.is_empty() {
@@ -78,7 +88,13 @@ impl X86Codegen {
                     i = saved_i;
                     modifier = Some('l');
                     i += 1;
-                } else if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l' | 'c') {
+                } else if chars[i] == 'P' {
+                    // %P: raw symbol/value modifier (uppercase — always a modifier, never a register)
+                    if i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '[') {
+                        modifier = Some('P');
+                        i += 1;
+                    }
+                } else if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l' | 'c' | 'a') {
                     if i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '[') {
                         modifier = Some(chars[i]);
                         i += 1;
@@ -99,23 +115,9 @@ impl X86Codegen {
                     for (idx, op_name) in op_names.iter().enumerate() {
                         if let Some(ref n) = op_name {
                             if n == &name {
-                                if modifier == Some('c') {
-                                    // %c[name]: raw constant — emit immediate value or register without prefix
-                                    if let Some(Some(imm)) = op_imm_values.get(idx) {
-                                        result.push_str(&format!("{}", imm));
-                                    } else {
-                                        result.push_str(&op_regs[idx]);
-                                    }
-                                } else if let Some(Some(imm)) = op_imm_values.get(idx) {
-                                    // Immediate operand — emit as $value
-                                    result.push_str(&format!("${}", imm));
-                                } else if op_is_memory[idx] {
-                                    result.push_str(&op_mem_addrs[idx]);
-                                } else {
-                                    let effective_mod = modifier.or_else(|| Self::default_modifier_for_type(op_types.get(idx).copied()));
-                                    result.push('%');
-                                    result.push_str(&Self::format_x86_reg(&op_regs[idx], effective_mod));
-                                }
+                                Self::emit_operand_with_modifier(&mut result, idx, modifier,
+                                    op_regs, op_is_memory, op_mem_addrs, op_types,
+                                    op_imm_values, op_imm_symbols);
                                 found = true;
                                 break;
                             }
@@ -142,23 +144,9 @@ impl X86Codegen {
                         num // fallback: direct mapping
                     };
                     if internal_idx < op_regs.len() {
-                        if modifier == Some('c') {
-                            // %c<N>: raw constant — emit immediate value or register without prefix
-                            if let Some(Some(imm)) = op_imm_values.get(internal_idx) {
-                                result.push_str(&format!("{}", imm));
-                            } else {
-                                result.push_str(&op_regs[internal_idx]);
-                            }
-                        } else if let Some(Some(imm)) = op_imm_values.get(internal_idx) {
-                            // Immediate operand — emit as $value
-                            result.push_str(&format!("${}", imm));
-                        } else if op_is_memory[internal_idx] {
-                            result.push_str(&op_mem_addrs[internal_idx]);
-                        } else {
-                            let effective_mod = modifier.or_else(|| Self::default_modifier_for_type(op_types.get(internal_idx).copied()));
-                            result.push('%');
-                            result.push_str(&Self::format_x86_reg(&op_regs[internal_idx], effective_mod));
-                        }
+                        Self::emit_operand_with_modifier(&mut result, internal_idx, modifier,
+                            op_regs, op_is_memory, op_mem_addrs, op_types,
+                            op_imm_values, op_imm_symbols);
                     } else {
                         result.push('%');
                         if let Some(m) = modifier { result.push(m); }
@@ -177,6 +165,61 @@ impl X86Codegen {
             }
         }
         result
+    }
+
+    /// Emit a single operand with the given modifier into the result string.
+    /// Shared helper for both named and positional operand substitution.
+    fn emit_operand_with_modifier(
+        result: &mut String,
+        idx: usize,
+        modifier: Option<char>,
+        op_regs: &[String],
+        op_is_memory: &[bool],
+        op_mem_addrs: &[String],
+        op_types: &[IrType],
+        op_imm_values: &[Option<i64>],
+        op_imm_symbols: &[Option<String>],
+    ) {
+        let is_raw = matches!(modifier, Some('c') | Some('P'));
+        let is_addr = modifier == Some('a');
+        let has_symbol = op_imm_symbols.get(idx).and_then(|s| s.as_ref());
+        let has_imm = op_imm_values.get(idx).and_then(|v| v.as_ref());
+
+        if is_raw {
+            // %c / %P: emit raw value without $ or % prefix
+            if let Some(sym) = has_symbol {
+                result.push_str(sym);
+            } else if let Some(imm) = has_imm {
+                result.push_str(&format!("{}", imm));
+            } else {
+                // Register: emit without % prefix
+                result.push_str(&op_regs[idx]);
+            }
+        } else if is_addr {
+            // %a: emit as address reference
+            if let Some(sym) = has_symbol {
+                // Symbol: emit as symbol(%rip) for RIP-relative addressing
+                result.push_str(&format!("{}(%rip)", sym));
+            } else if let Some(imm) = has_imm {
+                // Immediate: emit raw value (absolute address)
+                result.push_str(&format!("{}", imm));
+            } else if op_is_memory[idx] {
+                // Memory operand: emit its address
+                result.push_str(&op_mem_addrs[idx]);
+            } else {
+                // Register: emit as indirect (%reg)
+                result.push_str(&format!("(%{})", op_regs[idx]));
+            }
+        } else if let Some(imm) = has_imm {
+            // Normal immediate — emit as $value
+            result.push_str(&format!("${}", imm));
+        } else if op_is_memory[idx] {
+            result.push_str(&op_mem_addrs[idx]);
+        } else {
+            let effective_mod = modifier.or_else(|| Self::default_modifier_for_type(op_types.get(idx).copied()));
+            result.push('%');
+            result.push_str(&Self::format_x86_reg(&op_regs[idx], effective_mod));
+        }
     }
 
     /// Determine the default register size modifier based on the operand's IR type.

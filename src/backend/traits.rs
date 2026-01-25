@@ -409,7 +409,7 @@ pub trait ArchCodegen {
     fn emit_fence(&mut self, ordering: AtomicOrdering);
 
     /// Emit inline assembly.
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)]);
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>]);
 
     /// Emit a return terminator.
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {

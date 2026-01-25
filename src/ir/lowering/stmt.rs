@@ -1230,6 +1230,7 @@ impl Lowerer {
                 }
 
                 // Process input operands: evaluate expression to get value
+                let mut input_symbols: Vec<Option<String>> = Vec::new();
                 for inp in inputs {
                     let constraint = inp.constraint.clone();
                     let name = inp.name.clone();
@@ -1240,10 +1241,16 @@ impl Lowerer {
                     // GCC allows multi-alternative constraints like "Ir" (immediate or register),
                     // "ri" (register or immediate), "In" etc. Uses shared helper to check
                     // the same set of immediate letters as the backend framework.
+                    //
+                    // Also extract symbol names for "i" constraints that reference
+                    // functions/globals — needed for %P and %a modifiers.
+                    let mut sym_name: Option<String> = None;
                     let val = if constraint_has_immediate_alt(&constraint) {
                         if let Some(const_val) = self.eval_const_expr(&inp.expr) {
                             Operand::Const(const_val)
                         } else {
+                            // Try to extract symbol name for %P/%a modifier support
+                            sym_name = Self::extract_symbol_name(&inp.expr);
                             self.lower_expr(&inp.expr)
                         }
                     } else if constraint_has_memory_alt(&constraint) {
@@ -1262,6 +1269,7 @@ impl Lowerer {
                     };
                     ir_inputs.push((constraint, val, name));
                     operand_types.push(inp_ty);
+                    input_symbols.push(sym_name);
                 }
 
                 // Resolve goto label names to block IDs
@@ -1277,8 +1285,29 @@ impl Lowerer {
                     clobbers: clobbers.clone(),
                     operand_types,
                     goto_labels: ir_goto_labels,
+                    input_symbols,
                 });
             }
+        }
+    }
+
+    /// Extract a global symbol name from an expression, for use with inline asm
+    /// %P and %a modifiers. Handles:
+    /// - `func_name` (bare function identifier)
+    /// - `&var_name` (address-of global variable)
+    /// - Casts of the above (e.g., `(void *)func_name`)
+    fn extract_symbol_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Identifier(name, _) => Some(name.clone()),
+            Expr::AddressOf(inner, _) => {
+                if let Expr::Identifier(name, _) = inner.as_ref() {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Cast(_, inner, _) => Self::extract_symbol_name(inner),
+            _ => None,
         }
     }
 

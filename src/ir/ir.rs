@@ -299,6 +299,10 @@ pub enum Instruction {
         operand_types: Vec<IrType>,
         /// Goto labels for asm goto: (C label name, resolved block ID)
         goto_labels: Vec<(String, BlockId)>,
+        /// Symbol names for input operands with "i" constraints (e.g., function names).
+        /// One entry per input; None if the input is not a symbol reference.
+        /// Used by %P and %a modifiers to emit raw symbol names in inline asm.
+        input_symbols: Vec<Option<String>>,
     },
 
     /// Target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
