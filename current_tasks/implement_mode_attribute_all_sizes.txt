@@ -1,0 +1,8 @@
+Implement __attribute__((mode(QI/HI/SI/DI))) for integer type sizes.
+
+Currently only TI (128-bit) mode is handled. libffi uses DI mode to define
+UINT64/SINT64 types, and the missing mode support causes struct layout mismatches
+between C code and hand-written assembly, crashing all libffi tests.
+
+Fix: extend the parser's mode attribute handling to support QI (8-bit),
+HI (16-bit), SI (32-bit), and DI (64-bit) modes.
