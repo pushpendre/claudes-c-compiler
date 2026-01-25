@@ -647,16 +647,31 @@ impl IrConst {
             (IrConst::LongDouble(_), IrType::F64 | IrType::F128) => return self.clone(),
             _ => {}
         }
-        // Convert integer types via from_i64, with unsigned-aware int-to-float path
+        // Convert integer types via from_i64, with unsigned-aware paths
         if let Some(int_val) = self.to_i64() {
-            if target_ty.is_float() && src_ty.map_or(false, |t| t.is_unsigned()) {
-                let uint_val = int_val as u64;
-                return match target_ty {
-                    IrType::F32 => IrConst::F32(uint_val as f32),
-                    IrType::F64 => IrConst::F64(uint_val as f64),
-                    IrType::F128 => IrConst::LongDouble(uint_val as f64),
-                    _ => IrConst::I64(int_val),
+            // When the source type is unsigned, we need to zero-extend (not sign-extend)
+            // when widening to a larger type. E.g., (unsigned)-8 = 0xFFFFFFF8 stored as
+            // IrConst::I32(-8) must become IrConst::I64(4294967288), not IrConst::I64(-8).
+            if src_ty.map_or(false, |t| t.is_unsigned()) {
+                // Mask to the source type's width to get the correct unsigned value
+                let src_size = src_ty.unwrap().size();
+                let uint_val = match src_size {
+                    1 => (int_val as u8) as u64,
+                    2 => (int_val as u16) as u64,
+                    4 => (int_val as u32) as u64,
+                    8 => int_val as u64,
+                    _ => int_val as u64,
                 };
+                if target_ty.is_float() {
+                    return match target_ty {
+                        IrType::F32 => IrConst::F32(uint_val as f32),
+                        IrType::F64 => IrConst::F64(uint_val as f64),
+                        IrType::F128 => IrConst::LongDouble(uint_val as f64),
+                        _ => IrConst::I64(uint_val as i64),
+                    };
+                }
+                // For integer targets, use the zero-extended value
+                return IrConst::from_i64(uint_val as i64, target_ty);
             }
             return IrConst::from_i64(int_val, target_ty);
         }

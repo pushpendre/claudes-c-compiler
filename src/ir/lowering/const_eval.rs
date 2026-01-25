@@ -78,9 +78,10 @@ impl Lowerer {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
                 let r = self.eval_const_expr(rhs)?;
-                // For shift and arithmetic operations, we need the LHS type for signedness/width
+                // Use both operand types for proper usual arithmetic conversions
                 let lhs_ty = self.get_expr_type(lhs);
-                self.eval_const_binop(op, &l, &r, lhs_ty)
+                let rhs_ty = self.get_expr_type(rhs);
+                self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 if let Some(val) = self.eval_const_expr(inner) {
@@ -552,7 +553,8 @@ impl Lowerer {
     }
 
     /// Evaluate a constant binary operation.
-    fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ty: IrType) -> Option<IrConst> {
+    /// Uses both operand types for C's usual arithmetic conversions (C11 6.3.1.8).
+    fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ty: IrType, rhs_ty: IrType) -> Option<IrConst> {
         // Check if either operand is floating-point
         let lhs_is_float = matches!(lhs, IrConst::F32(_) | IrConst::F64(_));
         let rhs_is_float = matches!(rhs, IrConst::F32(_) | IrConst::F64(_));
@@ -563,8 +565,18 @@ impl Lowerer {
 
         let l = self.const_to_i64(lhs)?;
         let r = self.const_to_i64(rhs)?;
-        let is_32bit = lhs_ty.size() <= 4;
-        let is_unsigned = lhs_ty.is_unsigned();
+        // Apply usual arithmetic conversions: use the wider of both operand types
+        let lhs_size = lhs_ty.size().max(4);
+        let rhs_size = rhs_ty.size().max(4);
+        let result_size = lhs_size.max(rhs_size);
+        let is_32bit = result_size <= 4;
+        let is_unsigned = if lhs_size == rhs_size {
+            lhs_ty.is_unsigned() || rhs_ty.is_unsigned()
+        } else if lhs_size > rhs_size {
+            lhs_ty.is_unsigned()
+        } else {
+            rhs_ty.is_unsigned()
+        };
         let result = match op {
             BinOp::Add => wrap_result(l.wrapping_add(r), is_32bit),
             BinOp::Sub => wrap_result(l.wrapping_sub(r), is_32bit),

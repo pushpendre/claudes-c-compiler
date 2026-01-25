@@ -138,9 +138,10 @@ impl<'a> SemaConstEval<'a> {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
                 let r = self.eval_const_expr(rhs)?;
-                // Use CType to determine signedness and width for proper semantics
+                // Use CType from both operands for proper usual arithmetic conversions
                 let lhs_ctype = self.infer_expr_ctype(lhs);
-                self.eval_const_binop(op, &l, &r, lhs_ctype.as_ref())
+                let rhs_ctype = self.infer_expr_ctype(rhs);
+                self.eval_const_binop(op, &l, &r, lhs_ctype.as_ref(), rhs_ctype.as_ref())
             }
 
             // Cast expressions with proper bit-width tracking
@@ -280,7 +281,9 @@ impl<'a> SemaConstEval<'a> {
     }
 
     /// Evaluate a binary operation on constant operands.
-    fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ctype: Option<&CType>) -> Option<IrConst> {
+    /// Uses both LHS and RHS types to apply C's usual arithmetic conversions
+    /// (C11 6.3.1.8) for determining result width and signedness.
+    fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ctype: Option<&CType>, rhs_ctype: Option<&CType>) -> Option<IrConst> {
         // Check if either operand is floating-point
         let lhs_is_float = matches!(lhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_));
         let rhs_is_float = matches!(rhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_));
@@ -292,12 +295,23 @@ impl<'a> SemaConstEval<'a> {
         let l = lhs.to_i64()?;
         let r = rhs.to_i64()?;
 
-        // Determine if the LHS type is 32-bit or unsigned
-        let (is_32bit, is_unsigned) = if let Some(ctype) = lhs_ctype {
-            let size = self.ctype_size(ctype);
-            (size <= 4, ctype.is_unsigned())
+        // Apply C's usual arithmetic conversions using both operand types.
+        // The result type is the wider of the two, with unsigned winning at equal rank.
+        let lhs_size = lhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
+        let rhs_size = rhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
+        let lhs_unsigned = lhs_ctype.map_or(false, |ct| ct.is_unsigned());
+        let rhs_unsigned = rhs_ctype.map_or(false, |ct| ct.is_unsigned());
+        // Result width: max of both operand widths (C promotes to at least int = 4 bytes)
+        let result_size = lhs_size.max(rhs_size);
+        let is_32bit = result_size <= 4;
+        // Result signedness: unsigned if either operand is unsigned at the result width,
+        // or if an unsigned operand has >= rank than the signed operand
+        let is_unsigned = if lhs_size == rhs_size {
+            lhs_unsigned || rhs_unsigned
+        } else if lhs_size > rhs_size {
+            lhs_unsigned
         } else {
-            (false, false)
+            rhs_unsigned
         };
 
         let result = match op {
