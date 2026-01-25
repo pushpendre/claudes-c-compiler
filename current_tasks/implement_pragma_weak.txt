@@ -1,0 +1,12 @@
+Implement #pragma weak support for weak symbols and weak aliases.
+
+Two forms:
+  #pragma weak symbol           - mark symbol as weak
+  #pragma weak symbol = alias   - create weak alias (symbol -> alias)
+
+Implementation:
+1. Parse #pragma weak in preprocessor, emit synthetic tokens for parser
+2. Store weak aliases in IR module
+3. Emit .weak and .set directives in backend
+
+This should fix ~10 tests that use #pragma weak.
