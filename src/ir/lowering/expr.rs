@@ -800,6 +800,12 @@ impl Lowerer {
         if let Some(vla_val) = self.get_vla_sizeof(arg) {
             return Operand::Value(vla_val);
         }
+        // Check for sizeof(type) where type is or contains VLA dimensions
+        if let SizeofArg::Type(ts) = arg {
+            if let Some(vla_val) = self.compute_vla_sizeof_for_type(ts) {
+                return Operand::Value(vla_val);
+            }
+        }
         let size = match arg {
             SizeofArg::Type(ts) => self.sizeof_type(ts),
             SizeofArg::Expr(expr) => self.sizeof_expr(expr),
@@ -809,8 +815,65 @@ impl Lowerer {
 
     fn get_vla_sizeof(&self, arg: &SizeofArg) -> Option<Value> {
         if let SizeofArg::Expr(Expr::Identifier(name, _)) = arg {
+            // Check local VLA variables first
             if let Some(info) = self.func().locals.get(name) {
-                return info.vla_size;
+                if info.vla_size.is_some() {
+                    return info.vla_size;
+                }
+            }
+            // Then check VLA typedef names (sizeof applied to a typedef identifier)
+            if let Some(&vla_size) = self.func().vla_typedef_sizes.get(name) {
+                return Some(vla_size);
+            }
+        }
+        None
+    }
+
+    /// Compute the runtime sizeof for a type that may contain VLA dimensions.
+    /// Handles both typedef names that are VLA types and direct Array types
+    /// with non-constant size expressions.
+    fn compute_vla_sizeof_for_type(&mut self, ts: &TypeSpecifier) -> Option<Value> {
+        // Check if it's a VLA typedef name with a pre-computed runtime size
+        if let TypeSpecifier::TypedefName(name) = ts {
+            if let Some(&vla_size) = self.func().vla_typedef_sizes.get(name) {
+                return Some(vla_size);
+            }
+        }
+        // Check if it's an Array type with non-constant dimensions
+        let resolved = self.resolve_type_spec(ts).clone();
+        if let TypeSpecifier::Array(ref elem, Some(ref size_expr)) = resolved {
+            if self.expr_as_array_size(size_expr).is_none() {
+                // Runtime dimension - compute size dynamically
+                let elem_clone = elem.clone();
+                let size_expr_clone = size_expr.clone();
+                let elem_size_opt = self.compute_vla_sizeof_for_type(&elem_clone);
+                let dim_val = self.lower_expr(&size_expr_clone);
+                let dim_value = self.operand_to_value(dim_val);
+                if let Some(elem_sz) = elem_size_opt {
+                    // Both element and dimension are runtime
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Value(elem_sz), IrType::I64);
+                    return Some(mul);
+                } else {
+                    // Element is constant, dimension is runtime
+                    let elem_size = self.sizeof_type(&elem_clone) as i64;
+                    if elem_size > 1 {
+                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(elem_size)), IrType::I64);
+                        return Some(mul);
+                    } else {
+                        return Some(dim_value);
+                    }
+                }
+            }
+            // Constant outer dim but maybe VLA inner dims
+            let elem_size_opt = self.compute_vla_sizeof_for_type(elem);
+            if let Some(elem_sz) = elem_size_opt {
+                let const_dim = self.expr_as_array_size(size_expr).unwrap_or(1);
+                if const_dim > 1 {
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(elem_sz), Operand::Const(IrConst::I64(const_dim)), IrType::I64);
+                    return Some(mul);
+                } else {
+                    return Some(elem_sz);
+                }
             }
         }
         None

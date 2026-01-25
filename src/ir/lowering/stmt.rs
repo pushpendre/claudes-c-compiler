@@ -86,6 +86,14 @@ impl Lowerer {
                     }
                     let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                     self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
+
+                    // For VLA typedefs (e.g., `typedef char buf[n][m]`), compute the
+                    // runtime sizeof and store it so that `sizeof(buf)` can use it.
+                    if self.func_state.is_some() {
+                        if let Some(vla_size) = self.compute_vla_runtime_size(&decl.type_spec, &declarator.derived) {
+                            self.func_mut().insert_vla_typedef_size_scoped(declarator.name.clone(), vla_size);
+                        }
+                    }
                 }
             }
             return;

@@ -37,6 +37,10 @@ pub(super) struct FuncScopeFrame {
     pub var_ctypes_added: Vec<String>,
     /// Keys that were overwritten in `var_ctypes`: (key, previous_value).
     pub var_ctypes_shadowed: Vec<(String, CType)>,
+    /// Keys newly inserted into `vla_typedef_sizes`.
+    pub vla_typedef_sizes_added: Vec<String>,
+    /// Keys that were overwritten in `vla_typedef_sizes`: (key, previous_value).
+    pub vla_typedef_sizes_shadowed: Vec<(String, Value)>,
 }
 
 impl FuncScopeFrame {
@@ -50,6 +54,8 @@ impl FuncScopeFrame {
             consts_shadowed: Vec::new(),
             var_ctypes_added: Vec::new(),
             var_ctypes_shadowed: Vec::new(),
+            vla_typedef_sizes_added: Vec::new(),
+            vla_typedef_sizes_shadowed: Vec::new(),
         }
     }
 }
@@ -91,6 +97,9 @@ pub(super) struct FunctionBuildState {
     pub const_local_values: HashMap<String, i64>,
     /// CType for each local variable
     pub var_ctypes: HashMap<String, CType>,
+    /// Runtime sizeof Values for VLA typedef types (e.g., `typedef char buf[n][m]`).
+    /// Keyed by typedef name, value is the IR Value holding the runtime byte size.
+    pub vla_typedef_sizes: HashMap<String, Value>,
     /// Per-function value counter (reset for each function)
     pub next_value: u32,
 }
@@ -115,6 +124,7 @@ impl FunctionBuildState {
             static_local_names: HashMap::new(),
             const_local_values: HashMap::new(),
             var_ctypes: HashMap::new(),
+            vla_typedef_sizes: HashMap::new(),
             next_value: 0,
         }
     }
@@ -152,7 +162,25 @@ impl FunctionBuildState {
             for (key, val) in frame.var_ctypes_shadowed {
                 self.var_ctypes.insert(key, val);
             }
+            for key in frame.vla_typedef_sizes_added {
+                self.vla_typedef_sizes.remove(&key);
+            }
+            for (key, val) in frame.vla_typedef_sizes_shadowed {
+                self.vla_typedef_sizes.insert(key, val);
+            }
         }
+    }
+
+    /// Insert a VLA typedef runtime size, tracking for scope management.
+    pub fn insert_vla_typedef_size_scoped(&mut self, name: String, size: Value) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.vla_typedef_sizes.remove(&name) {
+                frame.vla_typedef_sizes_shadowed.push((name.clone(), prev));
+            } else {
+                frame.vla_typedef_sizes_added.push(name.clone());
+            }
+        }
+        self.vla_typedef_sizes.insert(name, size);
     }
 
     /// Insert a local variable, tracking the change in the current scope frame.
