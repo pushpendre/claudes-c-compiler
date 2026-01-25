@@ -1,0 +1,20 @@
+Fix compound literal arrays of structs not initializing correctly
+
+Problem:
+When a compound literal creates an array of structs, e.g.:
+  (P[]){ {1, 2}, {3, 4} }
+The init_array_compound_literal() function in expr.rs treats each
+Initializer::List item as a zero constant, ignoring the struct field
+initialization completely. This causes corruption/garbage values.
+
+Root cause: Line ~777 in init_array_compound_literal:
+  Initializer::Expr(expr) => self.lower_expr(expr),
+  _ => Operand::Const(IrConst::I64(0)),  // BUG: drops List inits
+
+Fix:
+- When an item's init is Initializer::List, get the element CType
+- If element type is struct/union, use emit_struct_init at the correct offset
+- If element type is array, recursively initialize the nested array
+- This fixes Redis module loading crash and potentially mquickjs
+
+Status: in progress
