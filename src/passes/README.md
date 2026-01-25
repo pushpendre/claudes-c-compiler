@@ -10,18 +10,17 @@ SSA-based optimization passes that improve the IR before code generation.
 - **dce.rs** - Dead code elimination: removes instructions whose results are never used
 - **gvn.rs** - Dominator-based global value numbering: eliminates redundant BinOp, UnaryOp, Cmp, Cast, and GetElementPtr computations across all dominated blocks
 - **licm.rs** - Loop-invariant code motion: hoists loop-invariant computations and safe loads to loop preheaders. Includes load hoisting for non-address-taken alloca-based loads that are not modified within the loop (e.g., function parameter loads). Requires single-entry preheaders for soundness
+- **if_convert.rs** - If-conversion: converts simple diamond-shaped branch+phi patterns to Select instructions, enabling cmov/csel emission
 - **simplify.rs** - Algebraic simplification: identity removal (`x + 0` -> `x`), strength reduction (`x * 2` -> `x << 1`), boolean simplification
 
 ## Pass Pipeline
 
-Passes run in a fixed pipeline with iteration count based on `-O` level:
+All optimization levels (`-O0` through `-O3`, `-Os`, `-Oz`) run the same full pipeline.
+While the compiler is maturing, this maximizes test coverage and avoids tier-specific bugs.
 
-- `-O0`: No passes run
-- `-O1`: 1 iteration
-- `-O2`: 2 iterations
-- `-O3`: 3 iterations
+The pipeline runs up to 2 iterations, early-exiting if no changes are made:
 
-Each iteration runs: CFG simplify -> copy prop -> simplify -> constant fold -> GVN/CSE -> LICM (O2+) -> copy prop -> DCE -> CFG simplify.
+CFG simplify -> copy prop -> simplify -> constant fold -> GVN/CSE -> LICM -> if-convert -> copy prop -> DCE -> CFG simplify
 
 ## Architecture
 

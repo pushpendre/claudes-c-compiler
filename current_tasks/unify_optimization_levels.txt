@@ -1,5 +1,0 @@
-Unify all optimization levels (-O0, -O1, -O2, -O3, -Os, -Oz) to always run
-the maximum set of optimizations. The compiler is still in development and
-having multiple optimization levels creates hard-to-find bugs. All levels
-will behave identically until the compiler is mature enough to warrant
-separate tiers.

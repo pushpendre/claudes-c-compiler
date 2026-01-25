@@ -1,12 +1,13 @@
 //! Optimization passes for the IR.
 //!
 //! This module contains various optimization passes that transform the IR
-//! to produce better code. Passes are organized by optimization level:
+//! to produce better code.
 //!
-//! - O0: No optimization (skip all passes)
-//! - O1: Basic optimizations (constant folding, simplification, copy propagation, DCE, CFG simplification)
-//! - O2: Standard optimizations (O1 + GVN/CSE, repeated passes)
-//! - O3: Aggressive optimizations (O2 + more iterations)
+//! All optimization levels (-O0 through -O3, -Os, -Oz) run the same full set
+//! of passes. While the compiler is still maturing, having separate tiers
+//! creates hard-to-find bugs where code works at one level but breaks at
+//! another. We always run all passes to maximize test coverage of the
+//! optimizer and catch issues early.
 
 pub mod cfg_simplify;
 pub mod constant_fold;
@@ -19,7 +20,7 @@ pub mod simplify;
 
 use crate::ir::ir::IrModule;
 
-/// Run all optimization passes on the module based on the optimization level.
+/// Run all optimization passes on the module.
 ///
 /// The pass pipeline is:
 /// 1. CFG simplification (remove dead blocks, thread jump chains, simplify branches)
@@ -28,24 +29,24 @@ use crate::ir::ir::IrModule;
 /// 4. Constant folding (evaluate const exprs at compile time)
 /// 5. GVN / CSE (dominator-based value numbering, eliminates redundant
 ///    BinOp, UnaryOp, Cmp, Cast, and GetElementPtr across all dominated blocks)
-/// 6. LICM (hoist loop-invariant code to preheaders, at -O2 and above)
-/// 7. Copy propagation (clean up copies from GVN/simplify/LICM)
-/// 8. Dead code elimination (remove dead instructions)
-/// 9. CFG simplification (clean up after DCE may have made blocks dead)
+/// 6. LICM (hoist loop-invariant code to preheaders)
+/// 7. If-conversion (convert branch+phi diamonds to Select)
+/// 8. Copy propagation (clean up copies from GVN/simplify/LICM)
+/// 9. Dead code elimination (remove dead instructions)
+/// 10. CFG simplification (clean up after DCE may have made blocks dead)
 ///
-/// Higher optimization levels run more iterations of this pipeline.
-pub fn run_passes(module: &mut IrModule, opt_level: u32) {
-    if opt_level == 0 {
-        return; // No optimization at O0
-    }
-
-    // Determine number of pipeline iterations based on opt level
-    let iterations = match opt_level {
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        _ => 1,
-    };
+/// All optimization levels run the same pipeline with the same number of
+/// iterations. The `opt_level` parameter is accepted for API compatibility
+/// but currently ignored -- all levels behave identically. This is intentional:
+/// while the compiler is still maturing, running all optimizations at every
+/// level maximizes test coverage and avoids bugs that only surface at specific
+/// optimization tiers.
+// TODO: Restore per-level optimization tiers once the compiler is stable enough
+// to warrant differentiated behavior (e.g., -O0 skipping passes for faster builds).
+pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
+    // Always run 2 iterations of the full pipeline. The early-exit check below
+    // will skip the second iteration if the first made no changes.
+    let iterations = 2;
 
     for _ in 0..iterations {
         let mut changes = 0usize;
@@ -73,9 +74,7 @@ pub fn run_passes(module: &mut IrModule, opt_level: u32) {
         // Runs after scalar opts have simplified expressions, so we can
         // identify more invariants. Particularly helps inner loops with
         // redundant index computations (e.g., i*n in matrix multiply).
-        if opt_level >= 2 {
-            changes += licm::run(module);
-        }
+        changes += licm::run(module);
 
         // Phase 7: If-conversion - convert simple branch+phi diamonds to Select
         // instructions. Runs after scalar optimizations have simplified the CFG,

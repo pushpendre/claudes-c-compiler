@@ -90,13 +90,14 @@ fn real_main() {
                 driver.mode = CompileMode::PreprocessOnly;
             }
 
-            // Optimization levels
-            "-O" | "-O1" => driver.opt_level = 1,
-            "-O0" => driver.opt_level = 0,
-            "-O2" => driver.opt_level = 2,
-            "-O3" => driver.opt_level = 3,
-            "-Os" => driver.opt_level = 2, // treat size opt as O2 for now
-            "-Oz" => driver.opt_level = 2,
+            // Optimization levels: all levels run the same maximum optimizations.
+            // While the compiler is still maturing, having separate -O0/-O1/-O2
+            // tiers creates hard-to-find bugs where code works at one level but
+            // breaks at another. We always run all passes until the compiler is
+            // stable enough to warrant differentiated optimization tiers.
+            "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" => {
+                driver.opt_level = 2;
+            }
 
             // Debug info
             "-g" => {
