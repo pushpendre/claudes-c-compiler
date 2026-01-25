@@ -1,0 +1,12 @@
+Task: Fix preprocessor stringification/paste and add __builtin_clrsb
+
+1. Fix preprocessor # (stringification) operator to properly normalize whitespace
+   per C11 6.10.3.2 - collapse runs of whitespace to single space, trim leading/trailing
+
+2. Fix preprocessor ## (token paste) operator when right-side argument is empty -
+   prevent subsequent macro body tokens from merging with the paste result
+
+3. Add __builtin_clrsb/__builtin_clrsbl/__builtin_clrsbll (count leading redundant
+   sign bits) - implemented by decomposing into existing IR operations (LShr + Neg + Xor + Clz - 1)
+
+Status: IN PROGRESS
