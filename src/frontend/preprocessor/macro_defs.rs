@@ -74,6 +74,12 @@ pub struct MacroDef {
     pub is_predefined: bool,
 }
 
+/// Marker byte used to "blue paint" tokens that were suppressed due to
+/// self-referential macro expansion (C11 §6.10.3.4).  Prefixed to
+/// identifiers during rescanning so they are never re-expanded, then
+/// stripped from the final output in `expand_line()`.
+const BLUE_PAINT_MARKER: u8 = 0x01;
+
 /// Stores all macro definitions and handles expansion.
 #[derive(Debug, Clone)]
 pub struct MacroTable {
@@ -123,7 +129,15 @@ impl MacroTable {
     /// Returns the expanded text.
     pub fn expand_line(&self, line: &str) -> String {
         let mut expanding = FxHashSet::default();
-        self.expand_text(line, &mut expanding)
+        let result = self.expand_text(line, &mut expanding);
+        // Strip blue-paint marker bytes (0x01) from the final output.
+        // These markers prevent re-expansion of self-referential macro tokens
+        // per C11 §6.10.3.4 but must not appear in the final result.
+        if result.as_bytes().contains(&BLUE_PAINT_MARKER) {
+            result.replace(BLUE_PAINT_MARKER as char, "")
+        } else {
+            result
+        }
     }
 
     /// Recursively expand macros in text, tracking which macros are
@@ -142,6 +156,20 @@ impl MacroTable {
             // Skip string and char literals (copy them verbatim)
             if b == b'"' || b == b'\'' {
                 i = copy_literal_bytes_to_string(bytes, i, b, &mut result);
+                continue;
+            }
+
+            // Skip blue-painted identifiers: a \x01 marker means the
+            // following identifier was suppressed by the blue-paint rule
+            // and must be copied verbatim (never re-expanded).
+            if b == BLUE_PAINT_MARKER {
+                result.push(BLUE_PAINT_MARKER as char);
+                i += 1;
+                // Copy the identifier that follows
+                while i < len && is_ident_cont_byte(bytes[i]) {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                }
                 continue;
             }
 
@@ -273,7 +301,6 @@ impl MacroTable {
                                         result.push(' ');
                                     }
                                     result.push_str(&expanded);
-                                    result.push(' ');
                                 }
                                 continue;
                             } else {
@@ -327,7 +354,13 @@ impl MacroTable {
                     }
                 }
 
-                // Not a macro or already expanding
+                // Not a macro, or already expanding (blue-painted).
+                // If the identifier is being suppressed because it's in
+                // the expanding set, prefix it with the blue-paint marker
+                // so it won't be re-expanded during subsequent rescans.
+                if expanding.contains(ident) {
+                    result.push(BLUE_PAINT_MARKER as char);
+                }
                 result.push_str(ident);
                 continue;
             }
@@ -856,6 +889,7 @@ fn is_ppnumber_context(bytes: &[u8], pos: usize) -> bool {
 
 /// Extract the trailing identifier from a string, if it ends with one.
 /// Returns Some(ident) if the string ends with an identifier (skipping trailing whitespace).
+/// Returns None if the trailing identifier is blue-painted (preceded by \x01 marker).
 /// Operates on bytes for performance (no Vec<char> allocation).
 fn extract_trailing_ident(s: &str) -> Option<String> {
     let bytes = s.trim_end().as_bytes();
@@ -870,11 +904,14 @@ fn extract_trailing_ident(s: &str) -> Option<String> {
     while start > 0 && is_ident_cont_byte(bytes[start - 1]) {
         start -= 1;
     }
-    if is_ident_start_byte(bytes[start]) {
-        Some(bytes_to_str(bytes, start, end).to_string())
-    } else {
-        None
+    if !is_ident_start_byte(bytes[start]) {
+        return None;
     }
+    // Check for blue-paint marker immediately before the identifier
+    if start > 0 && bytes[start - 1] == BLUE_PAINT_MARKER {
+        return None;
+    }
+    Some(bytes_to_str(bytes, start, end).to_string())
 }
 
 /// Stringify a macro argument per C11 6.10.3.2.
@@ -887,6 +924,12 @@ fn stringify_arg(arg: &str) -> String {
     let mut i = 0;
 
     while i < len {
+        // Skip blue-paint markers (they must not appear in stringified output)
+        if bytes[i] == BLUE_PAINT_MARKER {
+            i += 1;
+            continue;
+        }
+
         // Collapse whitespace sequences to a single space
         if bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' {
             if !result.is_empty() {
