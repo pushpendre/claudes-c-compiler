@@ -1,0 +1,14 @@
+Fix K&R function pointer parameter handling
+
+Two bugs fixed:
+
+1. K&R-style function definitions with function pointer parameters (e.g.,
+   `int (*fp)()`) were mistyped, causing `(*fp)(args)` to segfault.
+   The parser's apply_kr_derivations() double-wrapped the type in Pointer
+   (once for the syntax marker, once for decay) and never set fptr_params,
+   so the lowering treated `*fp` as a real memory dereference instead of
+   a no-op on a function pointer.
+
+2. Function pointer arithmetic (p++, p+n) used step size 8 instead of 1.
+   GCC treats function pointer arithmetic like void* (step size 1).
+   Fixed in get_pointer_elem_size_from_expr() to check for Function pointee.
