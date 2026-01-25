@@ -1,0 +1,19 @@
+Task: Fix __builtin_choose_expr not evaluating __typeof__(expr) correctly
+
+Bug: __builtin_choose_expr() always picks the else branch when the condition
+involves __builtin_types_compatible_p(__typeof__(variable), type).
+
+Root cause: The SemaConstEval::type_spec_to_ctype() delegates to the standalone
+ctype_from_type_spec() function which does not handle TypeSpecifier::Typeof(expr).
+The missing case falls through to CType::Int, making typeof(double_var) evaluate
+as int instead of double. This causes __builtin_types_compatible_p to return 0
+(incompatible) when it should return 1.
+
+The sema stores this incorrect result in the const_values map. When the lowerer
+processes __builtin_choose_expr, it uses eval_const_expr which looks up the sema
+cache first and gets the wrong value.
+
+Fix: Add TypeSpecifier::Typeof(expr) handling to the sema const eval's
+type_spec_to_ctype by using infer_expr_ctype to resolve the expression's type.
+
+Status: In progress
