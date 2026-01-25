@@ -1,0 +1,21 @@
+Task: Fix peephole dead store elimination for indirect memory access
+
+Bug: The x86 peephole dead store elimination incorrectly removes stores to
+stack-allocated variables when a later store to the same slot exists,
+without recognizing that indirect memory loads (e.g., through a pointer
+in a register like (%rcx)) might read the same stack slot.
+
+Example:
+    int a;
+    int *p = &a;
+    a = 1;         // store to -16(%rbp) -- INCORRECTLY REMOVED
+    b = *p;        // loads via (%rcx) which points to -16(%rbp) -- NOT DETECTED
+    a = 2;         // store to -16(%rbp) -- INCORRECTLY REMOVED
+    d = *ip;       // loads via (%rcx) -- NOT DETECTED
+    a = 3;         // store to -16(%rbp) -- kept (last one)
+
+Fix: In eliminate_dead_stores(), treat indirect memory accesses through
+registers (e.g., (%rcx), (%rdx)) as potential reads of any stack slot,
+making them barriers. This is conservative but correct.
+
+This fixes the compiler_suite_0129_0079 test (pointer aliasing) on x86.
