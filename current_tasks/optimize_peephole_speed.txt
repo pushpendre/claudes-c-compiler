@@ -1,0 +1,9 @@
+Task: Optimize peephole pass speed (15% of compile time on SQLite)
+
+Profiling shows peephole_optimize takes 15% of total SQLite compile time.
+Key optimizations:
+1. Remove redundant forward_store_load_non_adjacent (global_store_forwarding subsumes it)
+2. Reduce iteration count by separating one-shot vs iterative passes
+3. Speed up instruction_modifies_reg with byte-level parsing
+4. Compact slot_entries in global_store_forwarding to avoid O(n) scans
+5. Avoid unnecessary re-classification of replaced lines

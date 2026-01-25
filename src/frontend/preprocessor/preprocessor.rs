@@ -285,6 +285,7 @@ impl Preprocessor {
                 is_function_like: true,
                 params: params.iter().map(|s| s.to_string()).collect(),
                 is_variadic: false,
+                has_named_variadic: false,
                 body: body.to_string(),
                 is_predefined: true,
             });
@@ -298,6 +299,7 @@ impl Preprocessor {
             is_function_like: false,
             params: Vec::new(),
             is_variadic: false,
+            has_named_variadic: false,
             body: body.to_string(),
             is_predefined: true,
         });
@@ -367,6 +369,7 @@ impl Preprocessor {
                 is_function_like: false,
                 params: Vec::new(),
                 is_variadic: false,
+                has_named_variadic: false,
                 body: effective_line.to_string(),
                 is_predefined: true,
             });
@@ -562,6 +565,7 @@ impl Preprocessor {
             is_function_like: false,
             params: Vec::new(),
             is_variadic: false,
+            has_named_variadic: false,
             body: format!("\"{}\"", filename),
             is_predefined: true,
         });
@@ -660,6 +664,7 @@ impl Preprocessor {
             is_function_like: false,
             params: Vec::new(),
             is_variadic: false,
+            has_named_variadic: false,
             body: value.to_string(),
             is_predefined: false,
         });
@@ -693,6 +698,7 @@ impl Preprocessor {
             is_function_like: false,
             params: Vec::new(),
             is_variadic: false,
+            has_named_variadic: false,
             body: format!("\"{}\"", resolved.display()),
             is_predefined: true,
         });
@@ -707,6 +713,7 @@ impl Preprocessor {
                 is_function_like: false,
                 params: Vec::new(),
                 is_variadic: false,
+                has_named_variadic: false,
                 body: old,
                 is_predefined: true,
             });
@@ -1011,6 +1018,7 @@ impl Preprocessor {
                             is_function_like: false,
                             params: Vec::new(),
                             is_variadic: false,
+                            has_named_variadic: false,
                             body: format!("\"{}\"", filename),
                             is_predefined: true,
                         });

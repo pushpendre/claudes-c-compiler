@@ -13,6 +13,7 @@ fn def(macros: &mut MacroTable, name: &str, body: &str) {
         is_function_like: false,
         params: Vec::new(),
         is_variadic: false,
+        has_named_variadic: false,
         body: body.to_string(),
         is_predefined: true,
     });
@@ -112,6 +113,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x".to_string(),
         is_predefined: true,
     });
@@ -120,6 +122,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x".to_string(),
         is_predefined: true,
     });
@@ -128,6 +131,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x".to_string(),
         is_predefined: true,
     });
@@ -136,6 +140,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x ## LL".to_string(),
         is_predefined: true,
     });
@@ -144,6 +149,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x".to_string(),
         is_predefined: true,
     });
@@ -152,6 +158,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x".to_string(),
         is_predefined: true,
     });
@@ -160,6 +167,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x ## U".to_string(),
         is_predefined: true,
     });
@@ -168,6 +176,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x ## ULL".to_string(),
         is_predefined: true,
     });
@@ -176,6 +185,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x ## LL".to_string(),
         is_predefined: true,
     });
@@ -184,6 +194,7 @@ fn define_stdint_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["x".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "x ## ULL".to_string(),
         is_predefined: true,
     });
@@ -200,6 +211,7 @@ fn define_stddef_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["type".to_string(), "member".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "__builtin_offsetof(type, member)".to_string(),
         is_predefined: true,
     });
@@ -354,6 +366,7 @@ fn define_assert_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["expr".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "((void)0)".to_string(), // TODO: implement proper assert
         is_predefined: true,
     });
@@ -362,6 +375,7 @@ fn define_assert_macros(macros: &mut MacroTable) {
         is_function_like: true,
         params: vec!["expr".to_string(), "msg".to_string()],
         is_variadic: false,
+        has_named_variadic: false,
         body: "".to_string(), // TODO: implement proper static_assert
         is_predefined: true,
     });

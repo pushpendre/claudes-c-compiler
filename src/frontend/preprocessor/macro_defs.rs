@@ -24,6 +24,10 @@ pub struct MacroDef {
     pub params: Vec<String>,
     /// Whether the macro is variadic (last param is ...)
     pub is_variadic: bool,
+    /// Whether the variadic is a named parameter (e.g., `args...` vs `...`).
+    /// When true, the last entry in `params` is the variadic param name.
+    /// When false, variadic args are accessed via `__VA_ARGS__`.
+    pub has_named_variadic: bool,
     /// The replacement body (as raw text)
     pub body: String,
     /// Whether this is a predefined macro (cannot be #undef'd in strict mode)
@@ -436,10 +440,10 @@ impl MacroTable {
 
         // Step 3: Handle stringification (#param) and token pasting (##)
         // These use the RAW (unexpanded) arguments
-        body = self.handle_stringify_and_paste(&body, &mac.params, args, mac.is_variadic);
+        body = self.handle_stringify_and_paste(&body, &mac.params, args, mac.is_variadic, mac.has_named_variadic);
 
         // Step 4: Substitute parameters with expanded arguments
-        body = self.substitute_params(&body, &mac.params, &expanded_args, mac.is_variadic);
+        body = self.substitute_params(&body, &mac.params, &expanded_args, mac.is_variadic, mac.has_named_variadic);
 
         // Step 5: Rescan with the current macro name suppressed
         expanding.insert(mac.name.clone());
@@ -554,6 +558,7 @@ impl MacroTable {
         params: &[String],
         args: &[String],
         is_variadic: bool,
+        has_named_variadic: bool,
     ) -> String {
         let chars: Vec<char> = body.chars().collect();
         let len = chars.len();
@@ -636,7 +641,7 @@ impl MacroTable {
                         // GNU extension: for named variadic parameters (e.g., args...),
                         // ", ## args" with empty args removes the preceding comma,
                         // same as ", ## __VA_ARGS__". When non-empty, use ALL variadic args.
-                        let is_named_variadic_param = is_variadic && idx == params.len() - 1;
+                        let is_named_variadic_param = is_variadic && has_named_variadic && idx == params.len() - 1;
                         if is_named_variadic_param {
                             let va_args = self.get_named_va_args(idx, args);
                             if va_args.is_empty() {
@@ -699,7 +704,7 @@ impl MacroTable {
                         result.push('"');
                     } else if let Some(idx) = params.iter().position(|p| p == &param_name) {
                         // For named variadic parameters, stringify ALL variadic args
-                        let arg_str = if is_variadic && idx == params.len() - 1 {
+                        let arg_str = if is_variadic && has_named_variadic && idx == params.len() - 1 {
                             self.get_named_va_args(idx, args)
                         } else {
                             args.get(idx).map(|s| s.to_string()).unwrap_or_default()
@@ -733,6 +738,7 @@ impl MacroTable {
         params: &[String],
         args: &[String],
         is_variadic: bool,
+        has_named_variadic: bool,
     ) -> String {
         let mut result = String::new();
         let chars: Vec<char> = body.chars().collect();
@@ -759,7 +765,7 @@ impl MacroTable {
                 } else if let Some(idx) = params.iter().position(|p| p == &ident) {
                     // For named variadic parameters (e.g., args...), substitute
                     // ALL variadic args from this index onwards.
-                    if is_variadic && idx == params.len() - 1 {
+                    if is_variadic && has_named_variadic && idx == params.len() - 1 {
                         let va_args = self.get_named_va_args(idx, args);
                         result.push_str(&va_args);
                     } else {
@@ -996,6 +1002,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
         i += 1; // skip '('
         let mut params = Vec::new();
         let mut is_variadic = false;
+        let mut has_named_variadic = false;
 
         // Parse parameters
         loop {
@@ -1014,6 +1021,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
             }
 
             if chars[i] == '.' && i + 2 < len && chars[i + 1] == '.' && chars[i + 2] == '.' {
+                // Unnamed variadic: `...` (uses __VA_ARGS__)
                 is_variadic = true;
                 i += 3;
                 // Skip to closing paren
@@ -1038,6 +1046,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
                 if i + 2 < len && chars[i] == '.' && chars[i + 1] == '.' && chars[i + 2] == '.' {
                     // Named variadic like `args...` - treat as regular + variadic
                     is_variadic = true;
+                    has_named_variadic = true;
                     params.push(param);
                     i += 3;
                     while i < len && chars[i] != ')' {
@@ -1074,6 +1083,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
             is_function_like: true,
             params,
             is_variadic,
+            has_named_variadic,
             body,
             is_predefined: false,
         })
@@ -1090,6 +1100,7 @@ pub fn parse_define(line: &str) -> Option<MacroDef> {
             is_function_like: false,
             params: Vec::new(),
             is_variadic: false,
+            has_named_variadic: false,
             body,
             is_predefined: false,
         })

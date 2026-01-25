@@ -71,6 +71,7 @@ impl Preprocessor {
                         is_function_like: false,
                         params: Vec::new(),
                         is_variadic: false,
+                        has_named_variadic: false,
                         body: format!("\"{}\"", resolved_path.display()),
                         is_predefined: true,
                     });
@@ -85,6 +86,7 @@ impl Preprocessor {
                             is_function_like: false,
                             params: Vec::new(),
                             is_variadic: false,
+                            has_named_variadic: false,
                             body: old,
                             is_predefined: true,
                         });
@@ -172,6 +174,7 @@ impl Preprocessor {
                         is_function_like: false,
                         params: Vec::new(),
                         is_variadic: false,
+                        has_named_variadic: false,
                         body: format!("\"{}\"", resolved_path.display()),
                         is_predefined: true,
                     });
@@ -184,6 +187,7 @@ impl Preprocessor {
                             is_function_like: false,
                             params: Vec::new(),
                             is_variadic: false,
+                            has_named_variadic: false,
                             body: old,
                             is_predefined: true,
                         });
@@ -358,6 +362,7 @@ impl Preprocessor {
                     is_function_like: true,
                     params: vec!["ap".to_string(), "last".to_string()],
                     is_variadic: false,
+                    has_named_variadic: false,
                     body: "__builtin_va_start(ap,last)".to_string(),
                     is_predefined: true,
                 });
@@ -366,6 +371,7 @@ impl Preprocessor {
                     is_function_like: true,
                     params: vec!["ap".to_string()],
                     is_variadic: false,
+                    has_named_variadic: false,
                     body: "__builtin_va_end(ap)".to_string(),
                     is_predefined: true,
                 });
@@ -374,6 +380,7 @@ impl Preprocessor {
                     is_function_like: true,
                     params: vec!["dest".to_string(), "src".to_string()],
                     is_variadic: false,
+                    has_named_variadic: false,
                     body: "__builtin_va_copy(dest,src)".to_string(),
                     is_predefined: true,
                 });
@@ -385,6 +392,7 @@ impl Preprocessor {
                     is_function_like: true,
                     params: vec!["ap".to_string(), "type".to_string()],
                     is_variadic: false,
+                    has_named_variadic: false,
                     body: "__builtin_va_arg(ap,type)".to_string(),
                     is_predefined: true,
                 });
