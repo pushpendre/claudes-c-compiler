@@ -484,13 +484,7 @@ impl Lowerer {
                             let elem_ir_ty = IrType::from_ctype(elem_ty);
                             let elem_size = elem_ir_ty.size().max(1);
                             let elem_is_bool = **elem_ty == CType::Bool;
-                            let val = if elem_is_bool {
-                                let v = self.lower_expr(e);
-                                let et = self.get_expr_type(e);
-                                self.emit_bool_normalize_typed(v, et)
-                            } else {
-                                self.lower_and_cast_init_expr(e, elem_ir_ty)
-                            };
+                            let val = self.lower_init_expr_bool_aware(e, elem_ir_ty, elem_is_bool);
                             let field_addr = self.emit_gep_offset(base, field_offset, elem_ir_ty);
                             self.emit(Instruction::Store { val, ptr: field_addr, ty: elem_ir_ty });
                             // Consume additional items for remaining array elements
@@ -504,13 +498,7 @@ impl Lowerer {
                                     break;
                                 }
                                 if let Initializer::Expr(next_e) = &next_item.init {
-                                    let next_val = if elem_is_bool {
-                                        let v = self.lower_expr(next_e);
-                                        let et = self.get_expr_type(next_e);
-                                        self.emit_bool_normalize_typed(v, et)
-                                    } else {
-                                        self.lower_and_cast_init_expr(next_e, elem_ir_ty)
-                                    };
+                                    let next_val = self.lower_init_expr_bool_aware(next_e, elem_ir_ty, elem_is_bool);
                                     let offset = field_offset + arr_idx * elem_size;
                                     let elem_addr = self.emit_gep_offset(base, offset, elem_ir_ty);
                                     self.emit(Instruction::Store { val: next_val, ptr: elem_addr, ty: elem_ir_ty });
@@ -519,13 +507,7 @@ impl Lowerer {
                             }
                         }
                     } else {
-                        let val = if field.ty == CType::Bool {
-                            let val = self.lower_expr(e);
-                            let expr_ty = self.get_expr_type(e);
-                            self.emit_bool_normalize_typed(val, expr_ty)
-                        } else {
-                            self.lower_and_cast_init_expr(e, field_ty)
-                        };
+                        let val = self.lower_init_expr_bool_aware(e, field_ty, field.ty == CType::Bool);
                         let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
                         if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
                             self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
@@ -590,13 +572,7 @@ impl Lowerer {
                     let elem_is_bool = **elem_ty == CType::Bool;
                     match &item.init {
                         Initializer::Expr(e) => {
-                            let val = if elem_is_bool {
-                                let v = self.lower_expr(e);
-                                let et = self.get_expr_type(e);
-                                self.emit_bool_normalize_typed(v, et)
-                            } else {
-                                self.lower_and_cast_init_expr(e, elem_ir_ty)
-                            };
+                            let val = self.lower_init_expr_bool_aware(e, elem_ir_ty, elem_is_bool);
                             self.emit_store_at_offset(base, ai * elem_size, val, elem_ir_ty);
                         }
                         Initializer::List(sub_items) => {
@@ -613,13 +589,7 @@ impl Lowerer {
                 if let Some(first) = items.first() {
                     if let Initializer::Expr(e) = &first.init {
                         let field_ir_ty = IrType::from_ctype(field_ctype);
-                        let val = if *field_ctype == CType::Bool {
-                            let v = self.lower_expr(e);
-                            let et = self.get_expr_type(e);
-                            self.emit_bool_normalize_typed(v, et)
-                        } else {
-                            self.lower_and_cast_init_expr(e, field_ir_ty)
-                        };
+                        let val = self.lower_init_expr_bool_aware(e, field_ir_ty, *field_ctype == CType::Bool);
                         self.emit(Instruction::Store { val, ptr: base, ty: field_ir_ty });
                     }
                 }
@@ -783,6 +753,19 @@ impl Lowerer {
         self.emit_implicit_cast(val, expr_ty, target_ty)
     }
 
+    /// Lower an init expression with bool-aware handling.
+    /// For bool targets, normalizes to 0/1. For other types, casts to target_ty.
+    pub(super) fn lower_init_expr_bool_aware(&mut self, expr: &Expr, target_ty: IrType, is_bool: bool) -> Operand {
+        if is_bool {
+            let val = self.lower_expr(expr);
+            let expr_ty = self.get_expr_type(expr);
+            self.emit_bool_normalize_typed(val, expr_ty)
+        } else {
+            self.lower_and_cast_init_expr(expr, target_ty)
+        }
+    }
+
+    /// Main statement lowering dispatcher. Delegates to per-statement-type methods.
     pub(super) fn lower_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Return(expr, _span) => {
@@ -791,557 +774,496 @@ impl Lowerer {
                 let label = self.fresh_label();
                 self.start_block(label);
             }
-            Stmt::Expr(Some(expr)) => {
-                self.lower_expr(expr);
-            }
+            Stmt::Expr(Some(expr)) => { self.lower_expr(expr); }
             Stmt::Expr(None) => {}
-            Stmt::Compound(compound) => {
-                self.lower_compound_stmt(compound);
-            }
-            Stmt::If(cond, then_stmt, else_stmt, _span) => {
-                let cond_val = self.lower_condition_expr(cond);
-                let then_label = self.fresh_label();
-                let else_label = self.fresh_label();
-                let end_label = self.fresh_label();
-
-                if else_stmt.is_some() {
-                    self.terminate(Terminator::CondBranch {
-                        cond: cond_val,
-                        true_label: then_label,
-                        false_label: else_label,
-                    });
-                } else {
-                    self.terminate(Terminator::CondBranch {
-                        cond: cond_val,
-                        true_label: then_label,
-                        false_label: end_label,
-                    });
-                }
-
-                // Then block
-                self.start_block(then_label);
-                self.lower_stmt(then_stmt);
-                self.terminate(Terminator::Branch(end_label));
-
-                // Else block
-                if let Some(else_stmt) = else_stmt {
-                    self.start_block(else_label);
-                    self.lower_stmt(else_stmt);
-                    self.terminate(Terminator::Branch(end_label));
-                }
-
-                self.start_block(end_label);
-            }
-            Stmt::While(cond, body, _span) => {
-                let cond_label = self.fresh_label();
-                let body_label = self.fresh_label();
-                let end_label = self.fresh_label();
-
-                self.func_mut().break_labels.push(end_label);
-                self.func_mut().continue_labels.push(cond_label);
-
-                self.terminate(Terminator::Branch(cond_label));
-
-                self.start_block(cond_label);
-                let cond_val = self.lower_condition_expr(cond);
-                self.terminate(Terminator::CondBranch {
-                    cond: cond_val,
-                    true_label: body_label,
-                    false_label: end_label,
-                });
-
-                self.start_block(body_label);
-                self.lower_stmt(body);
-                let label = *self.func().continue_labels.last().unwrap(); self.terminate(Terminator::Branch(label));
-
-                self.func_mut().break_labels.pop();
-                self.func_mut().continue_labels.pop();
-
-                self.start_block(end_label);
-            }
-            Stmt::For(init, cond, inc, body, _span) => {
-                // C99: for-init declarations have their own scope.
-                let has_decl_init = init.as_ref().map_or(false, |i| matches!(i.as_ref(), ForInit::Declaration(_)));
-                if has_decl_init {
-                    self.push_scope();
-                }
-
-                // Init
-                if let Some(init) = init {
-                    match init.as_ref() {
-                        ForInit::Declaration(decl) => {
-                            self.collect_enum_constants_scoped(&decl.type_spec);
-                            self.lower_local_decl(decl);
-                        }
-                        ForInit::Expr(expr) => { self.lower_expr(expr); },
-                    }
-                }
-
-                let cond_label = self.fresh_label();
-                let body_label = self.fresh_label();
-                let inc_label = self.fresh_label();
-                let end_label = self.fresh_label();
-
-                self.func_mut().break_labels.push(end_label);
-                self.func_mut().continue_labels.push(inc_label);
-
-                self.terminate(Terminator::Branch(cond_label));
-
-                // Condition
-                self.start_block(cond_label);
-                if let Some(cond) = cond {
-                    let cond_val = self.lower_condition_expr(cond);
-                    self.terminate(Terminator::CondBranch {
-                        cond: cond_val,
-                        true_label: body_label,
-                        false_label: end_label,
-                    });
-                } else {
-                    self.terminate(Terminator::Branch(body_label));
-                }
-
-                // Body
-                self.start_block(body_label);
-                self.lower_stmt(body);
-                self.terminate(Terminator::Branch(inc_label));
-
-                // Increment
-                self.start_block(inc_label);
-                if let Some(inc) = inc {
-                    self.lower_expr(inc);
-                }
-                self.terminate(Terminator::Branch(cond_label));
-
-                self.func_mut().break_labels.pop();
-                self.func_mut().continue_labels.pop();
-
-                self.start_block(end_label);
-
-                // Restore for-init scope
-                if has_decl_init {
-                    self.pop_scope();
-                }
-            }
-            Stmt::DoWhile(body, cond, _span) => {
-                let body_label = self.fresh_label();
-                let cond_label = self.fresh_label();
-                let end_label = self.fresh_label();
-
-                self.func_mut().break_labels.push(end_label);
-                self.func_mut().continue_labels.push(cond_label);
-
-                self.terminate(Terminator::Branch(body_label));
-
-                self.start_block(body_label);
-                self.lower_stmt(body);
-                self.terminate(Terminator::Branch(cond_label));
-
-                self.start_block(cond_label);
-                let cond_val = self.lower_condition_expr(cond);
-                self.terminate(Terminator::CondBranch {
-                    cond: cond_val,
-                    true_label: body_label,
-                    false_label: end_label,
-                });
-
-                self.func_mut().break_labels.pop();
-                self.func_mut().continue_labels.pop();
-
-                self.start_block(end_label);
-            }
-            Stmt::Break(_span) => {
-                if let Some(&label) = self.func_mut().break_labels.last() {
-                    self.terminate(Terminator::Branch(label));
-                    let dead = self.fresh_label();
-                    self.start_block(dead);
-                }
-            }
-            Stmt::Continue(_span) => {
-                if let Some(&label) = self.func_mut().continue_labels.last() {
-                    self.terminate(Terminator::Branch(label));
-                    let dead = self.fresh_label();
-                    self.start_block(dead);
-                }
-            }
-            Stmt::Switch(expr, body, _span) => {
-                // Evaluate switch expression and store it in an alloca so we can
-                // reload it in the dispatch chain (which is emitted after the body).
-                // C99 6.8.4.2: Integer promotions are performed on the controlling expression.
-                let raw_expr_ty = self.get_expr_type(expr);
-                let switch_expr_ty = match raw_expr_ty {
-                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
-                    _ => raw_expr_ty,
-                };
-                let val = self.lower_expr(expr);
-                // If the expression type was sub-int, widen it via implicit cast
-                let val = if switch_expr_ty != raw_expr_ty {
-                    self.emit_implicit_cast(val, raw_expr_ty, switch_expr_ty)
-                } else {
-                    val
-                };
-                let switch_alloca = self.fresh_value();
-                self.emit(Instruction::Alloca {
-                    dest: switch_alloca,
-                    ty: IrType::I64,
-                    size: 8,
-                    align: 0,
-                });
-                self.emit(Instruction::Store {
-                    val,
-                    ptr: switch_alloca,
-                    ty: IrType::I64,
-                });
-
-                let dispatch_label = self.fresh_label();
-                let end_label = self.fresh_label();
-                let body_label = self.fresh_label();
-
-                // Push switch context
-                self.func_mut().switch_stack.push(SwitchFrame {
-                    cases: Vec::new(),
-                    case_ranges: Vec::new(),
-                    default_label: None,
-                    expr_type: switch_expr_ty,
-                });
-                self.func_mut().break_labels.push(end_label);
-
-                // Jump to dispatch (which will be emitted after the body)
-                self.terminate(Terminator::Branch(dispatch_label));
-
-                // Lower the switch body - case/default stmts will register
-                // their labels in switch_cases/switch_default
-                self.start_block(body_label);
-                self.lower_stmt(body);
-                // Fall off end of switch body -> go to end
-                self.terminate(Terminator::Branch(end_label));
-
-                // Pop switch context and collect the case/default info
-                let switch_frame = self.func_mut().switch_stack.pop();
-                self.func_mut().break_labels.pop();
-                let cases = switch_frame.as_ref().map(|f| f.cases.clone()).unwrap_or_default();
-                let case_ranges = switch_frame.as_ref().map(|f| f.case_ranges.clone()).unwrap_or_default();
-                let default_label = switch_frame.as_ref().and_then(|f| f.default_label);
-
-                // Now emit the dispatch chain: a series of comparison blocks
-                // that check each case value and branch accordingly.
-                let fallback = default_label.unwrap_or(end_label);
-                let total_checks = cases.len() + case_ranges.len();
-
-                self.start_block(dispatch_label);
-
-                // Optimization: if the switch expression is a compile-time constant
-                // (e.g., sizeof(T)), directly jump to the matching case. This avoids
-                // emitting dead dispatch branches that may contain type-mismatched
-                // inline assembly (critical for kernel cmpxchg/xchg macros).
-                let const_switch_val = match &val {
-                    Operand::Const(c) => self.const_to_i64(c),
-                    _ => None,
-                };
-
-                if let Some(switch_int) = const_switch_val {
-                    // Find matching case
-                    let mut target = fallback;
-                    for (case_val, case_label) in cases.iter() {
-                        if *case_val == switch_int {
-                            target = *case_label;
-                            break;
-                        }
-                    }
-                    // Check range cases if no exact match found yet
-                    if target == fallback {
-                        for (low, high, range_label) in case_ranges.iter() {
-                            if switch_int >= *low && switch_int <= *high {
-                                target = *range_label;
-                                break;
-                            }
-                        }
-                    }
-                    self.terminate(Terminator::Branch(target));
-                } else if total_checks == 0 {
-                    // No cases, just go to default or end
-                    self.terminate(Terminator::Branch(fallback));
-                } else {
-                    let mut check_idx = 0usize;
-                    // Emit equality checks for individual cases
-                    for (case_val, case_label) in cases.iter() {
-                        let loaded = self.fresh_value();
-                        self.emit(Instruction::Load {
-                            dest: loaded,
-                            ptr: switch_alloca,
-                            ty: IrType::I64,
-                        });
-
-                        let cmp_result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(loaded), Operand::Const(IrConst::I64(*case_val)), IrType::I64);
-
-                        check_idx += 1;
-                        let next_check = if check_idx < total_checks {
-                            self.fresh_label()
-                        } else {
-                            fallback
-                        };
-
-                        self.terminate(Terminator::CondBranch {
-                            cond: Operand::Value(cmp_result),
-                            true_label: *case_label,
-                            false_label: next_check,
-                        });
-
-                        if check_idx < total_checks {
-                            self.start_block(next_check);
-                        }
-                    }
-                    // Emit range checks: val >= low && val <= high
-                    for (low, high, range_label) in case_ranges.iter() {
-                        let loaded = self.fresh_value();
-                        self.emit(Instruction::Load {
-                            dest: loaded,
-                            ptr: switch_alloca,
-                            ty: IrType::I64,
-                        });
-
-                        // Check val >= low
-                        let ge_result = self.emit_cmp_val(IrCmpOp::Sge, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
-                        // Check val <= high
-                        let le_result = self.emit_cmp_val(IrCmpOp::Sle, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
-                        // AND the two conditions
-                        let and_result = self.fresh_value();
-                        self.emit(Instruction::BinOp {
-                            dest: and_result,
-                            op: crate::ir::ir::IrBinOp::And,
-                            lhs: Operand::Value(ge_result),
-                            rhs: Operand::Value(le_result),
-                            ty: IrType::I32,
-                        });
-
-                        check_idx += 1;
-                        let next_check = if check_idx < total_checks {
-                            self.fresh_label()
-                        } else {
-                            fallback
-                        };
-
-                        self.terminate(Terminator::CondBranch {
-                            cond: Operand::Value(and_result),
-                            true_label: *range_label,
-                            false_label: next_check,
-                        });
-
-                        if check_idx < total_checks {
-                            self.start_block(next_check);
-                        }
-                    }
-                }
-
-                self.start_block(end_label);
-            }
-            Stmt::Case(expr, stmt, _span) => {
-                // Evaluate the case constant expression
-                let mut case_val = self.eval_const_expr(expr)
-                    .and_then(|c| self.const_to_i64(&c))
-                    .unwrap_or(0);
-
-                // Truncate case value to the switch controlling expression type.
-                // C requires case constants to be converted to the promoted type
-                // of the controlling expression (e.g., case 2^33 in switch(int) -> 0).
-                if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
-                    case_val = switch_ty.truncate_i64(case_val);
-                }
-
-                // Create a label for this case
-                let label = self.fresh_label();
-
-                // Register this case with the enclosing switch
-                if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.cases.push((case_val, label));
-                }
-
-                // Terminate current block and start the case block.
-                // The previous case falls through to this one (C semantics).
-                self.terminate(Terminator::Branch(label));
-                self.start_block(label);
-                self.lower_stmt(stmt);
-            }
-            Stmt::CaseRange(low_expr, high_expr, stmt, _span) => {
-                // Evaluate both range bounds as constants
-                let mut low_val = self.eval_const_expr(low_expr)
-                    .and_then(|c| self.const_to_i64(&c))
-                    .unwrap_or(0);
-                let mut high_val = self.eval_const_expr(high_expr)
-                    .and_then(|c| self.const_to_i64(&c))
-                    .unwrap_or(0);
-
-                // Truncate to switch controlling expression type
-                if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
-                    low_val = switch_ty.truncate_i64(low_val);
-                    high_val = switch_ty.truncate_i64(high_val);
-                }
-
-                // Create a label for this case range
-                let label = self.fresh_label();
-
-                // Register with the enclosing switch
-                if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.case_ranges.push((low_val, high_val, label));
-                }
-
-                // Fallthrough from previous case
-                self.terminate(Terminator::Branch(label));
-                self.start_block(label);
-                self.lower_stmt(stmt);
-            }
-            Stmt::Default(stmt, _span) => {
-                let label = self.fresh_label();
-
-                // Register as default with enclosing switch
-                if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.default_label = Some(label);
-                }
-
-                // Fallthrough from previous case
-                self.terminate(Terminator::Branch(label));
-                self.start_block(label);
-                self.lower_stmt(stmt);
-            }
-            Stmt::Goto(label, _span) => {
-                let scoped_label = self.get_or_create_user_label(label);
-                self.terminate(Terminator::Branch(scoped_label));
-                let dead = self.fresh_label();
-                self.start_block(dead);
-            }
-            Stmt::GotoIndirect(expr, _span) => {
-                let target = self.lower_expr(expr);
-                // Collect all known user labels as possible targets
-                let possible_targets: Vec<BlockId> = self.func_mut().user_labels.values().copied().collect();
-                self.terminate(Terminator::IndirectBranch { target, possible_targets });
-                let dead = self.fresh_label();
-                self.start_block(dead);
-            }
-            Stmt::Label(name, stmt, _span) => {
-                let label = self.get_or_create_user_label(name);
-                self.terminate(Terminator::Branch(label));
-                self.start_block(label);
-                self.lower_stmt(stmt);
-            }
+            Stmt::Compound(compound) => self.lower_compound_stmt(compound),
+            Stmt::If(cond, then_stmt, else_stmt, _span) => self.lower_if_stmt(cond, then_stmt, else_stmt.as_deref()),
+            Stmt::While(cond, body, _span) => self.lower_while_stmt(cond, body),
+            Stmt::For(init, cond, inc, body, _span) => self.lower_for_stmt(init, cond, inc, body),
+            Stmt::DoWhile(body, cond, _span) => self.lower_do_while_stmt(body, cond),
+            Stmt::Break(_span) => self.lower_break_stmt(),
+            Stmt::Continue(_span) => self.lower_continue_stmt(),
+            Stmt::Switch(expr, body, _span) => self.lower_switch_stmt(expr, body),
+            Stmt::Case(expr, stmt, _span) => self.lower_case_stmt(expr, stmt),
+            Stmt::CaseRange(low_expr, high_expr, stmt, _span) => self.lower_case_range_stmt(low_expr, high_expr, stmt),
+            Stmt::Default(stmt, _span) => self.lower_default_stmt(stmt),
+            Stmt::Goto(label, _span) => self.lower_goto_stmt(label),
+            Stmt::GotoIndirect(expr, _span) => self.lower_goto_indirect_stmt(expr),
+            Stmt::Label(name, stmt, _span) => self.lower_label_stmt(name, stmt),
             Stmt::InlineAsm { template, outputs, inputs, clobbers, goto_labels } => {
-                let mut ir_outputs = Vec::new();
-                let mut ir_inputs = Vec::new();
-                let mut operand_types = Vec::new();
-
-                // Process output operands: get the address (pointer) to store result
-                // Also collect types for synthetic "+" inputs separately
-                let mut plus_input_types = Vec::new();
-                for out in outputs {
-                    let mut constraint = out.constraint.clone();
-                    let name = out.name.clone();
-                    // Rewrite output constraint for register variables with __asm__("regname")
-                    if let Expr::Identifier(ref var_name, _) = out.expr {
-                        if let Some(asm_reg) = self.get_local_asm_register(var_name) {
-                            let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-                            if stripped.contains('r') || stripped == "g" {
-                                let prefix: String = constraint.chars().take_while(|c| *c == '=' || *c == '+' || *c == '&').collect();
-                                constraint = format!("{}{{{}}}", prefix, asm_reg);
-                            }
-                        }
-                    }
-                    // Use CType-based type for inline asm operands to get correct register
-                    // sizing (e.g., int -> I32 -> 32-bit register, not I64 -> 64-bit register)
-                    let out_ty = IrType::from_ctype(&self.expr_ctype(&out.expr));
-                    // Get the lvalue address for the output expression
-                    if let Some(lv) = self.lower_lvalue(&out.expr) {
-                        let ptr = match lv {
-                            LValue::Variable(v) | LValue::Address(v) => v,
-                        };
-                        // For "+r" (read-write), also treat as input (load current value)
-                        if constraint.contains('+') {
-                            let cur_val = self.fresh_value();
-                            // Use the same CType-based type as the operand for consistency
-                            self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty });
-                            ir_inputs.push((constraint.replace('+', "").to_string(), Operand::Value(cur_val), name.clone()));
-                            plus_input_types.push(out_ty);
-                        }
-                        ir_outputs.push((constraint, ptr, name));
-                        operand_types.push(out_ty);
-                    }
-                }
-                // Add types for synthetic "+" inputs (they go at the beginning of ir_inputs)
-                for ty in plus_input_types {
-                    operand_types.push(ty);
-                }
-
-                // Process input operands: evaluate expression to get value
-                let mut input_symbols: Vec<Option<String>> = Vec::new();
-                for inp in inputs {
-                    let mut constraint = inp.constraint.clone();
-                    let name = inp.name.clone();
-                    // For register variables with __asm__("regname"), when the constraint
-                    // allows a register ("r"), rewrite it to a specific register constraint
-                    // so the backend places the value in the exact register requested.
-                    // This implements GCC's register variable semantics.
-                    if let Expr::Identifier(ref var_name, _) = inp.expr {
-                        if let Some(asm_reg) = self.get_local_asm_register(var_name) {
-                            let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-                            if stripped.contains('r') || stripped == "g" {
-                                constraint = format!("{{{}}}", asm_reg);
-                            }
-                        }
-                    }
-                    // Use CType-based type for correct register sizing in inline asm
-                    let inp_ty = IrType::from_ctype(&self.expr_ctype(&inp.expr));
-                    // For immediate constraints ("I", "i", "n"), try to evaluate as
-                    // a compile-time constant to preserve the value for direct substitution.
-                    // GCC allows multi-alternative constraints like "Ir" (immediate or register),
-                    // "ri" (register or immediate), "In" etc. Uses shared helper to check
-                    // the same set of immediate letters as the backend framework.
-                    //
-                    // Also extract symbol names for "i" constraints that reference
-                    // functions/globals — needed for %P and %a modifiers.
-                    let mut sym_name: Option<String> = None;
-                    let val = if constraint_has_immediate_alt(&constraint) {
-                        if let Some(const_val) = self.eval_const_expr(&inp.expr) {
-                            Operand::Const(const_val)
-                        } else {
-                            // Try to extract symbol name for %P/%a modifier support
-                            sym_name = Self::extract_symbol_name(&inp.expr);
-                            self.lower_expr(&inp.expr)
-                        }
-                    } else if constraint_is_memory_only(&constraint) {
-                        // Pure memory constraint ("m"): need the address of the operand,
-                        // not its value. Use lower_lvalue to get the memory address.
-                        // For "rm" or "qm" constraints, the backend prefers registers,
-                        // so we lower as a value (handled by the else branch).
-                        if let Some(lv) = self.lower_lvalue(&inp.expr) {
-                            let ptr = match lv {
-                                LValue::Variable(v) | LValue::Address(v) => v,
-                            };
-                            Operand::Value(ptr)
-                        } else {
-                            self.lower_expr(&inp.expr)
-                        }
-                    } else {
-                        self.lower_expr(&inp.expr)
-                    };
-                    ir_inputs.push((constraint, val, name));
-                    operand_types.push(inp_ty);
-                    input_symbols.push(sym_name);
-                }
-
-                // Resolve goto label names to block IDs
-                let ir_goto_labels: Vec<(String, BlockId)> = goto_labels.iter().map(|name| {
-                    let block = self.get_or_create_user_label(name);
-                    (name.clone(), block)
-                }).collect();
-
-                self.emit(Instruction::InlineAsm {
-                    template: template.clone(),
-                    outputs: ir_outputs,
-                    inputs: ir_inputs,
-                    clobbers: clobbers.clone(),
-                    operand_types,
-                    goto_labels: ir_goto_labels,
-                    input_symbols,
-                });
+                self.lower_inline_asm_stmt(template, outputs, inputs, clobbers, goto_labels);
             }
         }
+    }
+
+    fn lower_if_stmt(&mut self, cond: &Expr, then_stmt: &Stmt, else_stmt: Option<&Stmt>) {
+        let cond_val = self.lower_condition_expr(cond);
+        let then_label = self.fresh_label();
+        let else_label = self.fresh_label();
+        let end_label = self.fresh_label();
+
+        let false_target = if else_stmt.is_some() { else_label } else { end_label };
+        self.terminate(Terminator::CondBranch {
+            cond: cond_val,
+            true_label: then_label,
+            false_label: false_target,
+        });
+
+        self.start_block(then_label);
+        self.lower_stmt(then_stmt);
+        self.terminate(Terminator::Branch(end_label));
+
+        if let Some(else_stmt) = else_stmt {
+            self.start_block(else_label);
+            self.lower_stmt(else_stmt);
+            self.terminate(Terminator::Branch(end_label));
+        }
+
+        self.start_block(end_label);
+    }
+
+    fn lower_while_stmt(&mut self, cond: &Expr, body: &Stmt) {
+        let cond_label = self.fresh_label();
+        let body_label = self.fresh_label();
+        let end_label = self.fresh_label();
+
+        self.func_mut().break_labels.push(end_label);
+        self.func_mut().continue_labels.push(cond_label);
+
+        self.terminate(Terminator::Branch(cond_label));
+
+        self.start_block(cond_label);
+        let cond_val = self.lower_condition_expr(cond);
+        self.terminate(Terminator::CondBranch {
+            cond: cond_val,
+            true_label: body_label,
+            false_label: end_label,
+        });
+
+        self.start_block(body_label);
+        self.lower_stmt(body);
+        let continue_target = *self.func().continue_labels.last().unwrap();
+        self.terminate(Terminator::Branch(continue_target));
+
+        self.func_mut().break_labels.pop();
+        self.func_mut().continue_labels.pop();
+        self.start_block(end_label);
+    }
+
+    fn lower_for_stmt(
+        &mut self,
+        init: &Option<Box<ForInit>>,
+        cond: &Option<Expr>,
+        inc: &Option<Expr>,
+        body: &Stmt,
+    ) {
+        // C99: for-init declarations have their own scope.
+        let has_decl_init = init.as_ref().map_or(false, |i| matches!(i.as_ref(), ForInit::Declaration(_)));
+        if has_decl_init {
+            self.push_scope();
+        }
+
+        // Init
+        if let Some(init) = init {
+            match init.as_ref() {
+                ForInit::Declaration(decl) => {
+                    self.collect_enum_constants_scoped(&decl.type_spec);
+                    self.lower_local_decl(decl);
+                }
+                ForInit::Expr(expr) => { self.lower_expr(expr); },
+            }
+        }
+
+        let cond_label = self.fresh_label();
+        let body_label = self.fresh_label();
+        let inc_label = self.fresh_label();
+        let end_label = self.fresh_label();
+
+        self.func_mut().break_labels.push(end_label);
+        self.func_mut().continue_labels.push(inc_label);
+
+        self.terminate(Terminator::Branch(cond_label));
+
+        // Condition
+        self.start_block(cond_label);
+        if let Some(cond) = cond {
+            let cond_val = self.lower_condition_expr(cond);
+            self.terminate(Terminator::CondBranch {
+                cond: cond_val,
+                true_label: body_label,
+                false_label: end_label,
+            });
+        } else {
+            self.terminate(Terminator::Branch(body_label));
+        }
+
+        // Body
+        self.start_block(body_label);
+        self.lower_stmt(body);
+        self.terminate(Terminator::Branch(inc_label));
+
+        // Increment
+        self.start_block(inc_label);
+        if let Some(inc) = inc {
+            self.lower_expr(inc);
+        }
+        self.terminate(Terminator::Branch(cond_label));
+
+        self.func_mut().break_labels.pop();
+        self.func_mut().continue_labels.pop();
+        self.start_block(end_label);
+
+        if has_decl_init {
+            self.pop_scope();
+        }
+    }
+
+    fn lower_do_while_stmt(&mut self, body: &Stmt, cond: &Expr) {
+        let body_label = self.fresh_label();
+        let cond_label = self.fresh_label();
+        let end_label = self.fresh_label();
+
+        self.func_mut().break_labels.push(end_label);
+        self.func_mut().continue_labels.push(cond_label);
+
+        self.terminate(Terminator::Branch(body_label));
+
+        self.start_block(body_label);
+        self.lower_stmt(body);
+        self.terminate(Terminator::Branch(cond_label));
+
+        self.start_block(cond_label);
+        let cond_val = self.lower_condition_expr(cond);
+        self.terminate(Terminator::CondBranch {
+            cond: cond_val,
+            true_label: body_label,
+            false_label: end_label,
+        });
+
+        self.func_mut().break_labels.pop();
+        self.func_mut().continue_labels.pop();
+        self.start_block(end_label);
+    }
+
+    fn lower_break_stmt(&mut self) {
+        if let Some(&label) = self.func_mut().break_labels.last() {
+            self.terminate(Terminator::Branch(label));
+            let dead = self.fresh_label();
+            self.start_block(dead);
+        }
+    }
+
+    fn lower_continue_stmt(&mut self) {
+        if let Some(&label) = self.func_mut().continue_labels.last() {
+            self.terminate(Terminator::Branch(label));
+            let dead = self.fresh_label();
+            self.start_block(dead);
+        }
+    }
+
+    fn lower_switch_stmt(&mut self, expr: &Expr, body: &Stmt) {
+        // C99 6.8.4.2: Integer promotions are performed on the controlling expression.
+        let raw_expr_ty = self.get_expr_type(expr);
+        let switch_expr_ty = match raw_expr_ty {
+            IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
+            _ => raw_expr_ty,
+        };
+        let val = self.lower_expr(expr);
+        let val = if switch_expr_ty != raw_expr_ty {
+            self.emit_implicit_cast(val, raw_expr_ty, switch_expr_ty)
+        } else {
+            val
+        };
+
+        // Store switch value in an alloca for dispatch chain reloading
+        let switch_alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: switch_alloca, ty: IrType::I64, size: 8, align: 0 });
+        self.emit(Instruction::Store { val, ptr: switch_alloca, ty: IrType::I64 });
+
+        let dispatch_label = self.fresh_label();
+        let end_label = self.fresh_label();
+        let body_label = self.fresh_label();
+
+        // Push switch context
+        self.func_mut().switch_stack.push(SwitchFrame {
+            cases: Vec::new(),
+            case_ranges: Vec::new(),
+            default_label: None,
+            expr_type: switch_expr_ty,
+        });
+        self.func_mut().break_labels.push(end_label);
+
+        self.terminate(Terminator::Branch(dispatch_label));
+
+        // Lower the body first; case/default stmts register their labels
+        self.start_block(body_label);
+        self.lower_stmt(body);
+        self.terminate(Terminator::Branch(end_label));
+
+        // Pop switch context and emit dispatch chain
+        let switch_frame = self.func_mut().switch_stack.pop();
+        self.func_mut().break_labels.pop();
+        let cases = switch_frame.as_ref().map(|f| f.cases.clone()).unwrap_or_default();
+        let case_ranges = switch_frame.as_ref().map(|f| f.case_ranges.clone()).unwrap_or_default();
+        let default_label = switch_frame.as_ref().and_then(|f| f.default_label);
+
+        let fallback = default_label.unwrap_or(end_label);
+        self.start_block(dispatch_label);
+        self.emit_switch_dispatch(&val, switch_alloca, &cases, &case_ranges, fallback);
+        self.start_block(end_label);
+    }
+
+    /// Emit the dispatch chain for a switch statement. For compile-time constant
+    /// switch values, directly jumps to the matching case. Otherwise emits a
+    /// chain of comparison branches.
+    fn emit_switch_dispatch(
+        &mut self,
+        val: &Operand,
+        switch_alloca: Value,
+        cases: &[(i64, BlockId)],
+        case_ranges: &[(i64, i64, BlockId)],
+        fallback: BlockId,
+    ) {
+        let total_checks = cases.len() + case_ranges.len();
+
+        // Constant folding: if switch expression is a compile-time constant,
+        // jump directly to the matching case (avoids dead dispatch branches
+        // with type-mismatched inline asm).
+        if let Operand::Const(c) = val {
+            if let Some(switch_int) = self.const_to_i64(c) {
+                let target = cases.iter()
+                    .find(|(cv, _)| *cv == switch_int)
+                    .map(|(_, label)| *label)
+                    .or_else(|| case_ranges.iter()
+                        .find(|(low, high, _)| switch_int >= *low && switch_int <= *high)
+                        .map(|(_, _, label)| *label))
+                    .unwrap_or(fallback);
+                self.terminate(Terminator::Branch(target));
+                return;
+            }
+        }
+
+        if total_checks == 0 {
+            self.terminate(Terminator::Branch(fallback));
+            return;
+        }
+
+        let mut check_idx = 0usize;
+        // Emit equality checks for individual cases
+        for (case_val, case_label) in cases.iter() {
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 });
+            let cmp_result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(loaded), Operand::Const(IrConst::I64(*case_val)), IrType::I64);
+
+            check_idx += 1;
+            let next_check = if check_idx < total_checks { self.fresh_label() } else { fallback };
+            self.terminate(Terminator::CondBranch {
+                cond: Operand::Value(cmp_result),
+                true_label: *case_label,
+                false_label: next_check,
+            });
+            if check_idx < total_checks {
+                self.start_block(next_check);
+            }
+        }
+
+        // Emit range checks: val >= low && val <= high
+        for (low, high, range_label) in case_ranges.iter() {
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 });
+            let ge_result = self.emit_cmp_val(IrCmpOp::Sge, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
+            let le_result = self.emit_cmp_val(IrCmpOp::Sle, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
+            let and_result = self.fresh_value();
+            self.emit(Instruction::BinOp {
+                dest: and_result,
+                op: crate::ir::ir::IrBinOp::And,
+                lhs: Operand::Value(ge_result),
+                rhs: Operand::Value(le_result),
+                ty: IrType::I32,
+            });
+
+            check_idx += 1;
+            let next_check = if check_idx < total_checks { self.fresh_label() } else { fallback };
+            self.terminate(Terminator::CondBranch {
+                cond: Operand::Value(and_result),
+                true_label: *range_label,
+                false_label: next_check,
+            });
+            if check_idx < total_checks {
+                self.start_block(next_check);
+            }
+        }
+    }
+
+    /// Evaluate a case constant and truncate to the switch expression type.
+    fn eval_case_constant(&mut self, expr: &Expr) -> i64 {
+        let mut val = self.eval_const_expr(expr)
+            .and_then(|c| self.const_to_i64(&c))
+            .unwrap_or(0);
+        if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
+            val = switch_ty.truncate_i64(val);
+        }
+        val
+    }
+
+    fn lower_case_stmt(&mut self, expr: &Expr, stmt: &Stmt) {
+        let case_val = self.eval_case_constant(expr);
+        let label = self.fresh_label();
+        if let Some(frame) = self.func_mut().switch_stack.last_mut() {
+            frame.cases.push((case_val, label));
+        }
+        // Fallthrough from previous case
+        self.terminate(Terminator::Branch(label));
+        self.start_block(label);
+        self.lower_stmt(stmt);
+    }
+
+    fn lower_case_range_stmt(&mut self, low_expr: &Expr, high_expr: &Expr, stmt: &Stmt) {
+        let low_val = self.eval_case_constant(low_expr);
+        let high_val = self.eval_case_constant(high_expr);
+        let label = self.fresh_label();
+        if let Some(frame) = self.func_mut().switch_stack.last_mut() {
+            frame.case_ranges.push((low_val, high_val, label));
+        }
+        self.terminate(Terminator::Branch(label));
+        self.start_block(label);
+        self.lower_stmt(stmt);
+    }
+
+    fn lower_default_stmt(&mut self, stmt: &Stmt) {
+        let label = self.fresh_label();
+        if let Some(frame) = self.func_mut().switch_stack.last_mut() {
+            frame.default_label = Some(label);
+        }
+        self.terminate(Terminator::Branch(label));
+        self.start_block(label);
+        self.lower_stmt(stmt);
+    }
+
+    fn lower_goto_stmt(&mut self, label: &str) {
+        let scoped_label = self.get_or_create_user_label(label);
+        self.terminate(Terminator::Branch(scoped_label));
+        let dead = self.fresh_label();
+        self.start_block(dead);
+    }
+
+    fn lower_goto_indirect_stmt(&mut self, expr: &Expr) {
+        let target = self.lower_expr(expr);
+        let possible_targets: Vec<BlockId> = self.func_mut().user_labels.values().copied().collect();
+        self.terminate(Terminator::IndirectBranch { target, possible_targets });
+        let dead = self.fresh_label();
+        self.start_block(dead);
+    }
+
+    fn lower_label_stmt(&mut self, name: &str, stmt: &Stmt) {
+        let label = self.get_or_create_user_label(name);
+        self.terminate(Terminator::Branch(label));
+        self.start_block(label);
+        self.lower_stmt(stmt);
+    }
+
+    fn lower_inline_asm_stmt(
+        &mut self,
+        template: &str,
+        outputs: &[AsmOperand],
+        inputs: &[AsmOperand],
+        clobbers: &[String],
+        goto_labels: &[String],
+    ) {
+        let mut ir_outputs = Vec::new();
+        let mut ir_inputs = Vec::new();
+        let mut operand_types = Vec::new();
+
+        // Process output operands and synthetic "+" inputs
+        let mut plus_input_types = Vec::new();
+        for out in outputs {
+            let mut constraint = out.constraint.clone();
+            let name = out.name.clone();
+            // Rewrite output constraint for register variables with __asm__("regname")
+            if let Expr::Identifier(ref var_name, _) = out.expr {
+                if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                    if stripped.contains('r') || stripped == "g" {
+                        let prefix: String = constraint.chars().take_while(|c| *c == '=' || *c == '+' || *c == '&').collect();
+                        constraint = format!("{}{{{}}}", prefix, asm_reg);
+                    }
+                }
+            }
+            let out_ty = IrType::from_ctype(&self.expr_ctype(&out.expr));
+            if let Some(lv) = self.lower_lvalue(&out.expr) {
+                let ptr = match lv {
+                    LValue::Variable(v) | LValue::Address(v) => v,
+                };
+                if constraint.contains('+') {
+                    let cur_val = self.fresh_value();
+                    self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty });
+                    ir_inputs.push((constraint.replace('+', "").to_string(), Operand::Value(cur_val), name.clone()));
+                    plus_input_types.push(out_ty);
+                }
+                ir_outputs.push((constraint, ptr, name));
+                operand_types.push(out_ty);
+            }
+        }
+        for ty in plus_input_types {
+            operand_types.push(ty);
+        }
+
+        // Process input operands
+        let mut input_symbols: Vec<Option<String>> = Vec::new();
+        for inp in inputs {
+            let mut constraint = inp.constraint.clone();
+            let name = inp.name.clone();
+            // Rewrite constraint for register variables with __asm__("regname"):
+            // when the constraint allows "r", pin to the exact requested register.
+            if let Expr::Identifier(ref var_name, _) = inp.expr {
+                if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                    if stripped.contains('r') || stripped == "g" {
+                        constraint = format!("{{{}}}", asm_reg);
+                    }
+                }
+            }
+            let inp_ty = IrType::from_ctype(&self.expr_ctype(&inp.expr));
+            let mut sym_name: Option<String> = None;
+            let val = if constraint_has_immediate_alt(&constraint) {
+                if let Some(const_val) = self.eval_const_expr(&inp.expr) {
+                    Operand::Const(const_val)
+                } else {
+                    sym_name = Self::extract_symbol_name(&inp.expr);
+                    self.lower_expr(&inp.expr)
+                }
+            } else if constraint_is_memory_only(&constraint) {
+                if let Some(lv) = self.lower_lvalue(&inp.expr) {
+                    let ptr = match lv {
+                        LValue::Variable(v) | LValue::Address(v) => v,
+                    };
+                    Operand::Value(ptr)
+                } else {
+                    self.lower_expr(&inp.expr)
+                }
+            } else {
+                self.lower_expr(&inp.expr)
+            };
+            ir_inputs.push((constraint, val, name));
+            operand_types.push(inp_ty);
+            input_symbols.push(sym_name);
+        }
+
+        // Resolve goto labels
+        let ir_goto_labels: Vec<(String, BlockId)> = goto_labels.iter().map(|name| {
+            let block = self.get_or_create_user_label(name);
+            (name.clone(), block)
+        }).collect();
+
+        self.emit(Instruction::InlineAsm {
+            template: template.to_string(),
+            outputs: ir_outputs,
+            inputs: ir_inputs,
+            clobbers: clobbers.to_vec(),
+            operand_types,
+            goto_labels: ir_goto_labels,
+            input_symbols,
+        });
     }
 
     /// Extract a global symbol name from an expression, for use with inline asm

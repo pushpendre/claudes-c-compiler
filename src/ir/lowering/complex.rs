@@ -169,8 +169,11 @@ impl Lowerer {
         }
     }
 
-    /// Lower complex addition: (a+bi) + (c+di) = (a+c) + (b+d)i
-    pub(super) fn lower_complex_add(&mut self, lhs_ptr: Value, rhs_ptr: Value, ctype: &CType) -> Operand {
+    /// Lower a componentwise complex binary operation (add or sub).
+    /// Both real and imaginary parts use the same `op`:
+    ///   add: (a+bi) + (c+di) = (a+c) + (b+d)i
+    ///   sub: (a+bi) - (c+di) = (a-c) + (b-d)i
+    fn lower_complex_componentwise_binop(&mut self, op: IrBinOp, lhs_ptr: Value, rhs_ptr: Value, ctype: &CType) -> Operand {
         let comp_ty = Self::complex_component_ir_type(ctype);
 
         let lr = self.load_complex_real(lhs_ptr, ctype);
@@ -178,29 +181,22 @@ impl Lowerer {
         let rr = self.load_complex_real(rhs_ptr, ctype);
         let ri = self.load_complex_imag(rhs_ptr, ctype);
 
-        let real_sum = self.emit_binop_val(IrBinOp::Add, lr, rr, comp_ty);
-        let imag_sum = self.emit_binop_val(IrBinOp::Add, li, ri, comp_ty);
+        let real_result = self.emit_binop_val(op, lr, rr, comp_ty);
+        let imag_result = self.emit_binop_val(op, li, ri, comp_ty);
 
         let result = self.alloca_complex(ctype);
-        self.store_complex_parts(result, Operand::Value(real_sum), Operand::Value(imag_sum), ctype);
+        self.store_complex_parts(result, Operand::Value(real_result), Operand::Value(imag_result), ctype);
         Operand::Value(result)
+    }
+
+    /// Lower complex addition: (a+bi) + (c+di) = (a+c) + (b+d)i
+    pub(super) fn lower_complex_add(&mut self, lhs_ptr: Value, rhs_ptr: Value, ctype: &CType) -> Operand {
+        self.lower_complex_componentwise_binop(IrBinOp::Add, lhs_ptr, rhs_ptr, ctype)
     }
 
     /// Lower complex subtraction: (a+bi) - (c+di) = (a-c) + (b-d)i
     pub(super) fn lower_complex_sub(&mut self, lhs_ptr: Value, rhs_ptr: Value, ctype: &CType) -> Operand {
-        let comp_ty = Self::complex_component_ir_type(ctype);
-
-        let lr = self.load_complex_real(lhs_ptr, ctype);
-        let li = self.load_complex_imag(lhs_ptr, ctype);
-        let rr = self.load_complex_real(rhs_ptr, ctype);
-        let ri = self.load_complex_imag(rhs_ptr, ctype);
-
-        let real_diff = self.emit_binop_val(IrBinOp::Sub, lr, rr, comp_ty);
-        let imag_diff = self.emit_binop_val(IrBinOp::Sub, li, ri, comp_ty);
-
-        let result = self.alloca_complex(ctype);
-        self.store_complex_parts(result, Operand::Value(real_diff), Operand::Value(imag_diff), ctype);
-        Operand::Value(result)
+        self.lower_complex_componentwise_binop(IrBinOp::Sub, lhs_ptr, rhs_ptr, ctype)
     }
 
     /// Lower complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i

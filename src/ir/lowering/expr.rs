@@ -512,8 +512,6 @@ impl Lowerer {
 
     fn lower_conditional(&mut self, cond: &Expr, then_expr: &Expr, else_expr: &Expr) -> Operand {
         let cond_val = self.lower_condition_expr(cond);
-        let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
 
         let mut then_ty = self.get_expr_type(then_expr);
         let mut else_ty = self.get_expr_type(else_expr);
@@ -521,44 +519,28 @@ impl Lowerer {
         if self.expr_is_pointer(else_expr) { else_ty = IrType::I64; }
         let common_ty = Self::common_type(then_ty, else_ty);
 
-        let then_label = self.fresh_label();
-        let else_label = self.fresh_label();
-        let end_label = self.fresh_label();
-
-        self.terminate(Terminator::CondBranch {
-            cond: cond_val,
-            true_label: then_label,
-            false_label: else_label,
-        });
-
-        self.start_block(then_label);
-        let then_val = self.lower_expr(then_expr);
-        let then_val = self.emit_implicit_cast(then_val, then_ty, common_ty);
-        self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label));
-
-        self.start_block(else_label);
-        let else_val = self.lower_expr(else_expr);
-        let else_val = self.emit_implicit_cast(else_val, else_ty, common_ty);
-        self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label));
-
-        self.start_block(end_label);
-        let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 });
-        Operand::Value(result)
+        self.emit_ternary_branch(
+            cond_val,
+            |s| {
+                let then_val = s.lower_expr(then_expr);
+                s.emit_implicit_cast(then_val, then_ty, common_ty)
+            },
+            |s| {
+                let else_val = s.lower_expr(else_expr);
+                s.emit_implicit_cast(else_val, else_ty, common_ty)
+            },
+        )
     }
 
     /// Lower GNU conditional expression: `cond ? : else_expr`
+    /// The "then" value is the condition value itself (evaluated once).
     fn lower_gnu_conditional(&mut self, cond: &Expr, else_expr: &Expr) -> Operand {
         let cond_val = self.lower_expr(cond);
-        let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
-
         let cond_ty = self.get_expr_type(cond);
         let else_ty = self.get_expr_type(else_expr);
         let common_ty = Self::common_type(cond_ty, else_ty);
 
+        // Convert condition to boolean for branching
         let zero = Operand::Const(IrConst::I64(0));
         let cond_bool = self.fresh_value();
         self.emit(Instruction::Cmp {
@@ -566,24 +548,45 @@ impl Lowerer {
             lhs: cond_val.clone(), rhs: zero, ty: IrType::I64,
         });
 
+        self.emit_ternary_branch(
+            Operand::Value(cond_bool),
+            |s| s.emit_implicit_cast(cond_val.clone(), cond_ty, common_ty),
+            |s| {
+                let else_val = s.lower_expr(else_expr);
+                s.emit_implicit_cast(else_val, else_ty, common_ty)
+            },
+        )
+    }
+
+    /// Shared helper for ternary branch patterns (conditional and GNU conditional).
+    /// Evaluates `then_fn` in the true branch and `else_fn` in the false branch,
+    /// stores both results to an alloca, and returns the loaded result.
+    fn emit_ternary_branch(
+        &mut self,
+        cond: Operand,
+        then_fn: impl FnOnce(&mut Self) -> Operand,
+        else_fn: impl FnOnce(&mut Self) -> Operand,
+    ) -> Operand {
+        let result_alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
+
         let then_label = self.fresh_label();
         let else_label = self.fresh_label();
         let end_label = self.fresh_label();
 
         self.terminate(Terminator::CondBranch {
-            cond: Operand::Value(cond_bool),
+            cond,
             true_label: then_label,
             false_label: else_label,
         });
 
         self.start_block(then_label);
-        let then_val = self.emit_implicit_cast(cond_val, cond_ty, common_ty);
+        let then_val = then_fn(self);
         self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::Branch(end_label));
 
         self.start_block(else_label);
-        let else_val = self.lower_expr(else_expr);
-        let else_val = self.emit_implicit_cast(else_val, else_ty, common_ty);
+        let else_val = else_fn(self);
         self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::Branch(end_label));
 
