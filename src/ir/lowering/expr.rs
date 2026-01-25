@@ -193,9 +193,7 @@ impl Lowerer {
             return self.load_global_var(name.to_string(), &ginfo);
         }
 
-        if !self.known_functions.contains(name) {
-            eprintln!("warning: implicit declaration of '{}'", name);
-        }
+        // Note: implicit declaration warnings are emitted during sema, not here.
         let dest = self.fresh_value();
         self.emit(Instruction::GlobalAddr { dest, name: name.to_string() });
         Operand::Value(dest)

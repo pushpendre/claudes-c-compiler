@@ -400,6 +400,15 @@ impl Driver {
         let preprocessed = preprocessor.preprocess(&source);
         if time_phases { eprintln!("[TIME] preprocess: {:.3}s", t0.elapsed().as_secs_f64()); }
 
+        // Check for #error directives
+        let pp_errors = preprocessor.errors();
+        if !pp_errors.is_empty() {
+            for err in pp_errors {
+                eprintln!("error: {}", err);
+            }
+            return Err(format!("{} preprocessor error(s) in {}", pp_errors.len(), input_file));
+        }
+
         // Lex
         let t1 = std::time::Instant::now();
         let mut source_manager = SourceManager::new();
@@ -424,11 +433,6 @@ impl Driver {
 
         if self.verbose {
             eprintln!("Parsed {} declarations", ast.decls.len());
-        }
-
-        // Check for parse errors - must fail with non-zero exit code
-        if parser.error_count > 0 {
-            return Err(format!("{} parse error(s) in {}", parser.error_count, input_file));
         }
 
         // Semantic analysis

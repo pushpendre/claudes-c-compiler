@@ -523,57 +523,18 @@ impl<'a> ExprTypeChecker<'a> {
         }
     }
 
-    /// Simple constant expression evaluation for array sizes.
-    /// TODO: delegate to SemaConstEval to unify const_eval across sema modules
+    /// Evaluate a constant expression for array sizes and similar contexts.
+    /// Delegates to SemaConstEval for the full implementation, unifying
+    /// const_eval across all sema modules.
     fn eval_const_expr(&self, expr: &Expr) -> Option<i64> {
-        match expr {
-            Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => Some(*val),
-            Expr::UIntLiteral(val, _) | Expr::ULongLiteral(val, _) => Some(*val as i64),
-            Expr::CharLiteral(ch, _) => Some(*ch as i64),
-            Expr::Identifier(name, _) => {
-                self.types.enum_constants.get(name).copied()
-            }
-            Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = self.eval_const_expr(lhs)?;
-                let r = self.eval_const_expr(rhs)?;
-                Some(match op {
-                    BinOp::Add => l.wrapping_add(r),
-                    BinOp::Sub => l.wrapping_sub(r),
-                    BinOp::Mul => l.wrapping_mul(r),
-                    BinOp::Div => if r != 0 { l.wrapping_div(r) } else { return None },
-                    BinOp::Mod => if r != 0 { l.wrapping_rem(r) } else { return None },
-                    BinOp::BitAnd => l & r,
-                    BinOp::BitOr => l | r,
-                    BinOp::BitXor => l ^ r,
-                    BinOp::Shl => l.wrapping_shl(r as u32),
-                    BinOp::Shr => l.wrapping_shr(r as u32),
-                    BinOp::Eq => if l == r { 1 } else { 0 },
-                    BinOp::Ne => if l != r { 1 } else { 0 },
-                    BinOp::Lt => if l < r { 1 } else { 0 },
-                    BinOp::Le => if l <= r { 1 } else { 0 },
-                    BinOp::Gt => if l > r { 1 } else { 0 },
-                    BinOp::Ge => if l >= r { 1 } else { 0 },
-                    BinOp::LogicalAnd => if l != 0 && r != 0 { 1 } else { 0 },
-                    BinOp::LogicalOr => if l != 0 || r != 0 { 1 } else { 0 },
-                })
-            }
-            Expr::UnaryOp(op, inner, _) => {
-                let v = self.eval_const_expr(inner)?;
-                Some(match op {
-                    UnaryOp::Neg => v.wrapping_neg(),
-                    UnaryOp::BitNot => !v,
-                    UnaryOp::LogicalNot => if v == 0 { 1 } else { 0 },
-                    UnaryOp::Plus => v,
-                    _ => return None,
-                })
-            }
-            Expr::Cast(_, inner, _) => self.eval_const_expr(inner),
-            Expr::Conditional(cond, then_expr, else_expr, _) => {
-                let c = self.eval_const_expr(cond)?;
-                if c != 0 { self.eval_const_expr(then_expr) } else { self.eval_const_expr(else_expr) }
-            }
-            _ => None,
-        }
+        let evaluator = super::const_eval::SemaConstEval {
+            types: self.types,
+            symbols: self.symbols,
+            functions: self.functions,
+            const_values: None,
+            expr_types: self.expr_types,
+        };
+        evaluator.eval_const_expr(expr)?.to_i64()
     }
 
     /// Return CType for known builtins.

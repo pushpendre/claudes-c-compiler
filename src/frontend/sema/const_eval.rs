@@ -18,7 +18,7 @@
 /// unify constant expression evaluation between sema and lowering.
 
 use crate::common::types::CType;
-use crate::common::const_arith::{wrap_result, unsigned_op, bool_to_i64};
+use crate::common::const_arith;
 use crate::ir::ir::IrConst;
 use crate::frontend::parser::ast::*;
 use super::type_context::TypeContext;
@@ -94,38 +94,14 @@ impl<'a> SemaConstEval<'a> {
                 Some(IrConst::LongDouble(*val))
             }
 
-            // Unary plus: identity
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
                 self.eval_const_expr(inner)
             }
-
-            // Unary negation
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                let val = self.eval_const_expr(inner)?;
-                match val {
-                    IrConst::I64(v) => Some(IrConst::I64(-v)),
-                    IrConst::I32(v) => Some(IrConst::I32(-v)),
-                    // Integer promotion: sub-int types promote to int before negation
-                    IrConst::I8(v) => Some(IrConst::I32(-(v as i32))),
-                    IrConst::I16(v) => Some(IrConst::I32(-(v as i32))),
-                    IrConst::F64(v) => Some(IrConst::F64(-v)),
-                    IrConst::F32(v) => Some(IrConst::F32(-v)),
-                    IrConst::LongDouble(v) => Some(IrConst::LongDouble(-v)),
-                    _ => None,
-                }
+                const_arith::negate_const(self.eval_const_expr(inner)?)
             }
-
-            // Bitwise NOT
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                let val = self.eval_const_expr(inner)?;
-                match val {
-                    IrConst::I64(v) => Some(IrConst::I64(!v)),
-                    IrConst::I32(v) => Some(IrConst::I32(!v)),
-                    // Integer promotion: sub-int types promote to int before complement
-                    IrConst::I8(v) => Some(IrConst::I32(!(v as i32))),
-                    IrConst::I16(v) => Some(IrConst::I32(!(v as i32))),
-                    _ => None,
-                }
+                const_arith::bitnot_const(self.eval_const_expr(inner)?)
             }
 
             // Logical NOT
@@ -242,33 +218,11 @@ impl<'a> SemaConstEval<'a> {
             Expr::Cast(ref target_type, inner, _) => {
                 let (bits, _src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_ctype = self.type_spec_to_ctype(target_type);
-                let target_size = self.ctype_size(&target_ctype);
-                let target_width = target_size * 8;
+                let target_width = self.ctype_size(&target_ctype) * 8;
                 let target_signed = !target_ctype.is_unsigned() && !target_ctype.is_pointer_like();
-
-                // Truncate to target width
-                let truncated = if target_width >= 64 || target_width == 0 {
-                    bits
-                } else {
-                    bits & ((1u64 << target_width) - 1)
-                };
-
-                // If target is signed, sign-extend to 64 bits
-                let result = if target_signed && target_width < 64 && target_width > 0 {
-                    let sign_bit = 1u64 << (target_width - 1);
-                    if truncated & sign_bit != 0 {
-                        truncated | !((1u64 << target_width) - 1)
-                    } else {
-                        truncated
-                    }
-                } else {
-                    truncated
-                };
-
-                Some((result, target_signed))
+                Some(const_arith::truncate_and_extend_bits(bits, target_width, target_signed))
             }
             _ => {
-                // For non-cast expressions, evaluate normally and convert to bits
                 let val = self.eval_const_expr(expr)?;
                 let bits = match &val {
                     IrConst::F32(v) => *v as i64 as u64,
@@ -281,31 +235,16 @@ impl<'a> SemaConstEval<'a> {
     }
 
     /// Evaluate a binary operation on constant operands.
-    /// Uses both LHS and RHS types to apply C's usual arithmetic conversions
-    /// (C11 6.3.1.8) for determining result width and signedness.
+    /// Uses both LHS and RHS types for C's usual arithmetic conversions (C11 6.3.1.8).
+    /// Delegates arithmetic to the shared implementation in `common::const_arith`.
     fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ctype: Option<&CType>, rhs_ctype: Option<&CType>) -> Option<IrConst> {
-        // Check if either operand is floating-point
-        let lhs_is_float = matches!(lhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_));
-        let rhs_is_float = matches!(rhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_));
-
-        if lhs_is_float || rhs_is_float {
-            return self.eval_const_binop_float(op, lhs, rhs);
-        }
-
-        let l = lhs.to_i64()?;
-        let r = rhs.to_i64()?;
-
         // Apply C's usual arithmetic conversions using both operand types.
-        // The result type is the wider of the two, with unsigned winning at equal rank.
         let lhs_size = lhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
         let rhs_size = rhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
         let lhs_unsigned = lhs_ctype.map_or(false, |ct| ct.is_unsigned());
         let rhs_unsigned = rhs_ctype.map_or(false, |ct| ct.is_unsigned());
-        // Result width: max of both operand widths (C promotes to at least int = 4 bytes)
         let result_size = lhs_size.max(rhs_size);
         let is_32bit = result_size <= 4;
-        // Result signedness: unsigned if either operand is unsigned at the result width,
-        // or if an unsigned operand has >= rank than the signed operand
         let is_unsigned = if lhs_size == rhs_size {
             lhs_unsigned || rhs_unsigned
         } else if lhs_size > rhs_size {
@@ -313,99 +252,7 @@ impl<'a> SemaConstEval<'a> {
         } else {
             rhs_unsigned
         };
-
-        let result = match op {
-            BinOp::Add => wrap_result(l.wrapping_add(r), is_32bit),
-            BinOp::Sub => wrap_result(l.wrapping_sub(r), is_32bit),
-            BinOp::Mul => wrap_result(l.wrapping_mul(r), is_32bit),
-            BinOp::Div => {
-                if r == 0 { return None; }
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, u64::wrapping_div)
-                } else {
-                    wrap_result(l.wrapping_div(r), is_32bit)
-                }
-            }
-            BinOp::Mod => {
-                if r == 0 { return None; }
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, u64::wrapping_rem)
-                } else {
-                    wrap_result(l.wrapping_rem(r), is_32bit)
-                }
-            }
-            BinOp::BitAnd => l & r,
-            BinOp::BitOr => l | r,
-            BinOp::BitXor => l ^ r,
-            BinOp::Shl => wrap_result(l.wrapping_shl(r as u32), is_32bit),
-            BinOp::Shr => {
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, |a, b| a.wrapping_shr(b as u32))
-                } else if is_32bit {
-                    (l as i32).wrapping_shr(r as u32) as i64
-                } else {
-                    l.wrapping_shr(r as u32)
-                }
-            }
-            BinOp::Eq => bool_to_i64(l == r),
-            BinOp::Ne => bool_to_i64(l != r),
-            BinOp::Lt => {
-                if is_unsigned { bool_to_i64((l as u64) < (r as u64)) }
-                else { bool_to_i64(l < r) }
-            }
-            BinOp::Gt => {
-                if is_unsigned { bool_to_i64((l as u64) > (r as u64)) }
-                else { bool_to_i64(l > r) }
-            }
-            BinOp::Le => {
-                if is_unsigned { bool_to_i64((l as u64) <= (r as u64)) }
-                else { bool_to_i64(l <= r) }
-            }
-            BinOp::Ge => {
-                if is_unsigned { bool_to_i64((l as u64) >= (r as u64)) }
-                else { bool_to_i64(l >= r) }
-            }
-            BinOp::LogicalAnd => bool_to_i64(l != 0 && r != 0),
-            BinOp::LogicalOr => bool_to_i64(l != 0 || r != 0),
-        };
-        Some(IrConst::I64(result))
-    }
-
-    /// Evaluate a binary operation on floating-point constant operands.
-    /// Promotes both operands to the wider float type (f64 if either is f64,
-    /// LongDouble if either is LongDouble).
-    fn eval_const_binop_float(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
-        let use_long_double = matches!(lhs, IrConst::LongDouble(_)) || matches!(rhs, IrConst::LongDouble(_));
-        let use_f32 = matches!(lhs, IrConst::F32(_)) && matches!(rhs, IrConst::F32(_));
-
-        let l = lhs.to_f64()?;
-        let r = rhs.to_f64()?;
-
-        let make_result = |v: f64| -> IrConst {
-            if use_long_double {
-                IrConst::LongDouble(v)
-            } else if use_f32 {
-                IrConst::F32(v as f32)
-            } else {
-                IrConst::F64(v)
-            }
-        };
-
-        match op {
-            BinOp::Add => Some(make_result(l + r)),
-            BinOp::Sub => Some(make_result(l - r)),
-            BinOp::Mul => Some(make_result(l * r)),
-            BinOp::Div => Some(make_result(l / r)),
-            BinOp::Eq => Some(IrConst::I64(if l == r { 1 } else { 0 })),
-            BinOp::Ne => Some(IrConst::I64(if l != r { 1 } else { 0 })),
-            BinOp::Lt => Some(IrConst::I64(if l < r { 1 } else { 0 })),
-            BinOp::Gt => Some(IrConst::I64(if l > r { 1 } else { 0 })),
-            BinOp::Le => Some(IrConst::I64(if l <= r { 1 } else { 0 })),
-            BinOp::Ge => Some(IrConst::I64(if l >= r { 1 } else { 0 })),
-            BinOp::LogicalAnd => Some(IrConst::I64(if l != 0.0 && r != 0.0 { 1 } else { 0 })),
-            BinOp::LogicalOr => Some(IrConst::I64(if l != 0.0 || r != 0.0 { 1 } else { 0 })),
-            _ => None, // Bitwise/shift not valid on floats
-        }
+        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned)
     }
 
     /// Evaluate the offsetof pattern: &((type*)0)->member
@@ -454,23 +301,13 @@ impl<'a> SemaConstEval<'a> {
         match expr {
             Expr::Cast(ref type_spec, inner, _) => {
                 if let TypeSpecifier::Pointer(inner_ts) = type_spec {
-                    if self.is_zero_expr(inner) {
+                    if const_arith::is_zero_expr(inner) {
                         return Some((*inner_ts.clone(), 0));
                     }
                 }
                 None
             }
             _ => None,
-        }
-    }
-
-    /// Check if an expression evaluates to 0.
-    fn is_zero_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::IntLiteral(0, _) | Expr::UIntLiteral(0, _)
-            | Expr::LongLiteral(0, _) | Expr::ULongLiteral(0, _) => true,
-            Expr::Cast(_, inner, _) => self.is_zero_expr(inner),
-            _ => false,
         }
     }
 

@@ -78,6 +78,15 @@ Step 5: (DONE) Expand sema const_eval to produce IrConst values
           lines of duplicated sizeof_type_spec/alignof_type_spec from sema.rs)
         - Lowerer's eval_const_expr() uses sema ConstMap as O(1) fast path
         - Zero regressions across all three backends (x86, ARM, RISC-V)
+Step 5.5: (DONE) Unify shared const_eval arithmetic into common/const_arith.rs
+        - Extracted eval_const_binop, eval_const_binop_float, negate_const,
+          bitnot_const, truncate_and_extend_bits, is_zero_expr into shared module
+        - Both sema::const_eval and lowering::const_eval delegate to shared functions
+        - Type checker's eval_const_expr now delegates to SemaConstEval (resolved TODO)
+        - Eliminated ~167 lines of duplicated code across 3 modules
+        - Removed unused SemaResult.warnings Vec, dead driver parse error check,
+          duplicated implicit declaration warning in lowerer
+        - Zero regressions across all three backends (x86, ARM, RISC-V)
 Step 6: Add actual type error diagnostics in sema
 Step 7: Simplify lowering to assume types are correct
 

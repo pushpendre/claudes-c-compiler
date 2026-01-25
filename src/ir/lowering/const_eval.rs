@@ -7,7 +7,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{CType, IrType, StructLayout};
-use crate::common::const_arith::{wrap_result, unsigned_op, bool_to_i64};
+use crate::common::const_arith;
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -55,25 +55,10 @@ impl Lowerer {
                 Some(IrConst::LongDouble(*val))
             }
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
-                // Unary plus: identity, just evaluate the inner expression
                 self.eval_const_expr(inner)
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                if let Some(val) = self.eval_const_expr(inner) {
-                    match val {
-                        IrConst::I64(v) => Some(IrConst::I64(-v)),
-                        IrConst::I32(v) => Some(IrConst::I32(-v)),
-                        // Integer promotion: sub-int types promote to int before negation
-                        IrConst::I8(v) => Some(IrConst::I32(-(v as i32))),
-                        IrConst::I16(v) => Some(IrConst::I32(-(v as i32))),
-                        IrConst::F64(v) => Some(IrConst::F64(-v)),
-                        IrConst::F32(v) => Some(IrConst::F32(-v)),
-                        IrConst::LongDouble(v) => Some(IrConst::LongDouble(-v)),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
+                const_arith::negate_const(self.eval_const_expr(inner)?)
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
@@ -84,18 +69,7 @@ impl Lowerer {
                 self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                if let Some(val) = self.eval_const_expr(inner) {
-                    match val {
-                        IrConst::I64(v) => Some(IrConst::I64(!v)),
-                        IrConst::I32(v) => Some(IrConst::I32(!v)),
-                        // Integer promotion: sub-int types promote to int before complement
-                        IrConst::I8(v) => Some(IrConst::I32(!(v as i32))),
-                        IrConst::I16(v) => Some(IrConst::I32(!(v as i32))),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
+                const_arith::bitnot_const(self.eval_const_expr(inner)?)
             }
             Expr::Cast(ref target_type, inner, _) => {
                 let target_ir_ty = self.type_spec_to_ir(target_type);
@@ -267,12 +241,7 @@ impl Lowerer {
 
     /// Check if an expression evaluates to 0 (integer literal 0 or cast of 0).
     fn is_zero_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::IntLiteral(0, _) | Expr::UIntLiteral(0, _)
-            | Expr::LongLiteral(0, _) | Expr::ULongLiteral(0, _) => true,
-            Expr::Cast(_, inner, _) => self.is_zero_expr(inner),
-            _ => false,
-        }
+        const_arith::is_zero_expr(expr)
     }
 
     /// Evaluate a constant expression, returning raw u64 bits and signedness.
@@ -285,34 +254,10 @@ impl Lowerer {
                 let target_ir_ty = self.type_spec_to_ir(target_type);
                 let target_width = target_ir_ty.size() * 8;
                 let target_signed = matches!(target_ir_ty, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64);
-
-                // Truncate to target width
-                let truncated = if target_width >= 64 {
-                    bits
-                } else {
-                    bits & ((1u64 << target_width) - 1)
-                };
-
-                // If target is signed, sign-extend to 64 bits for the next operation
-                let result = if target_signed && target_width < 64 {
-                    // Sign-extend
-                    let sign_bit = 1u64 << (target_width - 1);
-                    if truncated & sign_bit != 0 {
-                        truncated | !((1u64 << target_width) - 1)
-                    } else {
-                        truncated
-                    }
-                } else {
-                    // Zero-extend (unsigned or already 64 bits)
-                    truncated
-                };
-
-                Some((result, target_signed))
+                Some(const_arith::truncate_and_extend_bits(bits, target_width, target_signed))
             }
             _ => {
-                // For non-cast expressions, evaluate normally and convert to bits
                 let val = self.eval_const_expr(expr)?;
-                // Sign-extend to i64, then interpret as u64 bit pattern
                 let bits = match &val {
                     IrConst::F32(v) => *v as i64 as u64,
                     IrConst::F64(v) => *v as i64 as u64,
@@ -554,17 +499,8 @@ impl Lowerer {
 
     /// Evaluate a constant binary operation.
     /// Uses both operand types for C's usual arithmetic conversions (C11 6.3.1.8).
+    /// Delegates arithmetic to the shared implementation in `common::const_arith`.
     fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ty: IrType, rhs_ty: IrType) -> Option<IrConst> {
-        // Check if either operand is floating-point
-        let lhs_is_float = matches!(lhs, IrConst::F32(_) | IrConst::F64(_));
-        let rhs_is_float = matches!(rhs, IrConst::F32(_) | IrConst::F64(_));
-
-        if lhs_is_float || rhs_is_float {
-            return self.eval_const_binop_float(op, lhs, rhs);
-        }
-
-        let l = self.const_to_i64(lhs)?;
-        let r = self.const_to_i64(rhs)?;
         // Apply usual arithmetic conversions: use the wider of both operand types
         let lhs_size = lhs_ty.size().max(4);
         let rhs_size = rhs_ty.size().max(4);
@@ -577,108 +513,7 @@ impl Lowerer {
         } else {
             rhs_ty.is_unsigned()
         };
-        let result = match op {
-            BinOp::Add => wrap_result(l.wrapping_add(r), is_32bit),
-            BinOp::Sub => wrap_result(l.wrapping_sub(r), is_32bit),
-            BinOp::Mul => wrap_result(l.wrapping_mul(r), is_32bit),
-            BinOp::Div => {
-                if r == 0 { return None; }
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, u64::wrapping_div)
-                } else {
-                    wrap_result(l.wrapping_div(r), is_32bit)
-                }
-            }
-            BinOp::Mod => {
-                if r == 0 { return None; }
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, u64::wrapping_rem)
-                } else {
-                    wrap_result(l.wrapping_rem(r), is_32bit)
-                }
-            }
-            BinOp::BitAnd => l & r,
-            BinOp::BitOr => l | r,
-            BinOp::BitXor => l ^ r,
-            BinOp::Shl => wrap_result(l.wrapping_shl(r as u32), is_32bit),
-            BinOp::Shr => {
-                if is_unsigned {
-                    unsigned_op(l, r, is_32bit, |a, b| a.wrapping_shr(b as u32))
-                } else {
-                    if is_32bit {
-                        (l as i32).wrapping_shr(r as u32) as i64
-                    } else {
-                        l.wrapping_shr(r as u32)
-                    }
-                }
-            }
-            BinOp::Eq => bool_to_i64(l == r),
-            BinOp::Ne => bool_to_i64(l != r),
-            BinOp::Lt => {
-                if is_unsigned { bool_to_i64((l as u64) < (r as u64)) }
-                else { bool_to_i64(l < r) }
-            },
-            BinOp::Gt => {
-                if is_unsigned { bool_to_i64((l as u64) > (r as u64)) }
-                else { bool_to_i64(l > r) }
-            },
-            BinOp::Le => {
-                if is_unsigned { bool_to_i64((l as u64) <= (r as u64)) }
-                else { bool_to_i64(l <= r) }
-            },
-            BinOp::Ge => {
-                if is_unsigned { bool_to_i64((l as u64) >= (r as u64)) }
-                else { bool_to_i64(l >= r) }
-            },
-            BinOp::LogicalAnd => bool_to_i64(l != 0 && r != 0),
-            BinOp::LogicalOr => bool_to_i64(l != 0 || r != 0),
-        };
-        Some(IrConst::I64(result))
-    }
-
-    /// Evaluate a binary operation on floating-point constant operands.
-    /// Promotes both operands to the wider float type (f64 if either is f64).
-    fn eval_const_binop_float(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
-        // Determine if result should be f32 (both are f32) or f64 (either is f64 or int)
-        let use_f64 = matches!(lhs, IrConst::F64(_)) || matches!(rhs, IrConst::F64(_))
-            || (!matches!(lhs, IrConst::F32(_)) && !matches!(rhs, IrConst::F32(_)));
-
-        // Convert both operands to f64 for computation
-        let l = lhs.to_f64()?;
-        let r = rhs.to_f64()?;
-
-        match op {
-            // Arithmetic operations return float
-            BinOp::Add => {
-                let v = l + r;
-                Some(if use_f64 { IrConst::F64(v) } else { IrConst::F32(v as f32) })
-            }
-            BinOp::Sub => {
-                let v = l - r;
-                Some(if use_f64 { IrConst::F64(v) } else { IrConst::F32(v as f32) })
-            }
-            BinOp::Mul => {
-                let v = l * r;
-                Some(if use_f64 { IrConst::F64(v) } else { IrConst::F32(v as f32) })
-            }
-            BinOp::Div => {
-                // IEEE 754: division by zero produces infinity or NaN, which is valid
-                let v = l / r;
-                Some(if use_f64 { IrConst::F64(v) } else { IrConst::F32(v as f32) })
-            }
-            // Comparison operations return int
-            BinOp::Eq => Some(IrConst::I64(if l == r { 1 } else { 0 })),
-            BinOp::Ne => Some(IrConst::I64(if l != r { 1 } else { 0 })),
-            BinOp::Lt => Some(IrConst::I64(if l < r { 1 } else { 0 })),
-            BinOp::Gt => Some(IrConst::I64(if l > r { 1 } else { 0 })),
-            BinOp::Le => Some(IrConst::I64(if l <= r { 1 } else { 0 })),
-            BinOp::Ge => Some(IrConst::I64(if l >= r { 1 } else { 0 })),
-            // Logical operations
-            BinOp::LogicalAnd => Some(IrConst::I64(if l != 0.0 && r != 0.0 { 1 } else { 0 })),
-            BinOp::LogicalOr => Some(IrConst::I64(if l != 0.0 || r != 0.0 { 1 } else { 0 })),
-            // Bitwise/shift operations are not valid on floats
-            _ => None,
-        }
+        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned)
     }
 
     /// Compute the effective array size from an initializer list with potential designators.

@@ -58,8 +58,6 @@ pub struct SemaResult {
     /// Type context populated by sema: typedefs, enum constants, struct layouts,
     /// function typedefs, function pointer typedefs.
     pub type_context: TypeContext,
-    /// Warnings collected during analysis (non-fatal).
-    pub warnings: Vec<String>,
     /// Expression type annotations: maps AST Expr node addresses to their
     /// inferred CTypes. Populated during sema's analyze_expr walk using
     /// ExprTypeChecker. The lowerer consults this as a fallback in
@@ -78,7 +76,6 @@ impl Default for SemaResult {
         Self {
             functions: FxHashMap::default(),
             type_context: TypeContext::new(),
-            warnings: Vec::new(),
             expr_types: ExprTypeMap::default(),
             const_values: ConstMap::default(),
         }
@@ -484,10 +481,7 @@ impl SemanticAnalyzer {
                     && name != "__func__" && name != "__FUNCTION__"
                     && name != "__PRETTY_FUNCTION__"
                 {
-                    // Emit warning for undeclared identifier
-                    let warning = format!("'{}' undeclared", name);
-                    eprintln!("warning: {}", warning);
-                    self.result.warnings.push(warning);
+                    eprintln!("warning: '{}' undeclared", name);
                 }
             }
             Expr::FunctionCall(callee, args, _) => {
@@ -499,13 +493,7 @@ impl SemanticAnalyzer {
                         && self.symbol_table.lookup(name).is_none()
                     {
                         // Implicit function declaration (C89 style) - register it
-                        // Emit warning matching GCC's -Wimplicit-function-declaration format
-                        let warning = format!(
-                            "implicit declaration of function '{}'",
-                            name
-                        );
-                        eprintln!("warning: {}", warning);
-                        self.result.warnings.push(warning);
+                        eprintln!("warning: implicit declaration of function '{}'", name);
                         let func_info = FunctionInfo {
                             name: name.clone(),
                             return_type: CType::Int, // implicit return int
