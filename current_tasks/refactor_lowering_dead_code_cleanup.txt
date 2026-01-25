@@ -1,0 +1,19 @@
+Task: Refactor lowering code and remove dead code
+
+Major cleanup of the ir/lowering module and related code:
+
+1. Extract duplicated anonymous member init resolution into a shared helper
+   (currently copy-pasted 5 times across stmt.rs, global_init_bytes.rs, global_init_compound.rs)
+
+2. Extract duplicated struct field designator resolution into shared code
+
+3. Remove dead code:
+   - emit_bool_normalize (legacy, replaced by emit_bool_normalize_typed)
+   - peel_ptr_from_return_type (trivial passthrough wrapper)
+   - Duplicate lower_string_literal / lower_wide_string_literal
+
+4. Consolidate similar small helper functions
+
+5. Reduce deeply nested code in emit_struct_init (9+ levels)
+
+6. Add/update README.md documentation in subdirectories
