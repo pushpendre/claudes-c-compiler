@@ -82,7 +82,7 @@ See `git log` for full history. Key milestones:
 | libsodium | PASS | All 7 tests pass |
 | redis | PASS | All 3 tests pass (version, cli, SET/GET roundtrip) |
 | liburing | PARTIAL | Builds successfully; tests require io_uring kernel support |
-| mquickjs | PARTIAL | Builds; 3/5 tests pass (closure/language/loop); regex crash in test_builtin |
+| mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | postgres | PARTIAL | Build succeeds; `make check` initdb fails during regression |
 
 ### What's Not Yet Implemented

@@ -1,0 +1,24 @@
+Fix preprocessor recursive self-inclusion blocking
+
+Problem: The preprocessor completely blocks re-inclusion of files that are
+already on the include stack (includes.rs lines 50-54). This prevents valid
+C patterns like TCC's x86_64-gen.c which includes itself recursively via
+tcc.h with TARGET_DEFS_ONLY defined.
+
+The current code:
+  if self.include_stack.contains(&resolved_path) {
+      return Some(String::new());  // blocks completely
+  }
+
+This is wrong. The C standard allows re-including files that don't have
+#pragma once. Only #pragma once should prevent re-inclusion. For recursion
+protection, we should use a depth limit (like GCC's 200-level default).
+
+Fix: Replace the absolute block with a depth-counted limit. Count how many
+times the file appears on the include stack and only block if count exceeds
+a limit (e.g., 200).
+
+Impact: Unblocks TCC build (x86_64-gen.c self-includes via tcc.h).
+May also fix other projects that use similar patterns.
+
+Status: in progress

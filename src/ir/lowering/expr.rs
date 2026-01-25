@@ -269,14 +269,21 @@ impl Lowerer {
         if lhs_is_ptr && !rhs_is_ptr {
             let elem_size = self.get_pointer_elem_size_from_expr(lhs);
             let lhs_val = self.lower_expr(lhs);
+            let rhs_ty = self.get_expr_type(rhs);
             let rhs_val = self.lower_expr(rhs);
+            // Widen the integer index to I64 (sign-extend for signed types,
+            // zero-extend for unsigned) before scaling and adding to the pointer.
+            let rhs_val = self.emit_implicit_cast(rhs_val, rhs_ty, IrType::I64);
             let scaled_rhs = self.scale_index(rhs_val, elem_size);
             let ir_op = if *op == BinOp::Add { IrBinOp::Add } else { IrBinOp::Sub };
             let dest = self.emit_binop_val(ir_op, lhs_val, scaled_rhs, IrType::I64);
             Some(Operand::Value(dest))
         } else if rhs_is_ptr && !lhs_is_ptr && *op == BinOp::Add {
             let elem_size = self.get_pointer_elem_size_from_expr(rhs);
+            let lhs_ty = self.get_expr_type(lhs);
             let lhs_val = self.lower_expr(lhs);
+            // Widen the integer index to I64 before scaling and adding to the pointer.
+            let lhs_val = self.emit_implicit_cast(lhs_val, lhs_ty, IrType::I64);
             let rhs_val = self.lower_expr(rhs);
             let scaled_lhs = self.scale_index(lhs_val, elem_size);
             let dest = self.emit_binop_val(IrBinOp::Add, scaled_lhs, rhs_val, IrType::I64);
