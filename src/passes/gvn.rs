@@ -8,7 +8,7 @@
 //! value numbering requires dominator tree analysis.
 //! TODO: Extend to full dominator-based GVN.
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 
 /// A value number expression key. Two instructions with the same ExprKey
@@ -47,9 +47,9 @@ fn run_lvn_function(func: &mut IrFunction) -> usize {
 /// the first computation of that expression.
 fn run_lvn_block(block: &mut BasicBlock) -> usize {
     // Maps expression keys to the Value that first computed them
-    let mut expr_to_value: HashMap<ExprKey, Value> = HashMap::new();
+    let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
     // Maps Value IDs to their value numbers (for canonicalization)
-    let mut value_numbers: HashMap<u32, u32> = HashMap::new();
+    let mut value_numbers: FxHashMap<u32, u32> = FxHashMap::default();
     let mut next_vn: u32 = 0;
 
     let mut eliminated = 0;
@@ -96,7 +96,7 @@ fn run_lvn_block(block: &mut BasicBlock) -> usize {
 /// Try to create an ExprKey for an instruction (for value numbering).
 /// Returns the expression key and the destination value, or None if
 /// the instruction is not eligible for value numbering.
-fn make_expr_key(inst: &Instruction, value_numbers: &HashMap<u32, u32>) -> Option<(ExprKey, Value)> {
+fn make_expr_key(inst: &Instruction, value_numbers: &FxHashMap<u32, u32>) -> Option<(ExprKey, Value)> {
     match inst {
         Instruction::BinOp { dest, op, lhs, rhs, .. } => {
             let lhs_vn = operand_to_vn(lhs, value_numbers);
@@ -126,7 +126,7 @@ fn make_expr_key(inst: &Instruction, value_numbers: &HashMap<u32, u32>) -> Optio
 }
 
 /// Convert an Operand to a VNOperand for hashing.
-fn operand_to_vn(op: &Operand, value_numbers: &HashMap<u32, u32>) -> VNOperand {
+fn operand_to_vn(op: &Operand, value_numbers: &FxHashMap<u32, u32>) -> VNOperand {
     match op {
         Operand::Const(c) => VNOperand::Const(c.to_hash_key()),
         Operand::Value(v) => {

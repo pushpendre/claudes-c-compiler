@@ -11,8 +11,7 @@
 //! Data structure definitions are in `definitions.rs`, per-function state in
 //! `func_state.rs`, and type-system state in `type_context.rs`.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
@@ -34,19 +33,19 @@ pub struct Lowerer {
     /// Per-function build state. None between functions, Some during lowering.
     pub(super) func_state: Option<FunctionBuildState>,
     // Global variable tracking
-    pub(super) globals: HashMap<String, GlobalInfo>,
+    pub(super) globals: FxHashMap<String, GlobalInfo>,
     // Set of known function names
-    pub(super) known_functions: HashSet<String>,
+    pub(super) known_functions: FxHashSet<String>,
     // Set of already-defined function bodies
-    pub(super) defined_functions: HashSet<String>,
+    pub(super) defined_functions: FxHashSet<String>,
     // Set of function names declared with static linkage
-    pub(super) static_functions: HashSet<String>,
+    pub(super) static_functions: FxHashSet<String>,
     /// Type-system state (struct layouts, typedefs, enum constants, type caches)
     pub(super) types: TypeContext,
     /// Metadata about known functions (consolidated FuncSig)
     pub(super) func_meta: FunctionMeta,
     /// Set of emitted global variable names (O(1) dedup)
-    pub(super) emitted_global_names: HashSet<String>,
+    pub(super) emitted_global_names: FxHashSet<String>,
 }
 
 impl Lowerer {
@@ -62,13 +61,13 @@ impl Lowerer {
             next_static_local: 0,
             module: IrModule::new(),
             func_state: None,
-            globals: HashMap::new(),
-            known_functions: HashSet::new(),
-            defined_functions: HashSet::new(),
-            static_functions: HashSet::new(),
+            globals: FxHashMap::default(),
+            known_functions: FxHashSet::default(),
+            defined_functions: FxHashSet::default(),
+            static_functions: FxHashSet::default(),
             types: type_context,
             func_meta: FunctionMeta::default(),
-            emitted_global_names: HashSet::new(),
+            emitted_global_names: FxHashSet::default(),
         }
     }
 

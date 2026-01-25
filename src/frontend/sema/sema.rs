@@ -19,7 +19,7 @@ use crate::frontend::sema::builtins;
 use crate::ir::lowering::{TypeContext, FunctionTypedefInfo};
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 
 /// Information about a function collected during semantic analysis.
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ pub struct FunctionInfo {
 #[derive(Debug)]
 pub struct SemaResult {
     /// Function signatures discovered during analysis.
-    pub functions: HashMap<String, FunctionInfo>,
+    pub functions: FxHashMap<String, FunctionInfo>,
     /// Type context populated by sema: typedefs, enum constants, struct layouts,
     /// function typedefs, function pointer typedefs.
     pub type_context: TypeContext,
@@ -46,7 +46,7 @@ pub struct SemaResult {
 impl Default for SemaResult {
     fn default() -> Self {
         Self {
-            functions: HashMap::new(),
+            functions: FxHashMap::default(),
             type_context: TypeContext::new(),
             warnings: Vec::new(),
         }

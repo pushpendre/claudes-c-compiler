@@ -9,7 +9,7 @@
 //! cloning entire HashMaps at scope boundaries. On scope exit, only the changes
 //! made within that scope are undone, giving O(changes) cost instead of O(total).
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
 use super::definitions::{LocalInfo, SwitchFrame};
@@ -80,7 +80,7 @@ pub(super) struct FunctionBuildState {
     /// sret pointer alloca for current function (struct returns > 16 bytes)
     pub sret_ptr: Option<Value>,
     /// Variable -> alloca mapping with metadata
-    pub locals: HashMap<String, LocalInfo>,
+    pub locals: FxHashMap<String, LocalInfo>,
     /// Loop context: labels to jump to on `break`
     pub break_labels: Vec<BlockId>,
     /// Loop context: labels to jump to on `continue`
@@ -88,18 +88,18 @@ pub(super) struct FunctionBuildState {
     /// Stack of switch statement contexts
     pub switch_stack: Vec<SwitchFrame>,
     /// User-defined goto labels -> unique IR labels
-    pub user_labels: HashMap<String, BlockId>,
+    pub user_labels: FxHashMap<String, BlockId>,
     /// Scope stack for function-local variable undo tracking
     pub scope_stack: Vec<FuncScopeFrame>,
     /// Static local variable name -> mangled global name
-    pub static_local_names: HashMap<String, String>,
+    pub static_local_names: FxHashMap<String, String>,
     /// Const-qualified local variable values
-    pub const_local_values: HashMap<String, i64>,
+    pub const_local_values: FxHashMap<String, i64>,
     /// CType for each local variable
-    pub var_ctypes: HashMap<String, CType>,
+    pub var_ctypes: FxHashMap<String, CType>,
     /// Runtime sizeof Values for VLA typedef types (e.g., `typedef char buf[n][m]`).
     /// Keyed by typedef name, value is the IR Value holding the runtime byte size.
-    pub vla_typedef_sizes: HashMap<String, Value>,
+    pub vla_typedef_sizes: FxHashMap<String, Value>,
     /// Per-function value counter (reset for each function)
     pub next_value: u32,
 }
@@ -115,16 +115,16 @@ impl FunctionBuildState {
             return_type,
             return_is_bool,
             sret_ptr: None,
-            locals: HashMap::new(),
+            locals: FxHashMap::default(),
             break_labels: Vec::new(),
             continue_labels: Vec::new(),
             switch_stack: Vec::new(),
-            user_labels: HashMap::new(),
+            user_labels: FxHashMap::default(),
             scope_stack: Vec::new(),
-            static_local_names: HashMap::new(),
-            const_local_values: HashMap::new(),
-            var_ctypes: HashMap::new(),
-            vla_typedef_sizes: HashMap::new(),
+            static_local_names: FxHashMap::default(),
+            const_local_values: FxHashMap::default(),
+            var_ctypes: FxHashMap::default(),
+            vla_typedef_sizes: FxHashMap::default(),
             next_value: 0,
         }
     }

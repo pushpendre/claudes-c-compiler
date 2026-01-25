@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 
 /// Trait for looking up struct/union layout information.
 /// TypeContext implements this trait, allowing CType methods in common/
@@ -9,7 +9,7 @@ pub trait StructLayoutProvider {
 }
 
 /// A HashMap-based provider for struct layouts (used by TypeContext and sema).
-impl StructLayoutProvider for HashMap<String, StructLayout> {
+impl StructLayoutProvider for FxHashMap<String, StructLayout> {
     fn get_struct_layout(&self, key: &str) -> Option<&StructLayout> {
         self.get(key)
     }
@@ -614,7 +614,7 @@ impl CType {
             CType::Struct(_) | CType::Union(_) => 0,
             _ => {
                 // For non-struct/union types, we can use an empty provider
-                let empty: HashMap<String, StructLayout> = HashMap::new();
+                let empty: FxHashMap<String, StructLayout> = FxHashMap::default();
                 self.size_ctx(&empty)
             }
         }
@@ -626,7 +626,7 @@ impl CType {
         match self {
             CType::Struct(_) | CType::Union(_) => 1,
             _ => {
-                let empty: HashMap<String, StructLayout> = HashMap::new();
+                let empty: FxHashMap<String, StructLayout> = FxHashMap::default();
                 self.align_ctx(&empty)
             }
         }

@@ -5,7 +5,7 @@
 //! captures the 3-way addressing pattern (over-aligned alloca / direct alloca / indirect)
 //! that repeats across store, load, GEP, and memcpy emission.
 
-use std::collections::{HashMap, HashSet};
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::IrType;
 use super::common::AsmOutput;
 
@@ -20,22 +20,22 @@ pub struct StackSlot(pub i64);
 pub struct CodegenState {
     pub out: AsmOutput,
     pub stack_offset: i64,
-    pub value_locations: HashMap<u32, StackSlot>,
+    pub value_locations: FxHashMap<u32, StackSlot>,
     /// Values that are allocas (their stack slot IS the data, not a pointer to data).
-    pub alloca_values: HashSet<u32>,
+    pub alloca_values: FxHashSet<u32>,
     /// Type associated with each alloca (for type-aware loads/stores).
-    pub alloca_types: HashMap<u32, IrType>,
+    pub alloca_types: FxHashMap<u32, IrType>,
     /// Alloca values that need runtime alignment > 16 bytes.
-    pub alloca_alignments: HashMap<u32, usize>,
+    pub alloca_alignments: FxHashMap<u32, usize>,
     /// Values that are 128-bit integers (need 16-byte copy).
-    pub i128_values: HashSet<u32>,
+    pub i128_values: FxHashSet<u32>,
     /// Counter for generating unique labels (e.g., memcpy loops).
     label_counter: u32,
     /// Whether position-independent code (PIC) generation is enabled.
     pub pic_mode: bool,
     /// Set of symbol names that are locally defined (not extern) and have internal
     /// linkage (static) — these can use direct addressing even in PIC mode.
-    pub local_symbols: HashSet<String>,
+    pub local_symbols: FxHashSet<String>,
     /// Whether the current function contains DynAlloca instructions.
     /// When true, the epilogue must restore SP from the frame pointer instead of
     /// adding back the compile-time frame size.
@@ -47,14 +47,14 @@ impl CodegenState {
         Self {
             out: AsmOutput::new(),
             stack_offset: 0,
-            value_locations: HashMap::new(),
-            alloca_values: HashSet::new(),
-            alloca_types: HashMap::new(),
-            alloca_alignments: HashMap::new(),
-            i128_values: HashSet::new(),
+            value_locations: FxHashMap::default(),
+            alloca_values: FxHashSet::default(),
+            alloca_types: FxHashMap::default(),
+            alloca_alignments: FxHashMap::default(),
+            i128_values: FxHashSet::default(),
             label_counter: 0,
             pic_mode: false,
-            local_symbols: HashSet::new(),
+            local_symbols: FxHashSet::default(),
             has_dyn_alloca: false,
         }
     }

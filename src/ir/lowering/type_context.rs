@@ -8,7 +8,7 @@
 //! entire HashMaps at scope boundaries. This gives O(changes-in-scope) cost for
 //! scope push/pop instead of O(total-map-size).
 
-use std::collections::{HashMap, HashSet};
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::{StructLayout, CType};
 use super::definitions::FunctionTypedefInfo;
 
@@ -55,23 +55,23 @@ impl TypeScopeFrame {
 #[derive(Debug)]
 pub struct TypeContext {
     /// Struct/union layouts indexed by tag name
-    pub struct_layouts: HashMap<String, StructLayout>,
+    pub struct_layouts: FxHashMap<String, StructLayout>,
     /// Enum constant values
-    pub enum_constants: HashMap<String, i64>,
+    pub enum_constants: FxHashMap<String, i64>,
     /// Typedef mappings (name -> resolved CType)
-    pub typedefs: HashMap<String, CType>,
+    pub typedefs: FxHashMap<String, CType>,
     /// Function typedef info (bare function typedefs like `typedef int func_t(int)`)
-    pub function_typedefs: HashMap<String, FunctionTypedefInfo>,
+    pub function_typedefs: FxHashMap<String, FunctionTypedefInfo>,
     /// Set of typedef names that are function pointer types
     /// (e.g., `typedef void *(*lua_Alloc)(void *, ...)`)
-    pub func_ptr_typedefs: HashSet<String>,
+    pub func_ptr_typedefs: FxHashSet<String>,
     /// Function pointer typedef info (return type, params, variadic)
-    pub func_ptr_typedef_info: HashMap<String, FunctionTypedefInfo>,
+    pub func_ptr_typedef_info: FxHashMap<String, FunctionTypedefInfo>,
     /// Return CType for known functions
-    pub func_return_ctypes: HashMap<String, CType>,
+    pub func_return_ctypes: FxHashMap<String, CType>,
     /// Cache for CType of named struct/union types.
     /// Uses RefCell because type_spec_to_ctype takes &self.
-    pub ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
+    pub ctype_cache: std::cell::RefCell<FxHashMap<String, CType>>,
     /// Scope stack for type-system undo tracking (enum_constants, struct_layouts, ctype_cache)
     pub scope_stack: Vec<TypeScopeFrame>,
     /// Counter for anonymous struct/union CType keys generated from &self contexts.
@@ -88,14 +88,14 @@ impl crate::common::types::StructLayoutProvider for TypeContext {
 impl TypeContext {
     pub fn new() -> Self {
         Self {
-            struct_layouts: HashMap::new(),
-            enum_constants: HashMap::new(),
-            typedefs: HashMap::new(),
-            function_typedefs: HashMap::new(),
-            func_ptr_typedefs: HashSet::new(),
-            func_ptr_typedef_info: HashMap::new(),
-            func_return_ctypes: HashMap::new(),
-            ctype_cache: std::cell::RefCell::new(HashMap::new()),
+            struct_layouts: FxHashMap::default(),
+            enum_constants: FxHashMap::default(),
+            typedefs: FxHashMap::default(),
+            function_typedefs: FxHashMap::default(),
+            func_ptr_typedefs: FxHashSet::default(),
+            func_ptr_typedef_info: FxHashMap::default(),
+            func_return_ctypes: FxHashMap::default(),
+            ctype_cache: std::cell::RefCell::new(FxHashMap::default()),
             scope_stack: Vec::new(),
             anon_ctype_counter: std::cell::Cell::new(0),
         }
@@ -116,8 +116,8 @@ impl TypeContext {
         // SAFETY: We are single-threaded and no references into struct_layouts
         // are held across this call. The &self reference to TypeContext does not
         // create a mutable alias because we use a raw pointer for the mutation.
-        let ptr = &self.struct_layouts as *const HashMap<String, StructLayout>
-            as *mut HashMap<String, StructLayout>;
+        let ptr = &self.struct_layouts as *const FxHashMap<String, StructLayout>
+            as *mut FxHashMap<String, StructLayout>;
         unsafe { (*ptr).insert(key.to_string(), layout); }
     }
 

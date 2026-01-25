@@ -12,7 +12,7 @@
 //!
 //! After this pass runs, the dead Copy instructions are cleaned up by DCE.
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 
 /// Run copy propagation on the entire module.
@@ -45,9 +45,9 @@ fn propagate_copies(func: &mut IrFunction) -> usize {
 
 /// Build a map from Copy destinations to their ultimate sources.
 /// Follows chains: if %a = Copy %b and %b = Copy %c, resolves %a -> %c.
-fn build_copy_map(func: &IrFunction) -> HashMap<u32, Operand> {
+fn build_copy_map(func: &IrFunction) -> FxHashMap<u32, Operand> {
     // First pass: collect direct copy relationships
-    let mut direct_copies: HashMap<u32, Operand> = HashMap::new();
+    let mut direct_copies: FxHashMap<u32, Operand> = FxHashMap::default();
 
     for block in &func.blocks {
         for inst in &block.instructions {
@@ -62,7 +62,7 @@ fn build_copy_map(func: &IrFunction) -> HashMap<u32, Operand> {
     }
 
     // Second pass: resolve chains with cycle detection
-    let mut resolved: HashMap<u32, Operand> = HashMap::new();
+    let mut resolved: FxHashMap<u32, Operand> = FxHashMap::default();
 
     for &start_dest in direct_copies.keys() {
         let resolved_src = resolve_chain(start_dest, &direct_copies);
@@ -75,7 +75,7 @@ fn build_copy_map(func: &IrFunction) -> HashMap<u32, Operand> {
 /// Follow a chain of copies to find the ultimate source.
 /// Handles chains like: %a = Copy %b, %b = Copy %c => %a resolves to %c's source.
 /// Limits depth to prevent infinite loops from cycles.
-fn resolve_chain(start: u32, copies: &HashMap<u32, Operand>) -> Operand {
+fn resolve_chain(start: u32, copies: &FxHashMap<u32, Operand>) -> Operand {
     let mut current = start;
     let mut depth = 0;
     const MAX_DEPTH: usize = 64;
@@ -110,7 +110,7 @@ fn resolve_chain(start: u32, copies: &HashMap<u32, Operand>) -> Operand {
 
 /// Replace operands in an instruction that reference copied values.
 /// Returns the number of replacements made.
-fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &HashMap<u32, Operand>) -> usize {
+fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &FxHashMap<u32, Operand>) -> usize {
     let mut count = 0;
 
     match inst {
@@ -222,7 +222,7 @@ fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &HashMap<u3
 }
 
 /// Replace operands in a terminator.
-fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &HashMap<u32, Operand>) -> usize {
+fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &FxHashMap<u32, Operand>) -> usize {
     let mut count = 0;
     match term {
         Terminator::Return(Some(val)) => {
@@ -243,7 +243,7 @@ fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &HashMap<u32,
 
 /// Replace an Operand if it references a copied value.
 /// Returns 1 if a replacement was made, 0 otherwise.
-fn replace_operand(op: &mut Operand, copy_map: &HashMap<u32, Operand>) -> usize {
+fn replace_operand(op: &mut Operand, copy_map: &FxHashMap<u32, Operand>) -> usize {
     if let Operand::Value(v) = op {
         if let Some(replacement) = copy_map.get(&v.0) {
             *op = replacement.clone();
@@ -256,7 +256,7 @@ fn replace_operand(op: &mut Operand, copy_map: &HashMap<u32, Operand>) -> usize 
 /// Replace a Value in-place if it references a copied value.
 /// Only replaces if the resolved source is also a Value (not a Const).
 /// Returns 1 if a replacement was made, 0 otherwise.
-fn replace_value_in_place(val: &mut Value, copy_map: &HashMap<u32, Operand>) -> usize {
+fn replace_value_in_place(val: &mut Value, copy_map: &FxHashMap<u32, Operand>) -> usize {
     if let Some(replacement) = copy_map.get(&val.0) {
         if let Operand::Value(new_val) = replacement {
             *val = *new_val;
@@ -281,7 +281,7 @@ mod tests {
         // %2 = Add %0, const(1)
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Copy {
                     dest: Value(1),
@@ -318,7 +318,7 @@ mod tests {
         // Should resolve %2 -> %0
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Copy {
                     dest: Value(1),
@@ -358,7 +358,7 @@ mod tests {
         // Should propagate const(42) into the Add
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Copy {
                     dest: Value(0),
@@ -392,7 +392,7 @@ mod tests {
         // Should become return %0
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Copy {
                     dest: Value(1),
@@ -417,7 +417,7 @@ mod tests {
     fn test_no_propagation_when_no_copies() {
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::BinOp {
                     dest: Value(0),

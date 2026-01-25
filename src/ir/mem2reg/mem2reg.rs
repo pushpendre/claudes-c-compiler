@@ -9,7 +9,8 @@
 //!
 //! Reference: "A Simple, Fast Dominance Algorithm" by Cooper, Harvey, Kennedy (2001)
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
 use crate::ir::ir::*;
 use crate::common::types::IrType;
 
@@ -32,9 +33,9 @@ struct AllocaInfo {
     /// The IR type of the stored value.
     ty: IrType,
     /// Block indices where this alloca is stored to (defining blocks).
-    def_blocks: HashSet<usize>,
+    def_blocks: FxHashSet<usize>,
     /// Block indices where this alloca is loaded from (use blocks).
-    use_blocks: HashSet<usize>,
+    use_blocks: FxHashSet<usize>,
 }
 
 /// Promote allocas in a single function to SSA form.
@@ -110,12 +111,12 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
     }
 
     // Build set of candidate alloca values
-    let candidate_set: HashSet<u32> = entry_allocas.iter().map(|(v, _, _)| v.0).collect();
+    let candidate_set: FxHashSet<u32> = entry_allocas.iter().map(|(v, _, _)| v.0).collect();
 
     // Check all uses: only Load and Store targeting the alloca pointer are allowed
-    let mut disqualified: HashSet<u32> = HashSet::new();
-    let mut def_blocks: HashMap<u32, HashSet<usize>> = HashMap::new();
-    let mut use_blocks: HashMap<u32, HashSet<usize>> = HashMap::new();
+    let mut disqualified: FxHashSet<u32> = FxHashSet::default();
+    let mut def_blocks: FxHashMap<u32, FxHashSet<usize>> = FxHashMap::default();
+    let mut use_blocks: FxHashMap<u32, FxHashSet<usize>> = FxHashMap::default();
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         for inst in &block.instructions {
@@ -304,7 +305,7 @@ fn add_operand_values(op: &Operand, used: &mut Vec<u32>) {
 }
 
 /// Build a map from block label to block index.
-fn build_label_map(func: &IrFunction) -> HashMap<BlockId, usize> {
+fn build_label_map(func: &IrFunction) -> FxHashMap<BlockId, usize> {
     func.blocks
         .iter()
         .enumerate()
@@ -315,7 +316,7 @@ fn build_label_map(func: &IrFunction) -> HashMap<BlockId, usize> {
 /// Build predecessor and successor lists from the function's CFG.
 fn build_cfg(
     func: &IrFunction,
-    label_to_idx: &HashMap<BlockId, usize>,
+    label_to_idx: &FxHashMap<BlockId, usize>,
 ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let n = func.blocks.len();
     let mut preds = vec![Vec::new(); n];
@@ -467,8 +468,8 @@ fn compute_dominance_frontiers(
     num_blocks: usize,
     preds: &[Vec<usize>],
     idom: &[usize],
-) -> Vec<HashSet<usize>> {
-    let mut df = vec![HashSet::new(); num_blocks];
+) -> Vec<FxHashSet<usize>> {
+    let mut df = vec![FxHashSet::default(); num_blocks];
 
     for b in 0..num_blocks {
         if preds[b].len() < 2 {
@@ -493,17 +494,17 @@ fn compute_dominance_frontiers(
 /// Returns a map: block_index -> set of alloca indices that need phis there.
 fn insert_phis(
     alloca_infos: &[AllocaInfo],
-    df: &[HashSet<usize>],
+    df: &[FxHashSet<usize>],
     num_blocks: usize,
-) -> Vec<HashSet<usize>> {
+) -> Vec<FxHashSet<usize>> {
     // phi_locations[block_idx] = set of alloca indices that need a phi at this block
-    let mut phi_locations = vec![HashSet::new(); num_blocks];
+    let mut phi_locations = vec![FxHashSet::default(); num_blocks];
 
     for (alloca_idx, info) in alloca_infos.iter().enumerate() {
         // Iterated dominance frontier algorithm
         let mut worklist: VecDeque<usize> = info.def_blocks.iter().copied().collect();
-        let mut has_phi: HashSet<usize> = HashSet::new();
-        let mut ever_in_worklist: HashSet<usize> = info.def_blocks.clone();
+        let mut has_phi: FxHashSet<usize> = FxHashSet::default();
+        let mut ever_in_worklist: FxHashSet<usize> = info.def_blocks.clone();
 
         while let Some(block) = worklist.pop_front() {
             for &df_block in &df[block] {
@@ -537,15 +538,15 @@ fn build_dom_tree_children(num_blocks: usize, idom: &[usize]) -> Vec<Vec<usize>>
 fn rename_variables(
     func: &mut IrFunction,
     alloca_infos: &[AllocaInfo],
-    phi_locations: &[HashSet<usize>],
+    phi_locations: &[FxHashSet<usize>],
     dom_children: &[Vec<usize>],
     preds: &[Vec<usize>],
-    label_to_idx: &HashMap<BlockId, usize>,
+    label_to_idx: &FxHashMap<BlockId, usize>,
 ) {
     let num_allocas = alloca_infos.len();
 
     // Map alloca value -> alloca index for quick lookup
-    let alloca_to_idx: HashMap<u32, usize> = alloca_infos
+    let alloca_to_idx: FxHashMap<u32, usize> = alloca_infos
         .iter()
         .enumerate()
         .map(|(i, info)| (info.alloca_value.0, i))
@@ -566,7 +567,7 @@ fn rename_variables(
     // We do this before renaming so the phi dests get fresh values during rename.
     // For now, insert placeholder phis with empty incoming lists.
     // phi_dests[block_idx][alloca_idx] = the Value for the phi's dest (if there is one)
-    let mut phi_dests: Vec<HashMap<usize, Value>> = vec![HashMap::new(); func.blocks.len()];
+    let mut phi_dests: Vec<FxHashMap<usize, Value>> = vec![FxHashMap::default(); func.blocks.len()];
 
     for (block_idx, alloca_set) in phi_locations.iter().enumerate() {
         let mut phi_instructions = Vec::new();
@@ -619,14 +620,14 @@ fn rename_variables(
 fn rename_block(
     block_idx: usize,
     func: &mut IrFunction,
-    alloca_to_idx: &HashMap<u32, usize>,
+    alloca_to_idx: &FxHashMap<u32, usize>,
     alloca_infos: &[AllocaInfo],
     def_stacks: &mut [Vec<Operand>],
     next_value: &mut u32,
-    phi_dests: &[HashMap<usize, Value>],
+    phi_dests: &[FxHashMap<usize, Value>],
     dom_children: &[Vec<usize>],
     preds: &[Vec<usize>],
-    label_to_idx: &HashMap<BlockId, usize>,
+    label_to_idx: &FxHashMap<BlockId, usize>,
 ) {
     // Record stack depths so we can pop on exit
     let stack_depths: Vec<usize> = def_stacks.iter().map(|s| s.len()).collect();
@@ -747,14 +748,14 @@ fn get_successor_labels(term: &Terminator) -> Vec<BlockId> {
 }
 
 /// Remove promoted alloca, load, and store instructions.
-fn remove_promoted_instructions(func: &mut IrFunction, alloca_to_idx: &HashMap<u32, usize>) {
+fn remove_promoted_instructions(func: &mut IrFunction, alloca_to_idx: &FxHashMap<u32, usize>) {
     // Count the total number of allocas that are parameters (by position in entry block).
     // The first N allocas (where N = number of params) are parameter allocas.
     // We must NOT remove those because the backend's find_param_alloca uses positional indexing.
     let num_params = func.params.len();
 
     // Identify which promoted allocas are parameter allocas by their position
-    let mut param_alloca_values: HashSet<u32> = HashSet::new();
+    let mut param_alloca_values: FxHashSet<u32> = FxHashSet::default();
     let mut alloca_count = 0;
     for inst in &func.blocks[0].instructions {
         if let Instruction::Alloca { dest, .. } = inst {

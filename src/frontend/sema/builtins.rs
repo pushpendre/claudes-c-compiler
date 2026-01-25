@@ -3,12 +3,12 @@
 //! Many C programs use GCC builtins (e.g., __builtin_abort, __builtin_memcpy).
 //! We map these to their standard library equivalents so the linker can resolve them.
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use std::sync::LazyLock;
 
 /// Static mapping of __builtin_* names to their libc equivalents.
-static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new(|| {
-    let mut m = HashMap::new();
+static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::new(|| {
+    let mut m = FxHashMap::default();
 
     // Abort/exit
     m.insert("__builtin_abort", BuiltinInfo::simple("abort"));

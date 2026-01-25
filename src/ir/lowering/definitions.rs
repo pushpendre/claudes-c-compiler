@@ -5,7 +5,7 @@
 //! (DeclAnalysis), lvalue representation, switch context, function signature
 //! metadata, and typedef helpers.
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType};
@@ -244,9 +244,9 @@ pub(super) struct FuncSig {
 #[derive(Debug, Default)]
 pub(super) struct FunctionMeta {
     /// Function name -> consolidated signature.
-    pub sigs: HashMap<String, FuncSig>,
+    pub sigs: FxHashMap<String, FuncSig>,
     /// Function pointer variable name -> signature (return type + param types).
-    pub ptr_sigs: HashMap<String, FuncSig>,
+    pub ptr_sigs: FxHashMap<String, FuncSig>,
 }
 
 /// Tracks how each original C parameter maps to IR parameters after ABI decomposition.

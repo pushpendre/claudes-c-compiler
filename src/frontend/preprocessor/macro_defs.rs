@@ -7,7 +7,7 @@
 /// - Stringification: `#param`
 /// - Token pasting: `a ## b`
 
-use std::collections::{HashMap, HashSet};
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 
 use super::utils::{is_ident_start, is_ident_cont, copy_literal, skip_literal};
 
@@ -31,13 +31,13 @@ pub struct MacroDef {
 /// Stores all macro definitions and handles expansion.
 #[derive(Debug, Clone)]
 pub struct MacroTable {
-    macros: HashMap<String, MacroDef>,
+    macros: FxHashMap<String, MacroDef>,
 }
 
 impl MacroTable {
     pub fn new() -> Self {
         Self {
-            macros: HashMap::new(),
+            macros: FxHashMap::default(),
         }
     }
 
@@ -64,13 +64,13 @@ impl MacroTable {
     /// Expand macros in a line of text.
     /// Returns the expanded text.
     pub fn expand_line(&self, line: &str) -> String {
-        let mut expanding = HashSet::new();
+        let mut expanding = FxHashSet::default();
         self.expand_text(line, &mut expanding)
     }
 
     /// Recursively expand macros in text, tracking which macros are
     /// currently being expanded to prevent infinite recursion.
-    fn expand_text(&self, text: &str, expanding: &mut HashSet<String>) -> String {
+    fn expand_text(&self, text: &str, expanding: &mut FxHashSet<String>) -> String {
         let mut result = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
@@ -400,7 +400,7 @@ impl MacroTable {
         &self,
         mac: &MacroDef,
         args: &[String],
-        expanding: &mut HashSet<String>,
+        expanding: &mut FxHashSet<String>,
     ) -> String {
         // Step 1: Determine which parameters are used with # or ## (these get raw args)
         let paste_params = self.find_paste_and_stringify_params(&mac.body, &mac.params, mac.is_variadic);
@@ -436,8 +436,8 @@ impl MacroTable {
 
     /// Find parameter indices that are used with # (stringify) or ## (token paste).
     /// These parameters should receive raw (unexpanded) arguments.
-    fn find_paste_and_stringify_params(&self, body: &str, params: &[String], is_variadic: bool) -> HashSet<usize> {
-        let mut result = HashSet::new();
+    fn find_paste_and_stringify_params(&self, body: &str, params: &[String], is_variadic: bool) -> FxHashSet<usize> {
+        let mut result = FxHashSet::default();
         let chars: Vec<char> = body.chars().collect();
         let len = chars.len();
         let mut i = 0;

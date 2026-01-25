@@ -7,7 +7,7 @@
 //! performance win for translation units that include many header-defined static
 //! or inline functions.
 
-use std::collections::HashSet;
+use crate::common::fx_hash::FxHashSet;
 use crate::frontend::parser::ast::*;
 use super::lowering::Lowerer;
 
@@ -15,8 +15,8 @@ impl Lowerer {
     /// Collect all function names referenced from non-static function bodies and
     /// global initializers. Static/inline functions from headers that are never
     /// referenced can be skipped during lowering for a significant performance win.
-    pub(super) fn collect_referenced_static_functions(&self, tu: &TranslationUnit) -> HashSet<String> {
-        let mut referenced = HashSet::new();
+    pub(super) fn collect_referenced_static_functions(&self, tu: &TranslationUnit) -> FxHashSet<String> {
+        let mut referenced = FxHashSet::default();
 
         for decl in &tu.decls {
             match decl {
@@ -45,7 +45,7 @@ impl Lowerer {
     }
 
     /// Collect function name references from a compound statement.
-    pub(super) fn collect_refs_from_compound(&self, compound: &CompoundStmt, refs: &mut HashSet<String>) {
+    pub(super) fn collect_refs_from_compound(&self, compound: &CompoundStmt, refs: &mut FxHashSet<String>) {
         for item in &compound.items {
             match item {
                 BlockItem::Declaration(decl) => {
@@ -63,7 +63,7 @@ impl Lowerer {
     }
 
     /// Collect function name references from a statement.
-    pub(super) fn collect_refs_from_stmt(&self, stmt: &Stmt, refs: &mut HashSet<String>) {
+    pub(super) fn collect_refs_from_stmt(&self, stmt: &Stmt, refs: &mut FxHashSet<String>) {
         match stmt {
             Stmt::Expr(Some(expr)) => {
                 self.collect_refs_from_expr(expr, refs);
@@ -130,7 +130,7 @@ impl Lowerer {
     }
 
     /// Collect function name references from an expression.
-    pub(super) fn collect_refs_from_expr(&self, expr: &Expr, refs: &mut HashSet<String>) {
+    pub(super) fn collect_refs_from_expr(&self, expr: &Expr, refs: &mut FxHashSet<String>) {
         match expr {
             Expr::Identifier(name, _) => {
                 if self.known_functions.contains(name) {
@@ -190,7 +190,7 @@ impl Lowerer {
     }
 
     /// Collect function name references from an initializer.
-    pub(super) fn collect_refs_from_initializer(&self, init: &Initializer, refs: &mut HashSet<String>) {
+    pub(super) fn collect_refs_from_initializer(&self, init: &Initializer, refs: &mut FxHashSet<String>) {
         match init {
             Initializer::Expr(e) => self.collect_refs_from_expr(e, refs),
             Initializer::List(items) => {

@@ -10,7 +10,7 @@
 /// - Macro expansion in non-directive lines
 /// - Predefined macros (__LINE__, __FILE__, __STDC__, etc.)
 
-use std::collections::{HashMap, HashSet};
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
 use super::macro_defs::{MacroDef, MacroTable, parse_define};
@@ -31,14 +31,14 @@ pub struct Preprocessor {
     /// Files currently being processed (for recursion detection)
     pub(super) include_stack: Vec<PathBuf>,
     /// Files that have been included with #pragma once
-    pub(super) pragma_once_files: HashSet<PathBuf>,
+    pub(super) pragma_once_files: FxHashSet<PathBuf>,
     /// Whether to actually resolve includes (can be disabled for testing)
     pub(super) resolve_includes: bool,
     /// Declarations to inject into the output (from #include processing).
     pub(super) pending_injections: Vec<String>,
     /// Stack for #pragma push_macro / pop_macro.
     /// Maps macro name -> stack of saved definitions (None = was undefined).
-    macro_save_stack: HashMap<String, Vec<Option<MacroDef>>>,
+    macro_save_stack: FxHashMap<String, Vec<Option<MacroDef>>>,
     /// Line offset set by #line directive: effective_line = line_offset + (source_line - line_offset_base)
     /// When None, no #line has been issued and __LINE__ uses the source line directly.
     line_override: Option<(usize, usize)>, // (target_line, source_line_at_directive)
@@ -55,10 +55,10 @@ impl Preprocessor {
             include_paths: Vec::new(),
             system_include_paths: Self::default_system_include_paths(),
             include_stack: Vec::new(),
-            pragma_once_files: HashSet::new(),
+            pragma_once_files: FxHashSet::default(),
             resolve_includes: true,
             pending_injections: Vec::new(),
-            macro_save_stack: HashMap::new(),
+            macro_save_stack: FxHashMap::default(),
             line_override: None,
         };
         pp.define_predefined_macros();

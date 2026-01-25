@@ -957,7 +957,7 @@ impl Lowerer {
     }
 
     /// Get the innermost element size for a CType::Array chain.
-    fn ctype_innermost_elem_size(ctype: &CType, layouts: &std::collections::HashMap<String, StructLayout>) -> usize {
+    fn ctype_innermost_elem_size(ctype: &CType, layouts: &crate::common::fx_hash::FxHashMap<String, StructLayout>) -> usize {
         let mut current = ctype;
         while let CType::Array(inner, _) = current {
             current = inner.as_ref();

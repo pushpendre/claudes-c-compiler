@@ -1,6 +1,6 @@
 use crate::common::source::Span;
 use crate::common::types::CType;
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 
 /// Storage class for a symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +25,12 @@ pub struct Symbol {
 /// A scope in the symbol table.
 #[derive(Debug)]
 struct Scope {
-    symbols: HashMap<String, Symbol>,
+    symbols: FxHashMap<String, Symbol>,
 }
 
 impl Scope {
     fn new() -> Self {
-        Self { symbols: HashMap::new() }
+        Self { symbols: FxHashMap::default() }
     }
 }
 

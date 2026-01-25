@@ -7,7 +7,7 @@
 //!
 //! Side-effecting instructions (stores, calls) are never removed.
 
-use std::collections::HashSet;
+use crate::common::fx_hash::FxHashSet;
 use crate::ir::ir::*;
 
 /// Run dead code elimination on the entire module.
@@ -55,8 +55,8 @@ fn eliminate_dead_code_once(func: &mut IrFunction) -> usize {
 }
 
 /// Collect all Value IDs that are used in the function.
-fn collect_used_values(func: &IrFunction) -> HashSet<u32> {
-    let mut used = HashSet::new();
+fn collect_used_values(func: &IrFunction) -> FxHashSet<u32> {
+    let mut used = FxHashSet::default();
 
     for block in &func.blocks {
         // Collect uses from instructions
@@ -72,7 +72,7 @@ fn collect_used_values(func: &IrFunction) -> HashSet<u32> {
 }
 
 /// Record all values used by an instruction.
-fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
+fn collect_instruction_uses(inst: &Instruction, used: &mut FxHashSet<u32>) {
     match inst {
         Instruction::Alloca { .. } => {}
         Instruction::DynAlloca { size, .. } => {
@@ -186,7 +186,7 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
 }
 
 /// Record all values used by a terminator.
-fn collect_terminator_uses(term: &Terminator, used: &mut HashSet<u32>) {
+fn collect_terminator_uses(term: &Terminator, used: &mut FxHashSet<u32>) {
     match term {
         Terminator::Return(Some(val)) => {
             collect_operand_uses(val, used);
@@ -204,7 +204,7 @@ fn collect_terminator_uses(term: &Terminator, used: &mut HashSet<u32>) {
 }
 
 /// Record value uses from an operand.
-fn collect_operand_uses(op: &Operand, used: &mut HashSet<u32>) {
+fn collect_operand_uses(op: &Operand, used: &mut FxHashSet<u32>) {
     if let Operand::Value(v) = op {
         used.insert(v.0);
     }

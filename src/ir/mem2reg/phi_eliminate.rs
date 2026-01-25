@@ -17,7 +17,7 @@
 //!     %phi2_dest = copy %tmp2
 //!     ... rest of block ...
 
-use std::collections::HashMap;
+use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 
 /// Eliminate all phi nodes in the module by lowering them to copies.
@@ -43,7 +43,7 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
     let mut next_value = max_value + 1;
 
     // Build label -> block index map
-    let label_to_idx: HashMap<BlockId, usize> = func.blocks
+    let label_to_idx: FxHashMap<BlockId, usize> = func.blocks
         .iter()
         .enumerate()
         .map(|(i, b)| (b.label, i))
@@ -76,7 +76,7 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
     // 2. At the start of the target block, copy each temporary to the phi dest
 
     // Collect copies to insert: pred_block_idx -> Vec<Copy instructions to insert before terminator>
-    let mut pred_copies: HashMap<usize, Vec<Instruction>> = HashMap::new();
+    let mut pred_copies: FxHashMap<usize, Vec<Instruction>> = FxHashMap::default();
     // Collect copies to insert at start of target blocks (after removing phis)
     let mut target_copies: Vec<Vec<Instruction>> = vec![Vec::new(); func.blocks.len()];
 
