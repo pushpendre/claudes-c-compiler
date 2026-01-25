@@ -45,7 +45,7 @@ impl Lowerer {
     /// Check if a TypeSpecifier resolves to a struct or union type (through typedefs).
     pub(super) fn is_type_struct_or_union(&self, ts: &TypeSpecifier) -> bool {
         matches!(ts, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..))
-            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Struct(_) | CType::Union(_)))
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| ct.is_struct_or_union())
     }
 
     /// Check if a TypeSpecifier is a transparent union (passed as first member for ABI).
@@ -339,17 +339,9 @@ impl Lowerer {
     /// Without these, calls like atanf(1) would pass integer args in %rdi instead of %xmm0.
     /// Helper to insert a builtin function signature into func_meta.
     fn insert_builtin_sig(&mut self, name: &str, return_type: IrType, param_types: Vec<IrType>, param_ctypes: Vec<CType>) {
-        self.func_meta.sigs.insert(name.to_string(), FuncSig {
-            return_type,
-            return_ctype: None,
-            param_types,
-            param_ctypes,
-            param_bool_flags: Vec::new(),
-            is_variadic: false,
-            sret_size: None,
-            two_reg_ret_size: None,
-            param_struct_sizes: Vec::new(),
-        });
+        let mut sig = FuncSig::for_ptr(return_type, param_types);
+        sig.param_ctypes = param_ctypes;
+        self.func_meta.sigs.insert(name.to_string(), sig);
     }
 
     pub(super) fn seed_libc_math_functions(&mut self) {
@@ -597,7 +589,7 @@ impl Lowerer {
         // Handle TypedefName through CType
         if let TypeSpecifier::TypedefName(name) = ts {
             if let Some(ctype) = self.types.typedefs.get(name) {
-                return ctype.align_ctx(&self.types.struct_layouts);
+                return self.ctype_align(ctype);
             }
             return 8; // fallback
         }
@@ -907,7 +899,7 @@ impl Lowerer {
             return (layout.size, 0, false, false, vec![]);
         }
         // Also check CType for typedef'd structs/unions
-        if matches!(resolved_ctype, CType::Struct(_) | CType::Union(_)) {
+        if resolved_ctype.is_struct_or_union() {
             if let Some(layout) = self.struct_layout_from_ctype(&resolved_ctype) {
                 return (layout.size, 0, false, false, vec![]);
             }

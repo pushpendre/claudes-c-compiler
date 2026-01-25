@@ -44,8 +44,11 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
 - **`VarInfo`** - Shared type metadata (ty, elem_size, is_array, struct_layout, etc.)
   embedded in both `LocalInfo` and `GlobalInfo` via `Deref`
 - **`DeclAnalysis`** - Computed once per declaration, bundles all type properties.
-  Used by both local and global lowering to avoid duplicating type analysis
-- **`FuncSig`** - Consolidated ABI-adjusted function signature (IrType return/params, sret/two-reg info)
+  Used by both local and global lowering to avoid duplicating type analysis.
+  Use `resolve_global_ty(init)` to determine whether a global should use I8 element
+  type (byte-array struct init) or its declared type.
+- **`FuncSig`** - Consolidated ABI-adjusted function signature (IrType return/params, sret/two-reg info).
+  Use `FuncSig::for_ptr(ret, params)` to create minimal function pointer signatures.
 - **`FunctionMeta`** - Maps function names to `FuncSig` (direct calls) and `ptr_sigs` (function pointers)
 - **`FunctionInfo`** (`sema::sema`) - Sema-provided C-level function signature (CType return/params, variadic).
   Stored in `Lowerer::sema_functions`. Provides authoritative CType info that the lowerer falls back to
@@ -69,6 +72,8 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
 - `register_block_func_meta(name, ...)` - Register function metadata for block-scope declarations
 - `lower_return_expr(e)` - Handles all return conventions (sret, two-reg, complex, scalar)
 - `lower_local_init_expr(...)` / `lower_local_init_list(...)` - Dispatch init by type
+- `mark_transparent_union(decl)` (`structs.rs`) - Marks transparent_union attribute on StructLayout
+- `ctype_size(ct)` / `ctype_align(ct)` (`pointer_analysis.rs`) - Convenience wrappers for `CType::size_ctx()`
 
 ### Function Lowering Pipeline
 

@@ -20,6 +20,7 @@ impl Parser {
         self.parsing_extern = false;
         self.parsing_inline = false;
         self.parsing_const = false;
+        self.parsing_volatile = false;
         self.parsing_constructor = false;
         self.parsing_destructor = false;
         self.parsing_weak = false;
@@ -95,6 +96,7 @@ impl Parser {
                 is_extern: self.parsing_extern,
                 is_typedef: self.parsing_typedef,
                 is_const: self.parsing_const,
+                is_volatile: self.parsing_volatile,
                 is_common: false,
                 is_transparent_union: false,
                 alignment: None,
@@ -440,6 +442,7 @@ impl Parser {
             is_extern: self.parsing_extern,
             is_typedef,
             is_const: self.parsing_const,
+            is_volatile: self.parsing_volatile,
             is_common,
             is_transparent_union,
             alignment,
@@ -454,6 +457,7 @@ impl Parser {
         self.parsing_typedef = false;
         self.parsing_inline = false;
         self.parsing_const = false;
+        self.parsing_volatile = false;
         let type_spec = self.parse_type_specifier()?;
 
         self.consume_post_type_qualifiers();
@@ -466,7 +470,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, is_transparent_union: false, alignment: None, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, span: start });
         }
 
         let mut mode_kind: Option<ModeKind> = None;
@@ -541,7 +545,7 @@ impl Parser {
         }
         let is_transparent_union = self.parsing_transparent_union;
         self.parsing_transparent_union = false;
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, is_transparent_union, alignment, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.
@@ -721,7 +725,8 @@ impl Parser {
                 TokenKind::Static => { self.advance(); self.parsing_static = true; }
                 TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
                 TokenKind::Const => { self.advance(); self.parsing_const = true; }
-                TokenKind::Volatile | TokenKind::Restrict
+                TokenKind::Volatile => { self.advance(); self.parsing_volatile = true; }
+                TokenKind::Restrict
                 | TokenKind::Inline | TokenKind::Register | TokenKind::Auto => { self.advance(); }
                 TokenKind::Alignas => {
                     self.advance();

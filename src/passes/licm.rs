@@ -927,6 +927,7 @@ mod tests {
                     ty: IrType::I32,
                     size: 4,
                     align: 4,
+                    volatile: false,
                 },
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(42)),
@@ -1034,6 +1035,7 @@ mod tests {
                     ty: IrType::I32,
                     size: 4,
                     align: 4,
+                    volatile: false,
                 },
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(0)),

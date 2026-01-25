@@ -95,7 +95,7 @@ impl Lowerer {
         // For sret calls, allocate space and prepend hidden pointer argument
         let sret_alloca = if let Some(size) = sret_size {
             let alloca = self.fresh_value();
-            self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size, align: 0 });
+            self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size, align: 0, volatile: false });
             arg_vals.insert(0, Operand::Value(alloca));
             arg_types.insert(0, IrType::Ptr);
             struct_arg_sizes.insert(0, None); // sret pointer is not a struct arg
@@ -166,7 +166,7 @@ impl Lowerer {
     /// Unpack a two-register (I128) struct return into a struct alloca.
     fn unpack_two_reg_return(&mut self, dest: Value, size: usize) -> Operand {
         let alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size, align: 0 });
+        self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size, align: 0, volatile: false });
         // Extract low 8 bytes (rax)
         let lo = self.fresh_value();
         self.emit(Instruction::Cast { dest: lo, src: Operand::Value(dest), from_ty: IrType::I128, to_ty: IrType::I64 });
@@ -191,7 +191,7 @@ impl Lowerer {
                     // x86-64: two packed F32 returned in xmm0 as F64
                     // Store the raw 8 bytes (two F32s) into an alloca
                     let alloca = self.fresh_value();
-                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
+                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
                     self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 });
                     Some(Operand::Value(alloca))
                 } else {
@@ -199,7 +199,7 @@ impl Lowerer {
                     let imag_val = self.fresh_value();
                     self.emit(Instruction::GetReturnF32Second { dest: imag_val });
                     let alloca = self.fresh_value();
-                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
+                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
                     // Store real part (F32) at offset 0
                     self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F32 });
                     // Store imag part (F32) at offset 4
@@ -218,7 +218,7 @@ impl Lowerer {
                 let imag_val = self.fresh_value();
                 self.emit(Instruction::GetReturnF64Second { dest: imag_val });
                 let alloca = self.fresh_value();
-                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 16, align: 0 });
+                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 16, align: 0, volatile: false });
                 self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 });
                 let imag_ptr = self.fresh_value();
                 self.emit(Instruction::BinOp {
@@ -298,7 +298,7 @@ impl Lowerer {
                         let struct_size = self.struct_value_size(a).unwrap_or(8);
                         let alloc_size = if struct_size > 0 { struct_size } else { 8 };
                         let alloca = self.fresh_value();
-                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0 });
+                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
                         self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                         val = Operand::Value(alloca);
                     }

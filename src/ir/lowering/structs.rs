@@ -135,6 +135,30 @@ impl Lowerer {
         }
     }
 
+    /// Mark a transparent_union attribute on the union's StructLayout.
+    ///
+    /// Resolves the union layout key either from the type specifier directly
+    /// or by searching through declarator names for typedef aliases.
+    /// This is needed in two places: the pre-pass in `lower()` and `lower_global_decl`.
+    pub(super) fn mark_transparent_union(&mut self, decl: &Declaration) {
+        let mut found_key = self.union_layout_key(&decl.type_spec);
+        if found_key.is_none() {
+            for declarator in &decl.declarators {
+                if !declarator.name.is_empty() {
+                    if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
+                        found_key = Some(key.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(key) = found_key {
+            if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
+                Rc::make_mut(layout).is_transparent_union = true;
+            }
+        }
+    }
+
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
     /// Prefers cached layout from struct_layouts when a tag name is available.
     /// Returns Rc<StructLayout> for cheap cloning.
@@ -317,7 +341,7 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0 });
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
                     self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                     alloca
                 }
@@ -330,7 +354,7 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0 });
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
                     self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                     alloca
                 } else {

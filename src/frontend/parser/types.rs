@@ -47,7 +47,11 @@ impl Parser {
                     self.advance();
                     self.parsing_const = true;
                 }
-                TokenKind::Volatile | TokenKind::Restrict
+                TokenKind::Volatile => {
+                    self.advance();
+                    self.parsing_volatile = true;
+                }
+                TokenKind::Restrict
                 | TokenKind::Register | TokenKind::Noreturn
                 | TokenKind::Auto => {
                     self.advance();

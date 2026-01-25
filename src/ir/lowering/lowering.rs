@@ -230,22 +230,7 @@ impl Lowerer {
         for decl in &tu.decls {
             if let ExternalDecl::Declaration(decl) = decl {
                 if decl.is_transparent_union {
-                    let mut found_key = self.union_layout_key(&decl.type_spec);
-                    if found_key.is_none() {
-                        for declarator in &decl.declarators {
-                            if !declarator.name.is_empty() {
-                                if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
-                                    found_key = Some(key.to_string());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if let Some(key) = found_key {
-                        if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
-                            std::rc::Rc::make_mut(layout).is_transparent_union = true;
-                        }
-                    }
+                    self.mark_transparent_union(decl);
                 }
             }
         }
@@ -462,7 +447,7 @@ impl Lowerer {
         let mut sret_size = None;
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
-            if matches!(full_ret_ctype, CType::Struct(_) | CType::Union(_)) {
+            if full_ret_ctype.is_struct_or_union() {
                 let size = self.sizeof_type(ret_type_spec);
                 if size > 16 {
                     sret_size = Some(size);
@@ -836,13 +821,13 @@ impl Lowerer {
         for param in &info.params {
             let alloca = self.fresh_value();
             if info.uses_sret && ir_allocas.is_empty() {
-                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
+                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
                 self.func_mut().sret_ptr = Some(alloca);
                 ir_allocas.push(alloca);
                 continue;
             }
             let size = param.ty.size().max(param.struct_size.unwrap_or(param.ty.size()));
-            self.emit(Instruction::Alloca { dest: alloca, ty: param.ty, size, align: 0 });
+            self.emit(Instruction::Alloca { dest: alloca, ty: param.ty, size, align: 0, volatile: false });
             ir_allocas.push(alloca);
         }
 
@@ -913,11 +898,7 @@ impl Lowerer {
             };
             if let Some(ref name) = orig_param.name {
                 let param_tys: Vec<IrType> = fptr_params.iter().map(|fp| self.type_spec_to_ir(&fp.type_spec)).collect();
-                self.func_meta.ptr_sigs.insert(name.clone(), FuncSig {
-                    return_type: ret_ty, return_ctype: None, param_types: param_tys,
-                    param_ctypes: Vec::new(), param_bool_flags: Vec::new(), is_variadic: false,
-                    sret_size: None, two_reg_ret_size: None, param_struct_sizes: Vec::new(),
-                });
+                self.func_meta.ptr_sigs.insert(name.clone(), FuncSig::for_ptr(ret_ty, param_tys));
             }
         }
     }
@@ -954,7 +935,7 @@ impl Lowerer {
         let complex_size = ct.size();
 
         let complex_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: complex_alloca, ty: IrType::Ptr, size: complex_size, align: 0 });
+        self.emit(Instruction::Alloca { dest: complex_alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
 
         let real_val = self.fresh_value();
         self.emit(Instruction::Load { dest: real_val, ptr: real_alloca, ty: comp_ty });
@@ -989,7 +970,7 @@ impl Lowerer {
                     self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 });
                     let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
                     let f32_alloca = self.fresh_value();
-                    self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0 });
+                    self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0, volatile: false });
                     self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 });
                     if let Some(local) = self.func_mut().locals.get_mut(&name) {
                         local.alloca = f32_alloca; local.ty = IrType::F32; local.alloc_size = 4;
@@ -1002,7 +983,7 @@ impl Lowerer {
                     let narrow_val = self.emit_cast_val(Operand::Value(i32_val), IrType::I32, declared_ty);
                     let narrow_alloca = self.fresh_value();
                     let size = declared_ty.size().max(1);
-                    self.emit(Instruction::Alloca { dest: narrow_alloca, ty: declared_ty, size, align: 0 });
+                    self.emit(Instruction::Alloca { dest: narrow_alloca, ty: declared_ty, size, align: 0, volatile: false });
                     self.emit(Instruction::Store { val: Operand::Value(narrow_val), ptr: narrow_alloca, ty: declared_ty });
                     if let Some(local) = self.func_mut().locals.get_mut(&name) {
                         local.alloca = narrow_alloca; local.ty = declared_ty; local.alloc_size = size;
@@ -1188,22 +1169,7 @@ impl Lowerer {
             }
             // Mark transparent_union on the union's StructLayout
             if decl.is_transparent_union {
-                let mut found_key = self.union_layout_key(&decl.type_spec);
-                if found_key.is_none() {
-                    for declarator in &decl.declarators {
-                        if !declarator.name.is_empty() {
-                            if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
-                                found_key = Some(key.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-                if let Some(key) = found_key {
-                    if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
-                        std::rc::Rc::make_mut(layout).is_transparent_union = true;
-                    }
-                }
+                self.mark_transparent_union(decl);
             }
             return;
         }
@@ -1293,13 +1259,7 @@ impl Lowerer {
 
             let is_static = decl.is_static;
 
-            let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
-                IrType::I8
-            } else if da.is_struct && matches!(init, GlobalInit::Array(_)) {
-                IrType::I8
-            } else {
-                da.var_ty
-            };
+            let global_ty = da.resolve_global_ty(&init);
 
             let final_size = match &init {
                 GlobalInit::Array(vals) if da.is_struct && vals.len() > da.actual_alloc_size => vals.len(),

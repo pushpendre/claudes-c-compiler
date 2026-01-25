@@ -163,7 +163,7 @@ impl Lowerer {
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
             let ret_ct = self.type_spec_to_ctype(ret_type_spec);
-            if matches!(ret_ct, CType::Struct(_) | CType::Union(_)) {
+            if ret_ct.is_struct_or_union() {
                 let size = self.sizeof_type(ret_type_spec);
                 if size > 16 {
                     sret_size = Some(size);

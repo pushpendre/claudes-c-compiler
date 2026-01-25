@@ -74,7 +74,7 @@ impl Lowerer {
         let mut struct_size = self.struct_value_size(e).unwrap_or(0);
         if struct_size == 0 && !Self::expr_is_arithmetic_binop(e) {
             if let Some(ctype) = self.get_expr_ctype(e) {
-                if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
+                if ctype.is_struct_or_union() {
                     let fname = self.func().name.clone();
                     if let Some(size) = self.func_meta.sigs.get(fname.as_str())
                         .and_then(|s| s.sret_size) {
@@ -149,7 +149,7 @@ impl Lowerer {
         let mut struct_size = self.struct_value_size(e).unwrap_or(0);
         if struct_size == 0 && !Self::expr_is_arithmetic_binop(e) {
             if let Some(ctype) = self.get_expr_ctype(e) {
-                if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
+                if ctype.is_struct_or_union() {
                     let fname = self.func().name.clone();
                     if let Some(size) = self.func_meta.sigs.get(fname.as_str())
                         .and_then(|s| s.two_reg_ret_size) {

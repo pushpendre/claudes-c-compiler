@@ -260,7 +260,7 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: BlockId(0),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: false },
                 // Dead instruction: result %1 is never used
                 Instruction::BinOp {
                     dest: Value(1),

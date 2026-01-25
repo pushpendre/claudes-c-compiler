@@ -201,6 +201,41 @@ pub(super) struct FuncSig {
     pub param_struct_sizes: Vec<Option<usize>>,
 }
 
+impl FuncSig {
+    /// Create a minimal FuncSig for a function pointer variable.
+    /// Sets all optional/ABI fields to their defaults (empty/None/false).
+    pub fn for_ptr(return_type: IrType, param_types: Vec<IrType>) -> Self {
+        FuncSig {
+            return_type,
+            return_ctype: None,
+            param_types,
+            param_ctypes: Vec::new(),
+            param_bool_flags: Vec::new(),
+            is_variadic: false,
+            sret_size: None,
+            two_reg_ret_size: None,
+            param_struct_sizes: Vec::new(),
+        }
+    }
+}
+
+impl DeclAnalysis {
+    /// Determine the IR element type for a global variable's initializer.
+    ///
+    /// When struct initializers are emitted as byte arrays (Vec<IrConst::I8>),
+    /// the global's element type must be I8 instead of the declared type.
+    /// This logic is shared between `lower_global_decl` and `lower_local_static_decl`.
+    pub fn resolve_global_ty(&self, init: &GlobalInit) -> IrType {
+        if matches!(init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
+            IrType::I8
+        } else if self.is_struct && matches!(init, GlobalInit::Array(_)) {
+            IrType::I8
+        } else {
+            self.var_ty
+        }
+    }
+}
+
 /// Metadata about known functions (signatures, variadic status, ABI handling).
 /// Uses a consolidated FuncSig per function instead of parallel HashMaps.
 #[derive(Debug, Default)]

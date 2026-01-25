@@ -218,6 +218,20 @@ impl Lowerer {
         }
     }
 
+    /// Convenience: get the size of a CType using the current struct layout context.
+    /// For non-struct/union types this is equivalent to `ctype.size()`.
+    /// For struct/union types, looks up the layout from `self.types.struct_layouts`.
+    #[inline]
+    pub(super) fn ctype_size(&self, ctype: &CType) -> usize {
+        ctype.size_ctx(&self.types.struct_layouts)
+    }
+
+    /// Convenience: get the alignment of a CType using the current struct layout context.
+    #[inline]
+    pub(super) fn ctype_align(&self, ctype: &CType) -> usize {
+        ctype.align_ctx(&self.types.struct_layouts)
+    }
+
     /// Resolve the actual size of a CType, handling forward-declared/self-referential
     /// struct/union types whose cached_size may be stale (0 or wrong).
     /// For tagged structs/unions, always prefer the authoritative struct_layouts

@@ -67,6 +67,7 @@ impl Lowerer {
                 is_static: decl.is_static,
                 is_extern: decl.is_extern,
                 is_const: decl.is_const,
+                is_volatile: decl.is_volatile,
                 is_common: decl.is_common,
                 is_transparent_union: decl.is_transparent_union,
                 alignment: decl.alignment,
@@ -162,6 +163,7 @@ impl Lowerer {
                 ty: if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
                 size: da.actual_alloc_size,
                 align: decl.alignment.unwrap_or(0),
+                volatile: decl.is_volatile,
             });
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
             local_info.vla_size = vla_size;
@@ -175,17 +177,7 @@ impl Lowerer {
                     let param_tys: Vec<IrType> = params.iter().map(|p| {
                         self.type_spec_to_ir(&p.type_spec)
                     }).collect();
-                    self.func_meta.ptr_sigs.insert(declarator.name.clone(), FuncSig {
-                        return_type: ret_ty,
-                        return_ctype: None,
-                        param_types: param_tys,
-                        param_ctypes: Vec::new(),
-                        param_bool_flags: Vec::new(),
-                        is_variadic: false,
-                        sret_size: None,
-                        two_reg_ret_size: None,
-                        param_struct_sizes: Vec::new(),
-                    });
+                    self.func_meta.ptr_sigs.insert(declarator.name.clone(), FuncSig::for_ptr(ret_ty, param_tys));
                     break;
                 }
             }
@@ -243,13 +235,7 @@ impl Lowerer {
         };
 
         // For struct initializers emitted as byte arrays, set element type to I8
-        let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
-            IrType::I8
-        } else if da.is_struct && matches!(&init, GlobalInit::Array(_)) {
-            IrType::I8
-        } else {
-            da.var_ty
-        };
+        let global_ty = da.resolve_global_ty(&init);
 
         self.emitted_global_names.insert(static_name.clone());
         self.module.globals.push(IrGlobal {
@@ -977,7 +963,7 @@ impl Lowerer {
 
         // Store switch value in an alloca for dispatch chain reloading
         let switch_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: switch_alloca, ty: IrType::I64, size: 8, align: 0 });
+        self.emit(Instruction::Alloca { dest: switch_alloca, ty: IrType::I64, size: 8, align: 0, volatile: false });
         self.emit(Instruction::Store { val, ptr: switch_alloca, ty: IrType::I64 });
 
         let dispatch_label = self.fresh_label();

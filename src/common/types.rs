@@ -835,6 +835,82 @@ impl CType {
         matches!(self, CType::Pointer(_) | CType::Array(_, _))
     }
 
+    /// Whether this is a function pointer type: Pointer(Function(_)).
+    pub fn is_function_pointer(&self) -> bool {
+        matches!(self, CType::Pointer(inner) if matches!(inner.as_ref(), CType::Function(_)))
+    }
+
+    /// Whether this is a pointer-to-function-pointer: Pointer(Pointer(Function(_))).
+    pub fn is_ptr_to_function_pointer(&self) -> bool {
+        matches!(self, CType::Pointer(inner)
+            if matches!(inner.as_ref(), CType::Pointer(inner2)
+                if matches!(inner2.as_ref(), CType::Function(_))))
+    }
+
+    /// Get the pointee type if this is a Pointer.
+    pub fn pointee(&self) -> Option<&CType> {
+        match self {
+            CType::Pointer(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// Get the array element type if this is an Array.
+    pub fn array_element(&self) -> Option<&CType> {
+        match self {
+            CType::Array(elem, _) => Some(elem),
+            _ => None,
+        }
+    }
+
+    /// Get the array length if this is a sized Array.
+    pub fn array_len(&self) -> Option<usize> {
+        match self {
+            CType::Array(_, Some(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Extract the return type from a function pointer CType.
+    ///
+    /// Handles these CType shapes:
+    ///   1. Pointer(Function(ft))           -> ft.return_type
+    ///   2. Pointer(Pointer(Function(ft)))   -> ft.return_type (ptr-to-func-ptr)
+    ///   3. Function(ft)                     -> ft.return_type (bare function type)
+    ///   4. Pointer(X) where X is not Function -> X (typedef lost Function node)
+    ///
+    /// The `strict` flag controls behavior for case 4 and non-matching cases:
+    ///   - strict=true: returns None (used when only real function pointers are wanted)
+    ///   - strict=false: returns Some(X) (used when typedef fallback is acceptable)
+    pub fn func_ptr_return_type(&self, strict: bool) -> Option<CType> {
+        match self {
+            CType::Pointer(inner) => match inner.as_ref() {
+                CType::Function(ft) => Some(ft.return_type.clone()),
+                CType::Pointer(inner2) => match inner2.as_ref() {
+                    CType::Function(ft) => Some(ft.return_type.clone()),
+                    _ => if strict { None } else { Some(inner.as_ref().clone()) },
+                },
+                other => if strict { None } else { Some(other.clone()) },
+            },
+            CType::Function(ft) => Some(ft.return_type.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a struct type.
+    pub fn is_struct(&self) -> bool {
+        matches!(self, CType::Struct(_))
+    }
+
+    /// Whether this is a union type.
+    pub fn is_union(&self) -> bool {
+        matches!(self, CType::Union(_))
+    }
+
+    /// Whether this is a struct or union type.
+    pub fn is_struct_or_union(&self) -> bool {
+        matches!(self, CType::Struct(_) | CType::Union(_))
+    }
 }
 
 /// IR-level types (simpler than C types).

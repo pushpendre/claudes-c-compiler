@@ -60,6 +60,8 @@ pub struct Parser {
     pub(super) parsing_inline: bool,
     /// Set to true when parse_type_specifier encounters a `const` qualifier.
     pub(super) parsing_const: bool,
+    /// Set to true when parse_type_specifier encounters a `volatile` qualifier.
+    pub(super) parsing_volatile: bool,
     /// Set to true when parse_type_specifier encounters __attribute__((constructor)).
     pub(super) parsing_constructor: bool,
     /// Set to true when parse_type_specifier encounters __attribute__((destructor)).
@@ -98,6 +100,7 @@ impl Parser {
             parsing_extern: false,
             parsing_inline: false,
             parsing_const: false,
+            parsing_volatile: false,
             parsing_constructor: false,
             parsing_destructor: false,
             parsing_transparent_union: false,

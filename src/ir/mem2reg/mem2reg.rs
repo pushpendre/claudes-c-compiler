@@ -86,11 +86,17 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         .instructions
         .iter()
         .filter_map(|inst| {
-            if let Instruction::Alloca { dest, ty, size, .. } = inst {
+            if let Instruction::Alloca { dest, ty, size, volatile, .. } = inst {
                 let idx = alloca_index;
                 alloca_index += 1;
                 // Skip parameter allocas (first num_params allocas)
                 if idx < num_params {
+                    return None;
+                }
+                // Never promote volatile allocas -- volatile locals must remain
+                // in memory so their values survive setjmp/longjmp and are not
+                // cached in registers that longjmp would restore to stale values.
+                if *volatile {
                     return None;
                 }
                 // Only promote scalar allocas (size <= 8 bytes)
@@ -620,7 +626,7 @@ mod tests {
             label: BlockId(0),
             instructions: vec![
                 // %0 = alloca i32
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: false },
                 // store 42, %0
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(42)),
@@ -671,9 +677,9 @@ mod tests {
             label: BlockId(0),
             instructions: vec![
                 // %0 = alloca i32 (param)
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: false },
                 // %1 = alloca i32 (x)
-                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0 },
+                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0, volatile: false },
                 // %2 = load %0 (read param)
                 Instruction::Load { dest: Value(2), ptr: Value(0), ty: IrType::I32 },
                 // %3 = cmp ne %2, 0
@@ -749,7 +755,7 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: BlockId(0),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: false },
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(42)),
                     ptr: Value(0),
@@ -792,8 +798,8 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: BlockId(0),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 }, // sum
-                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0 }, // i
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: false }, // sum
+                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0, volatile: false }, // i
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(0), ty: IrType::I32 },
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(1), ty: IrType::I32 },
             ],
@@ -863,6 +869,43 @@ mod tests {
             .filter(|inst| matches!(inst, Instruction::Phi { .. }))
             .count();
         assert_eq!(phi_count, 2, "Loop header should have 2 phi nodes");
+    }
+
+    #[test]
+    fn test_volatile_alloca_not_promoted() {
+        // A volatile alloca should never be promoted to SSA, even though
+        // it is scalar and only used by loads/stores.
+        let mut func = IrFunction::new("f".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                // %0 = alloca i32 (volatile)
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0, volatile: true },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+                Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I32 },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+        });
+
+        let mut module = IrModule::new();
+        module.functions.push(func);
+        promote_allocas(&mut module);
+
+        // The volatile alloca should NOT be promoted
+        let func = &module.functions[0];
+        let has_alloca = func.blocks[0].instructions.iter().any(|inst|
+            matches!(inst, Instruction::Alloca { dest: Value(0), volatile: true, .. })
+        );
+        assert!(has_alloca, "Volatile alloca should not be promoted");
+        // Store should still exist
+        let has_store = func.blocks[0].instructions.iter().any(|inst|
+            matches!(inst, Instruction::Store { ptr: Value(0), .. })
+        );
+        assert!(has_store, "Store to volatile alloca should not be removed");
     }
 
     #[test]

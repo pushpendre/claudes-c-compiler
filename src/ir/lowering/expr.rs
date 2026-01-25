@@ -568,7 +568,7 @@ impl Lowerer {
         else_fn: impl FnOnce(&mut Self) -> Operand,
     ) -> Operand {
         let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0, volatile: false });
 
         let then_label = self.fresh_label();
         let else_label = self.fresh_label();
@@ -658,7 +658,7 @@ impl Lowerer {
 
             // Allocate stack space for the union and zero-initialize it
             let alloca = self.fresh_value();
-            self.emit(Instruction::Alloca { dest: alloca, size: union_size, ty: IrType::Ptr, align: 0 });
+            self.emit(Instruction::Alloca { dest: alloca, size: union_size, ty: IrType::Ptr, align: 0, volatile: false });
             self.zero_init_alloca(alloca, union_size);
 
             // Store source value at offset 0 (all union members share offset 0)
@@ -995,7 +995,7 @@ impl Lowerer {
         &mut self, type_spec: &TypeSpecifier, init: &Initializer, ty: IrType, size: usize,
     ) -> Value {
         let alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: alloca, size, ty, align: 0 });
+        self.emit(Instruction::Alloca { dest: alloca, size, ty, align: 0, volatile: false });
         let struct_layout = self.get_struct_layout_for_type(type_spec);
         match init {
             Initializer::Expr(expr) => {
@@ -1092,14 +1092,8 @@ impl Lowerer {
         // where param_ctype correctly sets CType::Pointer(CType::Function(...)),
         // and also for struct member function pointers via get_expr_ctype)
         if let Some(ref inner_ct) = self.get_expr_ctype(inner) {
-            match inner_ct {
-                CType::Pointer(pointee) if matches!(pointee.as_ref(), CType::Function(_)) => {
-                    return true;
-                }
-                CType::Function(_) => {
-                    return true;
-                }
-                _ => {}
+            if inner_ct.is_function_pointer() || matches!(inner_ct, CType::Function(_)) {
+                return true;
             }
         }
         // Check for known function names (e.g., *add where add is a function)
@@ -1117,24 +1111,18 @@ impl Lowerer {
                 // is_ptr_to_func_ptr early-return above, so any Pointer(Function(...))
                 // at this point is a genuine direct function pointer.
                 if let Some(vi) = self.lookup_var_info(name) {
-                    let has_ctype = vi.c_type.is_some();
                     if let Some(ref ct) = vi.c_type {
-                        match ct {
-                            CType::Pointer(pointee) if matches!(pointee.as_ref(), CType::Function(_)) => {
-                                return true;
-                            }
-                            CType::Function(_) => {
-                                return true;
-                            }
-                            _ => {}
+                        if ct.is_function_pointer() || matches!(ct, CType::Function(_)) {
+                            return true;
                         }
-                    }
-                    // Fallback: check ptr_sigs only when c_type is unavailable.
-                    // When c_type IS available, the match above is authoritative —
-                    // ptr_sigs may contain entries for pointer-to-function-pointers
-                    // which are NOT no-op derefs.
-                    if !has_ctype && self.func_meta.ptr_sigs.contains_key(name.as_str()) {
-                        return true;
+                    } else {
+                        // Fallback: check ptr_sigs only when c_type is unavailable.
+                        // When c_type IS available, the check above is authoritative —
+                        // ptr_sigs may contain entries for pointer-to-function-pointers
+                        // which are NOT no-op derefs.
+                        if self.func_meta.ptr_sigs.contains_key(name.as_str()) {
+                            return true;
+                        }
                     }
                 }
                 false
@@ -1155,12 +1143,9 @@ impl Lowerer {
                     if let Some(vi) = self.lookup_var_info(name) {
                         if let Some(ref ct) = vi.c_type {
                             // Extract the return type of the function pointer
-                            if let Some(ret_ct) = Self::extract_func_ptr_return_ctype_static(ct) {
+                            if let Some(ret_ct) = ct.func_ptr_return_type(true) {
                                 // If the return type is a function pointer, deref is no-op
-                                if matches!(&ret_ct, CType::Pointer(p) if matches!(p.as_ref(), CType::Function(_))) {
-                                    return true;
-                                }
-                                if matches!(&ret_ct, CType::Function(_)) {
+                                if ret_ct.is_function_pointer() || matches!(&ret_ct, CType::Function(_)) {
                                     return true;
                                 }
                             }
@@ -1169,7 +1154,7 @@ impl Lowerer {
                     // Also check known function signatures
                     if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
                         if let Some(ref ret_ct) = sig.return_ctype {
-                            if matches!(ret_ct, CType::Pointer(p) if matches!(p.as_ref(), CType::Function(_))) {
+                            if ret_ct.is_function_pointer() {
                                 return true;
                             }
                         }
@@ -1178,22 +1163,6 @@ impl Lowerer {
                 false
             }
             _ => false,
-        }
-    }
-
-    /// Static version of extract_func_ptr_return_ctype for use in is_function_pointer_deref
-    fn extract_func_ptr_return_ctype_static(ctype: &CType) -> Option<CType> {
-        match ctype {
-            CType::Pointer(inner) => match inner.as_ref() {
-                CType::Function(ft) => Some(ft.return_type.clone()),
-                CType::Pointer(inner2) => match inner2.as_ref() {
-                    CType::Function(ft) => Some(ft.return_type.clone()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            CType::Function(ft) => Some(ft.return_type.clone()),
-            _ => None,
         }
     }
 
@@ -1340,12 +1309,12 @@ impl Lowerer {
 
     fn field_is_struct(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
         self.resolve_field_ctype(base_expr, field_name, is_pointer_access)
-            .map(|ct| matches!(ct, CType::Struct(_) | CType::Union(_))).unwrap_or(false)
+            .map(|ct| ct.is_struct_or_union()).unwrap_or(false)
     }
 
     fn field_is_complex(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
         self.resolve_field_ctype(base_expr, field_name, is_pointer_access)
-            .map(|ct| matches!(ct, CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble)).unwrap_or(false)
+            .map(|ct| ct.is_complex()).unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -1377,7 +1346,7 @@ impl Lowerer {
 
     fn lower_short_circuit(&mut self, lhs: &Expr, rhs: &Expr, is_and: bool) -> Operand {
         let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0, volatile: false });
 
         let rhs_label = self.fresh_label();
         let end_label = self.fresh_label();

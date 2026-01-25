@@ -294,7 +294,7 @@ impl Lowerer {
                         (IrType::F64, 16usize, 8usize)
                     };
                     let alloca = self.fresh_value();
-                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: complex_size, align: 0 });
+                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
                     self.emit(Instruction::Store { val: real_val, ptr: alloca, ty: comp_ty });
                     let imag_ptr = self.fresh_value();
                     self.emit(Instruction::GetElementPtr {
@@ -404,7 +404,7 @@ impl Lowerer {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 // Allocate 16-byte stack slot for result
                 let result_alloca = self.fresh_value();
-                self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::Ptr, size: 16, align: 0 });
+                self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::Ptr, size: 16, align: 0, volatile: false });
                 let dest_val = self.fresh_value();
                 self.emit(Instruction::Intrinsic {
                     dest: Some(dest_val),
@@ -793,7 +793,7 @@ impl Lowerer {
         let size = if float_ty == IrType::F32 { 4 } else { 8 };
 
         let tmp_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: tmp_alloca, size, ty: float_ty, align: 0 });
+        self.emit(Instruction::Alloca { dest: tmp_alloca, size, ty: float_ty, align: 0, volatile: false });
 
         let val_v = self.operand_to_value(val);
         self.emit(Instruction::Store { val: Operand::Value(val_v), ptr: tmp_alloca, ty: float_ty });

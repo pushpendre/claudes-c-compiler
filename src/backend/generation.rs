@@ -535,7 +535,7 @@ pub fn calculate_stack_space_common(
     let mut space = initial_offset;
     for block in &func.blocks {
         for inst in &block.instructions {
-            if let Instruction::Alloca { dest, size, ty, align } = inst {
+            if let Instruction::Alloca { dest, size, ty, align, .. } = inst {
                 let effective_align = *align;
                 let extra = if effective_align > 16 { effective_align - 1 } else { 0 };
                 let raw_size = if *size == 0 { 8 } else { *size as i64 };

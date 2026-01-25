@@ -145,7 +145,9 @@ pub struct Value(pub u32);
 pub enum Instruction {
     /// Allocate stack space: %dest = alloca ty
     /// `align` is the alignment override (0 means use default platform alignment).
-    Alloca { dest: Value, ty: IrType, size: usize, align: usize },
+    /// `volatile` prevents mem2reg from promoting this alloca to an SSA register.
+    /// This is needed for volatile-qualified locals that must survive setjmp/longjmp.
+    Alloca { dest: Value, ty: IrType, size: usize, align: usize, volatile: bool },
 
     /// Dynamic stack allocation: %dest = dynalloca size_operand, align
     /// Used for __builtin_alloca - adjusts stack pointer at runtime.
