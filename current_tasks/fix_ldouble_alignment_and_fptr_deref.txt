@@ -1,0 +1,19 @@
+Task: Fix long double stack alignment and function pointer dereference detection
+Status: in progress
+
+Two bugs fixed:
+
+1. Long double stack argument alignment mismatch:
+   - Callee-side (call_emit.rs) F128AlwaysStack offset calculation didn't align to 16 bytes,
+     but caller-side padding (compute_stack_arg_padding) did, causing misaligned reads.
+   - Fix: Add 16-byte alignment to callee offset calculation.
+
+2. Function pointer returning pointer misidentified as pointer-to-function-pointer:
+   - is_ptr_to_func_ptr in lowering.rs counted Pointer entries BEFORE FunctionPointer
+     in derived declarators, but extra indirection pointers appear AFTER FunctionPointer.
+   - For int *(*fnc)(): derived = [Pointer(ret), Pointer(syntax), FunctionPointer] - NOT ptr-to-fptr
+   - For int (**fpp)(): derived = [Pointer(syntax), FunctionPointer, Pointer(extra)] - IS ptr-to-fptr
+   - Fix: Check for Pointer entries AFTER FunctionPointer instead of before.
+
+Also: emit_call_instruction's Deref arm now uses the comprehensive is_function_pointer_deref()
+check instead of a limited inline check that missed ptr_sigs fallback.
