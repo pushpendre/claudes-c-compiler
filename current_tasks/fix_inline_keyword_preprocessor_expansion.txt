@@ -1,0 +1,19 @@
+Task: Fix __inline__/__inline preprocessor macro expansion causing kernel compile failures
+
+Problem: The preprocessor defines __inline__ and __inline as macros expanding to "inline".
+When the Linux kernel defines: #define inline inline __gnu_inline __inline_maybe_unused notrace
+and asm_inline expands to "asm __inline", the chain becomes:
+  asm_inline -> asm __inline -> asm inline -> asm inline __gnu_inline ... notrace
+This produces invalid asm statement syntax like:
+  asm inline __attribute__((__gnu_inline__)) __attribute__((__unused__)) volatile (...)
+
+The GNU double-underscore keyword variants are specifically designed to be immune from
+user macro redefinition. They should be handled as keyword aliases in the lexer (which
+already handles them), NOT as preprocessor macros.
+
+Fix: Remove __inline__ and __inline from preprocessor macro definitions. The lexer
+already maps them to TokenKind::Inline.
+
+This fixes nearly all COMPILE_FAIL files in kernel bisect (49/50 fail currently).
+
+Status: in progress
