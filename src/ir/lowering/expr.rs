@@ -1329,6 +1329,8 @@ impl Lowerer {
             (Operand::Const(IrConst::F64(1.0)), IrType::F64)
         } else if ty == IrType::F32 {
             (Operand::Const(IrConst::F32(1.0)), IrType::F32)
+        } else if ty == IrType::F128 {
+            (Operand::Const(IrConst::LongDouble(1.0)), IrType::F128)
         } else {
             (Operand::Const(IrConst::I64(1)), IrType::I64)
         }

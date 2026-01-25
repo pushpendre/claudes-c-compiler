@@ -288,20 +288,17 @@ impl Lowerer {
         }
     }
 
-    /// Evaluate an initializer to a scalar constant (handles both Expr and brace-wrapped List).
+    /// Evaluate an initializer to a scalar constant (handles both Expr and arbitrarily
+    /// nested brace-wrapped Lists like `{{{42}}}`).
     pub(super) fn eval_init_scalar(&self, init: &Initializer) -> IrConst {
         match init {
             Initializer::Expr(expr) => self.eval_const_expr(expr).unwrap_or(IrConst::I64(0)),
             Initializer::List(sub_items) => {
-                sub_items.first()
-                    .and_then(|first| {
-                        if let Initializer::Expr(expr) = &first.init {
-                            self.eval_const_expr(expr)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(IrConst::I64(0))
+                if let Some(first) = sub_items.first() {
+                    self.eval_init_scalar(&first.init)
+                } else {
+                    IrConst::I64(0)
+                }
             }
         }
     }

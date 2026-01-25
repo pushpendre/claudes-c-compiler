@@ -4,7 +4,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional with SSA.** ~97-98% of tests passing across all architectures.
+**Basic compilation pipeline functional with SSA.** ~97.7% of tests passing across all architectures (full suite, 29906 tests).
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
@@ -15,10 +15,10 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Optimization passes (constant folding, DCE, GVN, algebraic simplification) operating on SSA form
 - Three backend targets with correct ABI handling
 
-### Test Results (ratio 10 sample)
-- x86-64: 97.6% passing (2920/2991)
-- AArch64: 97.3% passing (2792/2869)
-- RISC-V 64: 98.1% passing (2808/2861)
+### Test Results (full suite)
+- x86-64: 97.7% passing (29223/29906)
+- AArch64: 98.2% passing (2817/2869, ratio 10 sample)
+- RISC-V 64: 97.8% passing (2798/2861, ratio 10 sample)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -56,6 +56,18 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix long double `++`/`--` increment/decrement**: The `inc_dec_step_and_type`
+  function had no branch for `IrType::F128` (long double), causing it to fall
+  through to the integer path and emit `Add(f128_value, I64(1))` - a type mismatch
+  that produced a no-op. This caused all `for(long_double_var = 0; var < N; var++)`
+  loops to run forever (21 timeouts). Added the missing `F128` branch returning
+  `IrConst::LongDouble(1.0)`.
+- **Fix extra braces around scalar initializers**: C allows redundant braces around
+  scalar initializers (e.g. `int x = {{{42}}}`), but four code paths only peeled
+  one layer: `lower_scalar_braced_init`, `lower_global_init` scalar case,
+  `eval_init_scalar`, and `emit_struct_init` scalar field case. Two or more extra
+  brace levels silently produced zero. Fixed all paths to recursively unwrap nested
+  brace lists using `unwrap_nested_init_expr`. Fixes ~15-20 tests.
 - **Fix K&R old-style default argument promotions in IR**: K&R-style function
   definitions require default argument promotions (`float`→`double`,
   `char`/`short`→`int`) per C calling conventions, but `build_ir_params` used

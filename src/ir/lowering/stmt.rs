@@ -1638,6 +1638,10 @@ impl Lowerer {
                                                     self.emit_init_expr_to_offset_bool(e, base_alloca, inner_offset, inner_elem_ir_ty, inner_is_bool);
                                                 }
                                             }
+                                        } else if let Some(e) = Self::unwrap_nested_init_expr(inner_items) {
+                                            // Extra braces around scalar array element: {{{42}}}
+                                            let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                            self.emit_init_expr_to_offset_bool(e, base_alloca, elem_offset, elem_ir_ty, elem_is_bool);
                                         }
                                     }
                                     ai += 1;
@@ -1754,14 +1758,10 @@ impl Lowerer {
                             (self.lower_expr(e), et)
                         }
                         Initializer::List(sub_items) => {
-                            // Scalar with braces, e.g., int x = {5};
-                            if let Some(first) = sub_items.first() {
-                                if let Initializer::Expr(e) = &first.init {
-                                    let et = self.get_expr_type(e);
-                                    (self.lower_expr(e), et)
-                                } else {
-                                    (Operand::Const(IrConst::I64(0)), IrType::I64)
-                                }
+                            // Scalar with braces (arbitrarily nested), e.g., int x = {5}; or {{{5}}}
+                            if let Some(e) = Self::unwrap_nested_init_expr(sub_items) {
+                                let et = self.get_expr_type(e);
+                                (self.lower_expr(e), et)
                             } else {
                                 (Operand::Const(IrConst::I64(0)), IrType::I64)
                             }

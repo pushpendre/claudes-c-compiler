@@ -354,10 +354,10 @@ impl Lowerer {
                     return self.lower_struct_global_init(items, layout);
                 }
 
-                // Scalar with braces: int x = { 1 };
+                // Scalar with braces: int x = { 1 }; or int x = {{{1}}};
                 // C11 6.7.9: A scalar can be initialized with a single braced expression.
                 if !is_array && items.len() >= 1 {
-                    if let Initializer::Expr(expr) = &items[0].init {
+                    if let Some(expr) = Self::unwrap_nested_init_expr(items) {
                         if let Some(val) = self.eval_const_expr(expr) {
                             let expr_ty = self.get_expr_type(expr);
                             return GlobalInit::Scalar(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));

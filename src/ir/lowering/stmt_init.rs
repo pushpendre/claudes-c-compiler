@@ -786,16 +786,14 @@ impl Lowerer {
         }
     }
 
-    /// Scalar with braces: `int x = { 1 };`
+    /// Scalar with braces: `int x = { 1 };` or `int x = {{{1}}};`
     fn lower_scalar_braced_init(&mut self, items: &[InitializerItem], alloca: Value, da: &DeclAnalysis) {
-        if let Some(first) = items.first() {
-            if let Initializer::Expr(expr) = &first.init {
-                let val = self.lower_expr(expr);
-                let expr_ty = self.get_expr_type(expr);
-                let val = self.emit_implicit_cast(val, expr_ty, da.var_ty);
-                let val = if da.is_bool { self.emit_bool_normalize(val) } else { val };
-                self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
-            }
+        if let Some(expr) = Self::unwrap_nested_init_expr(items) {
+            let val = self.lower_expr(expr);
+            let expr_ty = self.get_expr_type(expr);
+            let val = self.emit_implicit_cast(val, expr_ty, da.var_ty);
+            let val = if da.is_bool { self.emit_bool_normalize(val) } else { val };
+            self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
         }
     }
 }
