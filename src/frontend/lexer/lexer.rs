@@ -18,7 +18,8 @@ impl Lexer {
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
-        let mut tokens = Vec::new();
+        // Estimate ~1 token per 5 bytes of source (typical for C code).
+        let mut tokens = Vec::with_capacity(self.input.len() / 5);
         loop {
             let tok = self.next_token();
             let is_eof = tok.is_eof();

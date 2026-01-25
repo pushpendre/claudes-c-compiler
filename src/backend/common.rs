@@ -129,7 +129,9 @@ pub struct AsmOutput {
 
 impl AsmOutput {
     pub fn new() -> Self {
-        Self { buf: String::new() }
+        // Pre-allocate 256KB to avoid repeated reallocations during codegen.
+        // A typical large C file (sqlite3.c) produces ~2MB of assembly.
+        Self { buf: String::with_capacity(256 * 1024) }
     }
 
     /// Emit a line of assembly.
