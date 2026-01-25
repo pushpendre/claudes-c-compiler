@@ -4,7 +4,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional with SSA.** ~97.7% of tests passing across all architectures (full suite, 29906 tests).
+**Basic compilation pipeline functional with SSA.** ~98.5% of tests passing across all architectures (ratio 10 sample, ~2900 tests per arch).
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
@@ -16,10 +16,10 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - x86-64 peephole optimizer (eliminates redundant store/load, push/pop, and jump patterns)
 - Three backend targets with correct ABI handling
 
-### Test Results (full suite)
-- x86-64: 97.7% passing (29223/29906)
-- AArch64: 98.2% passing (2817/2869, ratio 10 sample)
-- RISC-V 64: 97.8% passing (2798/2861, ratio 10 sample)
+### Test Results (ratio 10 sample)
+- x86-64: 98.4% passing (2943/2991)
+- AArch64: 98.0% passing (2812/2869)
+- RISC-V 64: 99.2% passing (2837/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
