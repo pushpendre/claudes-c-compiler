@@ -282,11 +282,23 @@ impl SemanticAnalyzer {
         }
 
         for init_decl in &decl.declarators {
-            let full_type = if init_decl.derived.is_empty() {
+            let mut full_type = if init_decl.derived.is_empty() {
                 base_type.clone()
             } else {
                 type_builder::build_full_ctype(self, &decl.type_spec, &init_decl.derived)
             };
+
+            // Resolve incomplete array sizes from initializers (e.g., int arr[] = {1,2,3})
+            // This must happen before storing the symbol so sizeof(arr) works in
+            // subsequent global initializer const-evaluation.
+            if let CType::Array(ref elem, None) = full_type {
+                if let Some(ref init) = init_decl.init {
+                    if let Some(count) = Self::count_initializer_elements(init, elem) {
+                        full_type = CType::Array(elem.clone(), Some(count));
+                    }
+                }
+            }
+
             let storage = if decl.is_extern {
                 StorageClass::Extern
             } else if decl.is_static {
@@ -322,6 +334,105 @@ impl SemanticAnalyzer {
             if let Some(init) = &init_decl.init {
                 self.analyze_initializer(init);
             }
+        }
+    }
+
+    /// Count the number of array elements from an initializer.
+    /// Used to resolve incomplete array types (e.g., `int arr[] = {1,2,3}`)
+    /// so that sizeof(arr) works correctly in subsequent const evaluation.
+    ///
+    /// Uses the same index-tracking algorithm as lowering's
+    /// `compute_init_list_array_size`. Handles initializer lists with
+    /// designators, string literals for char arrays, and brace-wrapped
+    /// string literals.
+    fn count_initializer_elements(init: &Initializer, elem_ty: &CType) -> Option<usize> {
+        match init {
+            Initializer::List(items) => {
+                // Check for brace-wrapped string literal: char c[] = {"hello"}
+                let is_char_elem = matches!(elem_ty, CType::Char | CType::UChar);
+                let is_int_elem = matches!(elem_ty, CType::Int);
+                if items.len() == 1 && items[0].designators.is_empty() {
+                    if is_char_elem {
+                        if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
+                            return Some(s.chars().count() + 1);
+                        }
+                    }
+                    if is_int_elem {
+                        if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
+                            // For wchar_t arrays, each Unicode codepoint is one element
+                            return Some(s.chars().count() + 1);
+                        }
+                    }
+                }
+
+                // General case: track current index through the initializer list.
+                let mut max_idx = 0usize;
+                let mut current_idx = 0usize;
+                for item in items {
+                    // If this item has an array index designator, jump to that index
+                    if let Some(designator) = item.designators.first() {
+                        match designator {
+                            Designator::Index(idx_expr) => {
+                                if let Some(idx) = Self::eval_designator_index(idx_expr) {
+                                    current_idx = idx;
+                                }
+                            }
+                            Designator::Range(_lo, hi) => {
+                                // GNU range designator [lo ... hi]: size determined by hi
+                                if let Some(idx) = Self::eval_designator_index(hi) {
+                                    current_idx = idx;
+                                }
+                            }
+                            Designator::Field(_) => {
+                                // Field designator on struct element - don't advance
+                            }
+                        }
+                    }
+                    if current_idx >= max_idx {
+                        max_idx = current_idx + 1;
+                    }
+                    // Only advance if this item doesn't have a field designator
+                    // (multiple items may target different fields of the same element)
+                    let has_field_designator = item.designators.iter()
+                        .any(|d| matches!(d, Designator::Field(_)));
+                    if !has_field_designator {
+                        current_idx += 1;
+                    }
+                }
+                let has_any_designator = items.iter()
+                    .any(|item| !item.designators.is_empty());
+                if has_any_designator {
+                    Some(max_idx)
+                } else {
+                    Some(max_idx.max(items.len()))
+                }
+            }
+            Initializer::Expr(expr) => {
+                // String literal initializer for char arrays: char s[] = "hello"
+                match (elem_ty, expr) {
+                    (CType::Char | CType::UChar, Expr::StringLiteral(s, _)) => {
+                        Some(s.chars().count() + 1) // +1 for null terminator
+                    }
+                    (CType::Int, Expr::WideStringLiteral(s, _)) => {
+                        // For wchar_t arrays, each Unicode codepoint is one element
+                        Some(s.chars().count() + 1)
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Try to evaluate a designator index expression as a usize.
+    /// Handles integer and char literals. Returns None for complex
+    /// constant expressions; the lowering phase handles those cases.
+    // TODO: extend to handle const expressions (e.g., enum values, sizeof)
+    fn eval_designator_index(expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::IntLiteral(n, _) | Expr::LongLiteral(n, _) => Some(*n as usize),
+            Expr::UIntLiteral(n, _) | Expr::ULongLiteral(n, _) => Some(*n as usize),
+            Expr::CharLiteral(n, _) => Some(*n as usize),
+            _ => None,
         }
     }
 
