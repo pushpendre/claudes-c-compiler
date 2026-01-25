@@ -550,9 +550,25 @@ impl Parser {
             }
             name
         } else if matches!(self.peek(), TokenKind::LParen) {
-            // Nested: ((name)) or ((*name))
+            // Nested parens: ((name)), ((*name)), ((name)(params)), or ((type))
+            let inner_save = self.pos;
             let name = self.extract_paren_name();
+            if name.is_some() {
+                // Successfully extracted a name. Skip array dims and function
+                // param lists inside the outer parens, e.g. ((fnc)(int)) or ((arr)[5])
+                self.skip_array_dimensions();
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.skip_balanced_parens();
+                }
+            } else {
+                // extract_paren_name failed (e.g. ((int)) where inner content
+                // is a type, not a name). Restore position and skip the inner
+                // content as balanced parentheses.
+                self.pos = inner_save;
+                self.skip_balanced_parens();
+            }
             self.expect(&TokenKind::RParen);
+            // Also skip trailing suffixes after the outer parens
             self.skip_array_dimensions();
             if matches!(self.peek(), TokenKind::LParen) {
                 self.skip_balanced_parens();
