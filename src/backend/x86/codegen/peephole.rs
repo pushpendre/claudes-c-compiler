@@ -315,6 +315,7 @@ pub fn peephole_optimize(asm: String) -> String {
         changed |= eliminate_redundant_movq_self(&mut lines, &mut infos);
         changed |= fuse_compare_and_branch(&mut lines, &mut infos);
         changed |= forward_store_load_non_adjacent(&mut lines, &mut infos);
+        changed |= global_store_forwarding(&mut lines, &mut infos);
         changed |= eliminate_redundant_cltq(&mut lines, &mut infos);
         changed |= eliminate_redundant_zero_extend(&mut lines, &mut infos);
         changed |= eliminate_dead_stores(&mut lines, &mut infos);
@@ -1088,7 +1089,10 @@ fn eliminate_redundant_zero_extend(lines: &mut [String], infos: &mut [LineInfo])
         // Find the next non-NOP instruction after i
         let mut ext_idx = i + 1;
         // Look through intervening stores to rbp (which don't modify %rax)
-        while ext_idx < len && ext_idx < i + 4 {
+        // Use a wider window (up to 10) to catch cases where many SSA copies
+        // create multiple stores between the producing instruction and the
+        // redundant extension.
+        while ext_idx < len && ext_idx < i + 10 {
             if infos[ext_idx].is_nop() {
                 ext_idx += 1;
                 continue;
@@ -1196,6 +1200,307 @@ fn register_family(reg: &str) -> Option<u8> {
         "%r15" | "%r15d" | "%r15w" | "%r15b" => Some(15),
         _ => None,
     }
+}
+
+// ── Pattern 12: Global store forwarding across basic block boundaries ─────────
+//
+// The existing store forwarding (Pattern 8) stops at labels and jumps.
+// This pass does a full-function scan that tracks register→slot mappings,
+// allowing store-to-load forwarding to cross fallthrough label boundaries.
+//
+// Key insight: At a label that is only reached by fallthrough (not targeted by
+// any jump), the register state from the previous instruction is fully known.
+// We can safely forward stored values across such labels.
+//
+// For labels that ARE jump targets, we must invalidate all mappings because
+// the jump source may have different register values.
+//
+// This optimization is critical for loops in the stack-based codegen model,
+// where the loop body spans multiple basic blocks separated by labels.
+
+/// A tracked store mapping: we know that stack slot at `offset` contains the
+/// value that was in register `reg_id` with the given `size`.
+#[derive(Clone, Copy)]
+struct SlotMapping {
+    reg_id: RegId,
+    size: MoveSize,
+    /// Index of the store instruction that created this mapping
+    store_idx: usize,
+}
+
+fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
+    let len = lines.len();
+    if len == 0 {
+        return false;
+    }
+
+    // Phase 1: Collect all jump/branch targets so we know which labels are
+    // reachable only by fallthrough.
+    let mut jump_targets = std::collections::HashSet::new();
+    for i in 0..len {
+        match infos[i].kind {
+            LineKind::Jmp | LineKind::CondJmp => {
+                let trimmed = trim_asm(&lines[i]);
+                if let Some(target) = extract_jump_target(trimmed) {
+                    jump_targets.insert(target.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Phase 2: Forward scan with slot→register mappings.
+    // Map: stack offset -> SlotMapping
+    let mut slot_map: std::collections::HashMap<i32, SlotMapping> = std::collections::HashMap::new();
+    // Track which registers currently hold "valid" values (i.e., haven't been
+    // clobbered since the store). Map: reg_id -> set of offsets it's backing.
+    let mut reg_slots: [Vec<i32>; 16] = Default::default();
+    let mut changed = false;
+
+    // Track if the previous non-nop instruction was a jump (meaning the current
+    // label is only reachable from the jump, not fallthrough)
+    let mut prev_was_unconditional_jump = false;
+
+    for i in 0..len {
+        if infos[i].is_nop() || infos[i].kind == LineKind::Empty {
+            continue;
+        }
+
+        match infos[i].kind {
+            LineKind::Label => {
+                let label_name = trim_asm(&lines[i]);
+                let label_name = label_name.strip_suffix(':').unwrap_or(label_name);
+
+                if jump_targets.contains(label_name) {
+                    // This label is a jump target. Multiple predecessors possible.
+                    // Must invalidate all mappings since we don't know what state
+                    // the jumping block leaves registers in.
+                    slot_map.clear();
+                    for rs in reg_slots.iter_mut() {
+                        rs.clear();
+                    }
+                } else if prev_was_unconditional_jump {
+                    // Label after unconditional jump with no other jumps to it:
+                    // unreachable code. Clear state.
+                    slot_map.clear();
+                    for rs in reg_slots.iter_mut() {
+                        rs.clear();
+                    }
+                }
+                // Otherwise: fallthrough-only label. Keep mappings intact.
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::StoreRbp { reg, offset, size } => {
+                // A store updates the mapping for this slot.
+                // First, remove old mapping for this offset if any.
+                if let Some(old) = slot_map.remove(&offset) {
+                    if let Some(slots) = reg_slots.get_mut(old.reg_id as usize) {
+                        slots.retain(|&o| o != offset);
+                    }
+                }
+                // Record the new mapping.
+                if reg != REG_NONE {
+                    slot_map.insert(offset, SlotMapping { reg_id: reg, size, store_idx: i });
+                    if let Some(slots) = reg_slots.get_mut(reg as usize) {
+                        slots.push(offset);
+                    }
+                }
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::LoadRbp { reg: load_reg, offset: load_offset, size: load_size } => {
+                // Check if we have a mapping for this slot.
+                if let Some(&mapping) = slot_map.get(&load_offset) {
+                    if mapping.size == load_size {
+                        // We can forward! Get the register name from the store.
+                        let store_trimmed = trim_asm(&lines[mapping.store_idx]);
+                        if let Some((store_reg_str, _, _)) = parse_store_to_rbp_str(store_trimmed) {
+                            if load_reg == mapping.reg_id {
+                                // Same register: just remove the load.
+                                mark_nop(&mut lines[i], &mut infos[i]);
+                                changed = true;
+                            } else {
+                                // Different register: replace load with reg-to-reg move.
+                                let load_trimmed = trim_asm(&lines[i]);
+                                if let Some((_, load_reg_str, _)) = parse_load_from_rbp_str(load_trimmed) {
+                                    let new_text = format!("    {} {}, {}",
+                                        load_size.mnemonic(), store_reg_str, load_reg_str);
+                                    replace_line(&mut lines[i], &mut infos[i], new_text);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // The load modifies its destination register, which may
+                // invalidate existing mappings backed by that register.
+                if load_reg != REG_NONE {
+                    invalidate_reg(&mut slot_map, &mut reg_slots, load_reg);
+                }
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::Jmp => {
+                // After an unconditional jump, execution continues at the target.
+                // We can't know the state at the target (it may have other
+                // predecessors), so clear everything.
+                slot_map.clear();
+                for rs in reg_slots.iter_mut() {
+                    rs.clear();
+                }
+                prev_was_unconditional_jump = true;
+            }
+
+            LineKind::CondJmp => {
+                // After a conditional jump, execution may fall through to the
+                // next instruction. The fallthrough path preserves register state,
+                // but we must invalidate all mappings because the condition flags
+                // may have been set by modifying a register.
+                // Actually, cond jumps don't modify registers; they just branch.
+                // The register state on the fallthrough path is unchanged.
+                // Keep mappings for the fallthrough path.
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::Call => {
+                // Function calls clobber caller-saved registers.
+                // Caller-saved: rax(0), rcx(1), rdx(2), rsi(6), rdi(7), r8(8), r9(9), r10(10), r11(11)
+                for &r in &[0u8, 1, 2, 6, 7, 8, 9, 10, 11] {
+                    invalidate_reg(&mut slot_map, &mut reg_slots, r);
+                }
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::Ret => {
+                // End of function; clear everything.
+                slot_map.clear();
+                for rs in reg_slots.iter_mut() {
+                    rs.clear();
+                }
+                prev_was_unconditional_jump = true;
+            }
+
+            LineKind::Push | LineKind::Pop => {
+                // Push reads a register, pop writes to one.
+                // Be conservative: pop modifies its register.
+                if infos[i].kind == LineKind::Pop {
+                    let trimmed = trim_asm(&lines[i]);
+                    if let Some(reg_str) = trimmed.strip_prefix("popq ") {
+                        let reg_str = reg_str.trim();
+                        if let Some(fam) = register_family(reg_str) {
+                            invalidate_reg(&mut slot_map, &mut reg_slots, fam);
+                        }
+                    }
+                }
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::Directive => {
+                // Assembly directives don't affect register state.
+                // Don't update prev_was_unconditional_jump.
+            }
+
+            LineKind::Other => {
+                // For any other instruction, check which registers it modifies.
+                let trimmed = trim_asm(&lines[i]);
+                // Conservative: invalidate registers that appear as destinations.
+                if let Some((_op, operands)) = trimmed.split_once(' ') {
+                    if let Some((_src, dst)) = operands.rsplit_once(',') {
+                        let dst = dst.trim();
+                        if let Some(fam) = register_family(dst) {
+                            invalidate_reg(&mut slot_map, &mut reg_slots, fam);
+                        }
+                    } else {
+                        // Single-operand instructions: inc, dec, not, neg, etc.
+                        let operand = operands.trim();
+                        if trimmed.starts_with("inc") || trimmed.starts_with("dec")
+                            || trimmed.starts_with("not") || trimmed.starts_with("neg")
+                        {
+                            if let Some(fam) = register_family(operand) {
+                                invalidate_reg(&mut slot_map, &mut reg_slots, fam);
+                            }
+                        }
+                    }
+                }
+                // Some instructions implicitly write rax (e.g., cltq, cqto, div, idiv, mul)
+                if trimmed == "cltq" || trimmed == "cqto" || trimmed == "cdq" || trimmed == "cqo"
+                    || trimmed.starts_with("div") || trimmed.starts_with("idiv")
+                    || trimmed.starts_with("mul") || trimmed.starts_with("imul")
+                {
+                    invalidate_reg(&mut slot_map, &mut reg_slots, 0); // rax
+                    // div/idiv/mul also clobber rdx
+                    if trimmed.starts_with("div") || trimmed.starts_with("idiv")
+                        || trimmed.starts_with("mul")
+                    {
+                        invalidate_reg(&mut slot_map, &mut reg_slots, 2); // rdx
+                    }
+                }
+                // movzbq, movzwq, movsbq, movswq, movslq with %rax as dest
+                if (trimmed.starts_with("movzbq ") || trimmed.starts_with("movzwq ")
+                    || trimmed.starts_with("movsbq ") || trimmed.starts_with("movswq ")
+                    || trimmed.starts_with("movslq "))
+                    && trimmed.ends_with("%rax")
+                {
+                    invalidate_reg(&mut slot_map, &mut reg_slots, 0);
+                }
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::SetCC => {
+                // setCC writes to %al, which is part of rax (family 0).
+                invalidate_reg(&mut slot_map, &mut reg_slots, 0);
+                prev_was_unconditional_jump = false;
+            }
+
+            LineKind::Cmp => {
+                // cmp/test don't modify registers, only flags.
+                prev_was_unconditional_jump = false;
+            }
+
+            _ => {
+                prev_was_unconditional_jump = false;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Remove all slot mappings backed by a given register.
+fn invalidate_reg(
+    slot_map: &mut std::collections::HashMap<i32, SlotMapping>,
+    reg_slots: &mut [Vec<i32>; 16],
+    reg_id: RegId,
+) {
+    if let Some(slots) = reg_slots.get_mut(reg_id as usize) {
+        for &offset in slots.iter() {
+            // Only remove if the mapping is still for this register
+            // (it may have been overwritten by a store from a different register)
+            if let Some(mapping) = slot_map.get(&offset) {
+                if mapping.reg_id == reg_id {
+                    slot_map.remove(&offset);
+                }
+            }
+        }
+        slots.clear();
+    }
+}
+
+/// Extract the jump target label from a jump/branch instruction.
+fn extract_jump_target(s: &str) -> Option<&str> {
+    // Handle: jmp .L1, je .L1, jne .L1, etc.
+    if let Some(rest) = s.strip_prefix("jmp ") {
+        return Some(rest.trim());
+    }
+    // Conditional jumps: j<cc> <target>
+    if s.starts_with('j') {
+        if let Some(space) = s.find(' ') {
+            return Some(s[space + 1..].trim());
+        }
+    }
+    None
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1372,6 +1677,78 @@ mod tests {
             assert!(result.contains(&format!("{} .L1", expected_jcc)),
                 "cc={} should produce {}: {}", cc, expected_jcc, result);
         }
+    }
+
+    #[test]
+    fn test_global_store_forward_across_fallthrough_label() {
+        // Store before a fallthrough-only label should be forwarded to a load after it
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    movq %rcx, -32(%rbp)",
+            ".Lfallthrough:",                  // Not a jump target, only fallthrough
+            "    movq -24(%rbp), %rax",        // Should be eliminated (same reg)
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(!result.contains("-24(%rbp), %rax"),
+            "should forward across fallthrough label: {}", result);
+    }
+
+    #[test]
+    fn test_global_store_forward_blocked_at_jump_target() {
+        // Store before a label that is a jump target should NOT be forwarded
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    jmp .Lskip",
+            ".Ltarget:",                       // This label is jumped to
+            "    movq -24(%rbp), %rax",        // Should NOT be eliminated
+            ".Lskip:",
+            "    ret",
+            "    jmp .Ltarget",                // Jump to .Ltarget
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The load at .Ltarget should remain because .Ltarget has unknown predecessor state
+        assert!(result.contains("-24(%rbp), %rax") || result.contains("-24(%rbp),"),
+            "should NOT forward across jump target: {}", result);
+    }
+
+    #[test]
+    fn test_global_store_forward_across_cond_branch() {
+        // Store before a conditional branch should be forwarded on the fallthrough path
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    cmpq %rcx, %rax",
+            "    jne .Lother",
+            "    movq -24(%rbp), %rdx",        // Fallthrough: should get forwarded
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("movq %rax, %rdx"),
+            "should forward on fallthrough after cond branch: {}", result);
+    }
+
+    #[test]
+    fn test_global_store_forward_invalidated_by_call() {
+        // Stores should be invalidated across function calls (caller-saved regs)
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    callq some_func",
+            "    movq -24(%rbp), %rax",        // Should NOT be eliminated (rax clobbered)
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("-24(%rbp), %rax"),
+            "should not forward across call (rax clobbered): {}", result);
+    }
+
+    #[test]
+    fn test_global_store_forward_callee_saved_across_call() {
+        // Callee-saved registers (rbx, r12-r15) should survive across calls
+        let asm = [
+            "    movq %rbx, -24(%rbp)",
+            "    callq some_func",
+            "    movq -24(%rbp), %rbx",        // Should be eliminated (rbx is callee-saved)
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(!result.contains("-24(%rbp), %rbx"),
+            "should forward callee-saved reg across call: {}", result);
     }
 
     #[test]

@@ -137,12 +137,15 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
 ///
 /// Register cache management strategy:
 /// The cache tracks which IR value is currently in the accumulator register
-/// (rax on x86, x0 on ARM, t0 on RISC-V). It is only preserved across
-/// Copy instructions, where the pattern is guaranteed safe:
-///   emit_load_operand(src) → emit_store_result(dest)
-/// with no intermediate rax clobbering. All other instructions invalidate
-/// the cache after execution to avoid stale entries from internal register
-/// manipulation (push/pop, typed loads, ABI setup, etc.).
+/// (rax on x86, x0 on ARM, t0 on RISC-V).
+///
+/// Many instructions follow the pattern: load operand(s) → compute → store_result(dest),
+/// which means the accumulator holds dest's value when the instruction completes.
+/// For these "acc-preserving" instructions, we keep the cache valid so the next
+/// instruction can skip reloading the result.
+///
+/// Instructions that clobber the accumulator unpredictably (calls, stores, atomics,
+/// inline asm, va_arg, memcpy, etc.) invalidate the cache after execution.
 fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
     match inst {
         Instruction::Alloca { .. } => {
@@ -166,25 +169,77 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
                 // acc now holds dest's value; store_result already set the cache.
             }
         }
-        // All other instructions: dispatch then invalidate.
-        // The cache benefit from Copy chains (common after phi elimination)
-        // is preserved because consecutive Copies don't invalidate.
+
+        // ── Acc-preserving instructions ──────────────────────────────────
+        // These all end with emit_store_result(dest) or store_rax_to(dest),
+        // which sets the reg cache correctly. The accumulator holds dest's
+        // value after execution, so we do NOT invalidate.
+
+        Instruction::Load { dest, ptr, ty } => {
+            // emit_load ends with emit_store_result(dest) for non-i128.
+            // For i128, it ends with emit_store_acc_pair(dest).
+            cg.emit_load(dest, ptr, *ty);
+            if is_i128_type(*ty) {
+                cg.state().reg_cache.invalidate_all();
+            }
+            // Non-i128: cache is set by emit_store_result(dest) inside emit_load.
+        }
+        Instruction::BinOp { dest, op, lhs, rhs, ty } => {
+            // emit_binop dispatches to emit_int_binop (ends with store_rax_to),
+            // emit_float_binop (ends with emit_store_result), or emit_i128_binop.
+            cg.emit_binop(dest, *op, lhs, rhs, *ty);
+            if is_i128_type(*ty) {
+                cg.state().reg_cache.invalidate_all();
+            }
+            // Non-i128: cache is set by store_rax_to(dest) / emit_store_result(dest).
+        }
+        Instruction::UnaryOp { dest, op, src, ty } => {
+            // emit_unaryop ends with emit_store_result(dest) for non-i128.
+            cg.emit_unaryop(dest, *op, src, *ty);
+            if is_i128_type(*ty) {
+                cg.state().reg_cache.invalidate_all();
+            }
+        }
+        Instruction::Cmp { dest, op, lhs, rhs, ty } => {
+            // emit_cmp ends with store_rax_to(dest) for each backend.
+            cg.emit_cmp(dest, *op, lhs, rhs, *ty);
+            // Cmp result is always i32/i8, never i128. Cache is valid.
+        }
+        Instruction::Cast { dest, src, from_ty, to_ty } => {
+            // emit_cast ends with emit_store_result(dest) for non-i128 paths.
+            cg.emit_cast(dest, src, *from_ty, *to_ty);
+            if is_i128_type(*to_ty) || is_i128_type(*from_ty) {
+                cg.state().reg_cache.invalidate_all();
+            }
+        }
+        Instruction::GetElementPtr { dest, base, offset, .. } => {
+            // emit_gep ends with emit_store_result(dest).
+            cg.emit_gep(dest, base, offset);
+            // Cache is set by emit_store_result(dest) inside emit_gep.
+        }
+        Instruction::GlobalAddr { dest, name } => {
+            // emit_global_addr loads an address and stores to dest.
+            cg.emit_global_addr(dest, name);
+            // The implementation calls emit_store_result(dest), so cache is valid.
+        }
+        Instruction::LabelAddr { dest, label } => {
+            let label_str = label.as_label();
+            cg.emit_label_addr(dest, &label_str);
+            // emit_label_addr calls emit_store_result(dest).
+        }
+
+        // ── Cache-invalidating instructions ──────────────────────────────
+        // These clobber the accumulator unpredictably or don't produce a
+        // simple acc → dest result.
+
         _ => {
-            // Dispatch to the appropriate arch method
             match inst {
                 Instruction::DynAlloca { dest, size, align } => cg.emit_dyn_alloca(dest, size, *align),
                 Instruction::Store { val, ptr, ty } => cg.emit_store(val, ptr, *ty),
-                Instruction::Load { dest, ptr, ty } => cg.emit_load(dest, ptr, *ty),
-                Instruction::BinOp { dest, op, lhs, rhs, ty } => cg.emit_binop(dest, *op, lhs, rhs, *ty),
-                Instruction::UnaryOp { dest, op, src, ty } => cg.emit_unaryop(dest, *op, src, *ty),
-                Instruction::Cmp { dest, op, lhs, rhs, ty } => cg.emit_cmp(dest, *op, lhs, rhs, *ty),
                 Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes } =>
                     cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes),
                 Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes } =>
                     cg.emit_call(args, arg_types, None, Some(func_ptr), *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes),
-                Instruction::GlobalAddr { dest, name } => cg.emit_global_addr(dest, name),
-                Instruction::Cast { dest, src, from_ty, to_ty } => cg.emit_cast(dest, src, *from_ty, *to_ty),
-                Instruction::GetElementPtr { dest, base, offset, .. } => cg.emit_gep(dest, base, offset),
                 Instruction::Memcpy { dest, src, size } => cg.emit_memcpy(dest, src, *size),
                 Instruction::VaArg { dest, va_list_ptr, result_ty } => cg.emit_va_arg(dest, va_list_ptr, *result_ty),
                 Instruction::VaStart { va_list_ptr } => cg.emit_va_start(va_list_ptr),
@@ -197,10 +252,6 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
                 Instruction::AtomicStore { ptr, val, ty, ordering } => cg.emit_atomic_store(ptr, val, *ty, *ordering),
                 Instruction::Fence { ordering } => cg.emit_fence(*ordering),
                 Instruction::Phi { .. } => { /* resolved before codegen */ }
-                Instruction::LabelAddr { dest, label } => {
-                    let label_str = label.as_label();
-                    cg.emit_label_addr(dest, &label_str);
-                }
                 Instruction::GetReturnF64Second { dest } => cg.emit_get_return_f64_second(dest),
                 Instruction::SetReturnF64Second { src } => cg.emit_set_return_f64_second(src),
                 Instruction::GetReturnF32Second { dest } => cg.emit_get_return_f32_second(dest),
@@ -208,7 +259,11 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
                 Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types, goto_labels } =>
                     cg.emit_inline_asm(template, outputs, inputs, clobbers, operand_types, goto_labels),
                 Instruction::Intrinsic { dest, op, dest_ptr, args } => cg.emit_intrinsic(dest, op, dest_ptr, args),
-                Instruction::Alloca { .. } | Instruction::Copy { .. } => unreachable!(),
+                Instruction::Alloca { .. } | Instruction::Copy { .. }
+                | Instruction::Load { .. } | Instruction::BinOp { .. }
+                | Instruction::UnaryOp { .. } | Instruction::Cmp { .. }
+                | Instruction::Cast { .. } | Instruction::GetElementPtr { .. }
+                | Instruction::GlobalAddr { .. } | Instruction::LabelAddr { .. } => unreachable!(),
             }
             cg.state().reg_cache.invalidate_all();
         }
