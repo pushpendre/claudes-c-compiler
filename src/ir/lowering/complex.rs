@@ -871,13 +871,7 @@ impl Lowerer {
             // Real number literal -> (val, 0)
             _ => {
                 if let Some(val) = self.eval_const_expr(expr) {
-                    let f = match val {
-                        IrConst::F64(v) => v,
-                        IrConst::F32(v) => v as f64,
-                        IrConst::I64(v) => v as f64,
-                        IrConst::I32(v) => v as f64,
-                        _ => return None,
-                    };
+                    let f = val.to_f64()?;
                     Some((f, 0.0))
                 } else {
                     None
