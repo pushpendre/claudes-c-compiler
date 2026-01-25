@@ -1,0 +1,23 @@
+Task: Intern struct/union layout key strings in CType for faster cloning
+
+PROBLEM:
+Profiling SQLite compilation shows ~14% of time in malloc/free, with CType::clone
+being a major driver. The Struct(String) and Union(String) variants allocate a new
+heap String on every clone. These are the most commonly cloned compound types.
+
+APPROACH:
+Replace CType::Struct(String) and CType::Union(String) with
+CType::Struct(Rc<str>) and CType::Union(Rc<str>). Rc<str> cloning is a
+single reference count increment (essentially free) vs deep String cloning.
+
+Also convert EnumType.name and EnumType.variants to use Rc<str> where beneficial.
+
+SCOPE:
+- Change CType enum variants to use Rc<str>
+- Update all creation sites (~7 across sema, type_checker, const_eval, lowering)
+- Update all consumption sites (~80+ across 18 files)
+- Most consumption sites use &str references so they just need .as_ref() or &*
+- format!() key construction sites need .into() or Rc::from()
+
+EXPECTED IMPACT:
+Significant reduction in malloc/free overhead for struct/union-heavy code like SQLite.
