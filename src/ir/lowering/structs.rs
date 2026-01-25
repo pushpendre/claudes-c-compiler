@@ -454,17 +454,21 @@ impl Lowerer {
                         }
                     }
                 }
-                // Check if this variable has struct layout info (pointer to struct)
+                // Check if this variable has struct layout info (pointer to struct).
+                // Prefer live lookup from struct_layouts over the VarInfo snapshot,
+                // because the snapshot may be stale when a struct tag is redefined
+                // in the current scope (the VarInfo was captured at declaration time
+                // before the full struct definition was processed).
                 if let Some(vi) = self.lookup_var_info(name) {
-                    if let Some(ref layout) = vi.struct_layout {
-                        return Some(layout.clone());
-                    }
-                    // Fallback: resolve from c_type if layout was not available at declaration time
-                    // (forward-declared struct pointer case)
+                    // First try live lookup via c_type -> struct_layouts map
                     if let Some(ref ct) = vi.c_type {
                         if let Some(layout) = self.resolve_struct_from_pointer_ctype(ct) {
                             return Some(layout);
                         }
+                    }
+                    // Fall back to the snapshot captured at declaration time
+                    if let Some(ref layout) = vi.struct_layout {
+                        return Some(layout.clone());
                     }
                 }
                 // Fallback: resolve struct layout from the variable's CType

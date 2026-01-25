@@ -266,4 +266,50 @@ impl TypeContext {
             }
         }
     }
+
+    /// Insert a struct layout from a &self context (interior mutability),
+    /// tracking the change in the current scope frame so it can be undone
+    /// on scope exit. This is the scoped equivalent of `insert_struct_layout_from_ref`.
+    ///
+    /// Used by `type_spec_to_ctype` which takes &self but still needs to
+    /// properly scope struct layout insertions within function bodies.
+    pub fn insert_struct_layout_scoped_from_ref(&self, key: &str, layout: StructLayout) {
+        // SAFETY: Single-threaded; no references into struct_layouts or scope_stack
+        // are held across this call.
+        let layouts_ptr = &self.struct_layouts as *const FxHashMap<String, StructLayout>
+            as *mut FxHashMap<String, StructLayout>;
+        let stack_ptr = &self.scope_stack as *const Vec<TypeScopeFrame>
+            as *mut Vec<TypeScopeFrame>;
+        unsafe {
+            if let Some(frame) = (*stack_ptr).last_mut() {
+                if let Some(prev) = (*layouts_ptr).get(key).cloned() {
+                    frame.struct_layouts_shadowed.push((key.to_string(), prev));
+                } else {
+                    frame.struct_layouts_added.push(key.to_string());
+                }
+            }
+            (*layouts_ptr).insert(key.to_string(), layout);
+        }
+    }
+
+    /// Invalidate a ctype_cache entry from a &self context, tracking the change
+    /// in the current scope frame so it can be restored on scope exit.
+    pub fn invalidate_ctype_cache_scoped_from_ref(&self, key: &str) {
+        let prev = {
+            let mut cache = self.ctype_cache.borrow_mut();
+            cache.remove(key)
+        };
+        // SAFETY: Single-threaded; no references into scope_stack held across this call.
+        let stack_ptr = &self.scope_stack as *const Vec<TypeScopeFrame>
+            as *mut Vec<TypeScopeFrame>;
+        unsafe {
+            if let Some(frame) = (*stack_ptr).last_mut() {
+                if let Some(prev) = prev {
+                    frame.ctype_cache_shadowed.push((key.to_string(), prev));
+                } else {
+                    frame.ctype_cache_added.push(key.to_string());
+                }
+            }
+        }
+    }
 }

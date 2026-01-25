@@ -1105,18 +1105,19 @@ impl Lowerer {
         let max_field_align = if is_packed { Some(1) } else { pragma_pack };
 
         if let Some(fs) = fields {
-            // Inline definition with fields: check cache first for named types.
-            // Only return cached if it has a non-zero size (not a forward-declaration stub).
-            // Forward-declared structs get cached with size 0 and must be recomputed
-            // when the full definition becomes available.
+            // Inline definition with fields: check if register_struct_type already
+            // inserted the definitive layout for this named struct/union.
+            // If so, skip re-computing and re-inserting (which would corrupt the
+            // scope undo-log with a redundant shadow entry).
+            // Only skip when the existing layout has fields (not a forward-declaration stub).
             if let Some(tag) = name {
                 let cache_key = format!("{}.{}", prefix, tag);
-                if let Some(cached) = self.types.ctype_cache.borrow().get(&cache_key) {
-                    let cached_size = cached.size();
-                    if cached_size > 0 {
-                        return cached.clone();
+                if let Some(existing) = self.types.struct_layouts.get(&cache_key) {
+                    if !existing.fields.is_empty() {
+                        let result = wrap(cache_key.clone());
+                        self.types.ctype_cache.borrow_mut().insert(cache_key, result.clone());
+                        return result;
                     }
-                    // Cached entry has size 0 (forward-declaration stub) - recompute below
                 }
             }
             let struct_fields: Vec<StructField> = fs.iter().map(|f| {
@@ -1161,8 +1162,8 @@ impl Lowerer {
                 let id = self.types.next_anon_struct_id();
                 format!("__anon_struct_{}", id)
             };
-            self.types.insert_struct_layout_from_ref(&key, layout);
-            self.types.invalidate_ctype_cache_from_ref(&key);
+            self.types.insert_struct_layout_scoped_from_ref(&key, layout);
+            self.types.invalidate_ctype_cache_scoped_from_ref(&key);
             let result = wrap(key.clone());
             self.types.ctype_cache.borrow_mut().insert(key, result.clone());
             result
