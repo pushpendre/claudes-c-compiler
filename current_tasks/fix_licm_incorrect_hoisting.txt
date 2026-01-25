@@ -1,0 +1,21 @@
+Fix LICM pass: incorrect loop-invariant code hoisting
+
+Problem:
+The LICM (Loop-Invariant Code Motion) pass incorrectly hoists instructions
+out of loops, producing wrong code. This causes postgres initdb to fail
+with "invalid checkpoint record" / WAL corruption.
+
+Diagnosis:
+- postgres -O0: PASS
+- postgres -O1: PASS (no LICM)
+- postgres -O2 with LICM disabled: PASS
+- postgres -O2 with LICM enabled: FAIL (even with 1 iteration)
+
+The LICM pass is hoisting something that has side effects or depends on
+loop-varying values. The bug is in src/passes/licm.rs.
+
+Fix plan:
+1. Read and understand the LICM pass
+2. Create a minimal reproducer
+3. Fix the invariant analysis to correctly handle the failing case
+4. Verify postgres passes with the fix
