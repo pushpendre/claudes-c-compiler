@@ -1,0 +1,10 @@
+Implement -fpatchable-function-entry=N,M support
+
+The kernel uses -fpatchable-function-entry=16,16 which requires:
+1. Emitting M NOP bytes before the function entry point
+2. Emitting N-M NOP bytes after (currently N==M so 0 after)
+3. Emitting __patchable_function_entries section with pointers to the NOP areas
+4. Parsing the CLI flag
+
+Without this, kernel boot hangs because ftrace/static call patching cannot work.
+This causes boot FAILs for many kernel files (e.g., tbinstal.c, ttm_execbuf_util.c, ohci-pci.c).
