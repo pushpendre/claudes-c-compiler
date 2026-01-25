@@ -2455,7 +2455,14 @@ impl InlineAsmEmitter for RiscvCodegen {
             }
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    if is_addr || (!is_addr && self.state.is_alloca(v.0)) {
+                    if is_addr && self.state.is_alloca(v.0) {
+                        // Alloca: stack slot IS the variable's memory, compute its address
+                        self.emit_addi_s0(reg, slot.0);
+                    } else if is_addr {
+                        // Non-alloca: stack slot holds a pointer value, load it
+                        self.emit_load_from_s0(reg, slot.0, "ld");
+                    } else if self.state.is_alloca(v.0) {
+                        // Non-address alloca: compute address for "r"/"=r" constraint
                         self.emit_addi_s0(reg, slot.0);
                     } else if is_fp {
                         self.emit_load_from_s0(reg, slot.0, "fld");
@@ -2472,7 +2479,13 @@ impl InlineAsmEmitter for RiscvCodegen {
         if let Some(slot) = self.state.get_slot(ptr.0) {
             match &op.kind {
                 AsmOperandKind::Address => {
-                    self.emit_addi_s0(&reg, slot.0);
+                    if self.state.is_alloca(ptr.0) {
+                        // Alloca: stack slot IS the variable, compute its address
+                        self.emit_addi_s0(&reg, slot.0);
+                    } else {
+                        // Non-alloca: stack slot holds a pointer value, load it
+                        self.emit_load_from_s0(&reg, slot.0, "ld");
+                    }
                 }
                 AsmOperandKind::FpReg => {
                     self.emit_load_from_s0(&reg, slot.0, "fld");

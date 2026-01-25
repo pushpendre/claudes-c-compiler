@@ -763,6 +763,13 @@ impl Lowerer {
             return items.len();
         }
 
+        // Build per-field flat scalar counts for mapping fields_consumed to field index
+        let field_scalar_counts: Vec<usize> = layout
+            .fields
+            .iter()
+            .map(|f| self.flat_scalar_count(&f.ty))
+            .collect();
+
         let mut max_idx = 0usize;
         let mut current_idx = 0usize;
         let mut fields_consumed = 0usize;
@@ -800,8 +807,21 @@ impl Lowerer {
                     current_idx += 1;
                 }
             } else {
-                // Flat init: this scalar fills one slot of the current struct element
-                fields_consumed += 1;
+                // Flat init: determine how many scalar slots this item consumes.
+                // A string literal initializing a char/wchar_t array field fills the
+                // entire array, not just one scalar slot.
+                let slots = if self.flat_init_item_is_string_for_char_array(
+                    &item.init,
+                    fields_consumed,
+                    &field_scalar_counts,
+                    layout,
+                ) {
+                    // String literal fills the entire current char array field
+                    self.remaining_scalars_in_current_field(fields_consumed, &field_scalar_counts)
+                } else {
+                    1
+                };
+                fields_consumed += slots;
                 if fields_consumed >= flat_count {
                     // Completed one struct element
                     if current_idx >= max_idx {
@@ -821,6 +841,63 @@ impl Lowerer {
         }
 
         max_idx
+    }
+
+    /// Check if a flat initializer item is a string literal that initializes a char array field.
+    fn flat_init_item_is_string_for_char_array(
+        &self,
+        init: &Initializer,
+        fields_consumed: usize,
+        field_scalar_counts: &[usize],
+        layout: &StructLayout,
+    ) -> bool {
+        let is_string = matches!(
+            init,
+            Initializer::Expr(Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _))
+        );
+        if !is_string {
+            return false;
+        }
+        // Find which field index corresponds to fields_consumed
+        let mut remaining = fields_consumed;
+        for (fi, &count) in field_scalar_counts.iter().enumerate() {
+            if remaining < count {
+                // This is the field at index fi, check if it's a char/wchar_t array
+                return Self::is_char_array_type(&layout.fields[fi].ty);
+            }
+            remaining -= count;
+        }
+        false
+    }
+
+    /// Compute how many scalar slots remain in the current field given a flat position.
+    fn remaining_scalars_in_current_field(
+        &self,
+        fields_consumed: usize,
+        field_scalar_counts: &[usize],
+    ) -> usize {
+        let mut remaining = fields_consumed;
+        for &count in field_scalar_counts {
+            if remaining < count {
+                return count - remaining;
+            }
+            remaining -= count;
+        }
+        1
+    }
+
+    /// Check if a CType is a char or wchar_t array (eligible for string literal initialization).
+    fn is_char_array_type(ty: &CType) -> bool {
+        match ty {
+            CType::Array(elem, _) => {
+                matches!(
+                    elem.as_ref(),
+                    CType::Char | CType::UChar
+                    | CType::Int | CType::UInt
+                )
+            }
+            _ => false,
+        }
     }
 
     /// Evaluate a constant expression and return as usize (for array index designators).
