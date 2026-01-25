@@ -1,0 +1,12 @@
+ARM Backend Register Allocator Integration
+
+Integrate the existing linear scan register allocator (regalloc.rs) into the ARM/AArch64 backend.
+
+This mirrors the existing x86 and RISC-V integrations:
+1. Add ARM_CALLEE_SAVED constant (x19-x28, up to 10 registers)
+2. Add reg_assignments and used_callee_saved fields to ArmCodegen
+3. Call regalloc::allocate_registers in calculate_stack_space
+4. Save/restore callee-saved registers in prologue/epilogue
+5. Use reg_assignments in operand_to_x0, store_x0_to, emit_load_ptr_from_slot,
+   emit_slot_addr_to_secondary, and other key methods
+6. Add register-direct paths for emit_copy_value and emit_int_binop
