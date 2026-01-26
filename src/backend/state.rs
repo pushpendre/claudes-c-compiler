@@ -181,6 +181,8 @@ impl CodegenState {
         self.i128_values.clear();
         self.has_dyn_alloca = false;
         self.reg_cache.invalidate_all();
+        self.f128_direct_slots.clear();
+        self.f128_load_sources.clear();
     }
 
     /// Get the over-alignment requirement for an alloca (> 16 bytes), or None.

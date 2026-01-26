@@ -2,7 +2,7 @@ use crate::ir::ir::*;
 use crate::common::types::IrType;
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::backend::common::PtrDirective;
-use crate::backend::state::{CodegenState, StackSlot};
+use crate::backend::state::{CodegenState, StackSlot, SlotAddr};
 use crate::backend::traits::ArchCodegen;
 use crate::backend::generation::{generate_module, is_i128_type, calculate_stack_space_common, find_param_alloca};
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass, compute_stack_arg_space};
@@ -120,6 +120,10 @@ pub struct RiscvCodegen {
     reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are used and need save/restore.
     used_callee_saved: Vec<PhysReg>,
+    /// Maps F128 load result value ID -> (source alloca/ptr ID, byte offset).
+    /// Used by emit_f128_operand_to_a0_a1 to reload the full 16-byte f128
+    /// from the original memory location for comparisons.
+    f128_load_sources: FxHashMap<u32, (u32, i64)>,
 }
 
 impl RiscvCodegen {
@@ -134,6 +138,7 @@ impl RiscvCodegen {
             asm_fp_scratch_idx: 0,
             reg_assignments: FxHashMap::default(),
             used_callee_saved: Vec::new(),
+            f128_load_sources: FxHashMap::default(),
         }
     }
 
@@ -993,6 +998,280 @@ impl RiscvCodegen {
             self.store_t0_to(d);
         }
     }
+
+    // ---- F128 soft-float helpers ----
+
+    /// Load an F128 operand into a0:a1 (RISC-V GP register pair) with full precision.
+    /// For LongDouble constants, uses the x87 bytes converted to f128 directly (no f64 roundtrip).
+    /// For Value operands in 16-byte stack slots, loads the full f128 directly from the slot.
+    /// For other runtime values, converts the f64 approximation via __extenddftf2.
+    fn emit_f128_operand_to_a0_a1(&mut self, op: &Operand) {
+        if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
+            // Full-precision path: convert x87 bytes to IEEE f128 bytes and load directly.
+            let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
+            let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
+            let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
+            self.state.emit_fmt(format_args!("    li a0, {}", lo as i64));
+            self.state.emit_fmt(format_args!("    li a1, {}", hi as i64));
+        } else if let Operand::Value(v) = op {
+            // Try to load the full 16-byte f128 from the original memory location
+            // that this value was loaded from (tracked by f128_load_sources with offset).
+            // The alloca stores the full IEEE f128 (16 bytes), preserving quad precision.
+            if let Some(&(alloca_id, offset)) = self.f128_load_sources.get(&v.0) {
+                let addr = self.state.resolve_slot_addr(alloca_id);
+                if let Some(addr) = addr {
+                    match addr {
+                        SlotAddr::Direct(slot) => {
+                            let effective = slot.0 + offset;
+                            self.emit_load_from_s0("a0", effective, "ld");
+                            self.emit_load_from_s0("a1", effective + 8, "ld");
+                        }
+                        SlotAddr::OverAligned(slot, id) => {
+                            self.emit_alloca_aligned_addr(slot, id);
+                            if offset != 0 {
+                                self.emit_add_offset_to_addr_reg(offset);
+                            }
+                            self.state.emit("    ld a0, 0(t5)");
+                            self.state.emit("    ld a1, 8(t5)");
+                        }
+                        SlotAddr::Indirect(slot) => {
+                            self.emit_load_ptr_from_slot(slot, alloca_id);
+                            if offset != 0 {
+                                self.emit_add_offset_to_addr_reg(offset);
+                            }
+                            self.state.emit("    ld a0, 0(t5)");
+                            self.state.emit("    ld a1, 8(t5)");
+                        }
+                    }
+                    return;
+                }
+            }
+            // Fallback: load f64 approximation and convert to f128 via libcall.
+            self.operand_to_t0(op);
+            self.state.emit("    fmv.d.x fa0, t0");
+            self.state.emit("    call __extenddftf2");
+        } else {
+            // Other operands: load f64 approximation and convert to f128 via libcall.
+            self.operand_to_t0(op);
+            self.state.emit("    fmv.d.x fa0, t0");
+            self.state.emit("    call __extenddftf2");
+        }
+    }
+
+    // ---- F128 soft-float comparison ----
+
+    /// Emit F128 (long double) comparison via soft-float library calls.
+    /// RISC-V LP64D ABI: f128 args in GP register pairs a0:a1 and a2:a3,
+    /// integer result in a0.
+    ///
+    /// Libcall return value semantics (matching libgcc/compiler-rt):
+    ///   __eqtf2(a,b): returns 0 if a==b, non-zero otherwise
+    ///   __lttf2(a,b): returns <0 if a<b, 0 if a==b, >0 if a>b, 1 if unordered
+    ///   __letf2(a,b): returns <=0 if a<=b, >0 if a>b, 1 if unordered
+    ///   __gttf2(a,b): returns >0 if a>b, 0 if a==b, <0 if a<b, -1 if unordered
+    ///   __getf2(a,b): returns >=0 if a>=b, <0 if a<b, -1 if unordered
+    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        // Step 1: Load LHS f128 into a0:a1, save to stack temp.
+        self.emit_addi_sp(-16);
+        self.emit_f128_operand_to_a0_a1(lhs);
+        self.state.emit("    sd a0, 0(sp)");
+        self.state.emit("    sd a1, 8(sp)");
+
+        // Step 2: Load RHS f128 into a0:a1, then move to a2:a3.
+        self.emit_f128_operand_to_a0_a1(rhs);
+        self.state.emit("    mv a2, a0");
+        self.state.emit("    mv a3, a1");
+
+        // Step 3: Load saved LHS f128 from stack temp into a0:a1 (first arg).
+        self.state.emit("    ld a0, 0(sp)");
+        self.state.emit("    ld a1, 8(sp)");
+
+        // Free temp stack space.
+        self.emit_addi_sp(16);
+
+        // Step 4: Call the appropriate comparison libcall and map result to boolean.
+        match op {
+            IrCmpOp::Eq => {
+                // __eqtf2 returns 0 if equal
+                self.state.emit("    call __eqtf2");
+                self.state.emit("    seqz t0, a0");
+            }
+            IrCmpOp::Ne => {
+                // __eqtf2 returns 0 if equal, non-zero otherwise
+                self.state.emit("    call __eqtf2");
+                self.state.emit("    snez t0, a0");
+            }
+            IrCmpOp::Slt | IrCmpOp::Ult => {
+                // __lttf2 returns <0 if a<b (1 if unordered, so not <0)
+                self.state.emit("    call __lttf2");
+                self.state.emit("    slti t0, a0, 0");
+            }
+            IrCmpOp::Sle | IrCmpOp::Ule => {
+                // __letf2 returns <=0 if a<=b (1 if unordered)
+                self.state.emit("    call __letf2");
+                // t0 = (a0 <= 0) = (a0 < 1)
+                self.state.emit("    slti t0, a0, 1");
+            }
+            IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                // __gttf2 returns >0 if a>b (-1 if unordered, so not >0)
+                self.state.emit("    call __gttf2");
+                // t0 = (a0 > 0): 0 < a0
+                self.state.emit("    li t0, 0");
+                self.state.emit("    slt t0, t0, a0");
+            }
+            IrCmpOp::Sge | IrCmpOp::Uge => {
+                // __getf2 returns >=0 if a>=b (-1 if unordered)
+                self.state.emit("    call __getf2");
+                // t0 = (a0 >= 0) = !(a0 < 0)
+                self.state.emit("    slti t0, a0, 0");
+                self.state.emit("    xori t0, t0, 1");
+            }
+        }
+        self.state.reg_cache.invalidate_all();
+        self.store_t0_to(dest);
+    }
+
+    // ---- F128 soft-float arithmetic ----
+
+    /// Emit F128 (long double) binary operation via soft-float library calls.
+    /// Called when t1 = lhs (f64 bits), t0 = rhs (f64 bits).
+    /// Converts both operands from f64 to f128, calls the libcall, converts result back to f64.
+    fn emit_f128_binop_softfloat(&mut self, mnemonic: &str) {
+        let libcall = match mnemonic {
+            "fadd" => "__addtf3",
+            "fsub" => "__subtf3",
+            "fmul" => "__multf3",
+            "fdiv" => "__divtf3",
+            _ => {
+                // Unknown op: fall back to f64 hardware path
+                self.state.emit("    mv t2, t0");
+                self.state.emit("    fmv.d.x ft0, t1");
+                self.state.emit("    fmv.d.x ft1, t2");
+                self.state.emit_fmt(format_args!("    {}.d ft0, ft0, ft1", mnemonic));
+                self.state.emit("    fmv.x.d t0, ft0");
+                return;
+            }
+        };
+
+        // Allocate 24 bytes: 8 for rhs f64 save, 16 for lhs f128 save
+        self.emit_addi_sp(-24);
+        // Save rhs f64 bit pattern
+        self.state.emit("    sd t0, 16(sp)");
+        // Convert lhs (t1) from f64 to f128
+        self.state.emit("    fmv.d.x fa0, t1");
+        self.state.emit("    call __extenddftf2");
+        // Save lhs f128 (a0:a1)
+        self.state.emit("    sd a0, 0(sp)");
+        self.state.emit("    sd a1, 8(sp)");
+        // Load rhs f64 and convert to f128
+        self.state.emit("    ld t0, 16(sp)");
+        self.state.emit("    fmv.d.x fa0, t0");
+        self.state.emit("    call __extenddftf2");
+        // RHS f128 now in a0:a1, move to a2:a3 (second arg)
+        self.state.emit("    mv a2, a0");
+        self.state.emit("    mv a3, a1");
+        // Load LHS f128 back to a0:a1 (first arg)
+        self.state.emit("    ld a0, 0(sp)");
+        self.state.emit("    ld a1, 8(sp)");
+        // Call the arithmetic libcall: result f128 in a0:a1
+        self.state.emit_fmt(format_args!("    call {}", libcall));
+        // Convert result f128 back to f64 via __trunctfdf2
+        self.state.emit("    call __trunctfdf2");
+        // f64 result in fa0, move to t0
+        self.state.emit("    fmv.x.d t0, fa0");
+        // Free temp space
+        self.emit_addi_sp(24);
+        self.state.reg_cache.invalidate_all();
+    }
+
+    // ---- F128 store/load helpers ----
+
+    /// Get the full IEEE f128 low/high u64 halves for an F128 operand.
+    /// For LongDouble constants, converts x87 bytes to f128 directly (full precision).
+    /// For runtime values, returns None (caller must use __extenddftf2).
+    fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
+        if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
+            let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
+            let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
+            let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
+            Some((lo, hi))
+        } else {
+            None
+        }
+    }
+
+    /// Store an F128 value (16 bytes) to a direct stack slot.
+    fn emit_f128_store_to_slot(&mut self, val: &Operand, slot: StackSlot) {
+        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+            // Full-precision constant: store both halves directly.
+            self.state.emit_fmt(format_args!("    li t0, {}", lo as i64));
+            self.emit_store_to_s0("t0", slot.0, "sd");
+            self.state.emit_fmt(format_args!("    li t0, {}", hi as i64));
+            self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+        } else {
+            // Runtime value: convert f64 in t0 to f128 via __extenddftf2, store 16 bytes.
+            self.operand_to_t0(val);
+            self.state.emit("    fmv.d.x fa0, t0");
+            self.state.emit("    call __extenddftf2");
+            // Result f128 in a0:a1
+            self.emit_store_to_s0("a0", slot.0, "sd");
+            self.emit_store_to_s0("a1", slot.0 + 8, "sd");
+            self.state.reg_cache.invalidate_all();
+        }
+    }
+
+    /// Store an F128 value to an over-aligned alloca slot.
+    fn emit_f128_store_to_slot_aligned(&mut self, val: &Operand, slot: StackSlot, id: u32) {
+        self.emit_alloca_aligned_addr(slot, id);
+        // t5 now has the aligned address
+        self.emit_f128_store_to_addr_in_t5(val);
+    }
+
+    /// Store an F128 value to the address in t5.
+    fn emit_f128_store_to_addr_in_t5(&mut self, val: &Operand) {
+        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+            self.state.emit_fmt(format_args!("    li t0, {}", lo as i64));
+            self.state.emit("    sd t0, 0(t5)");
+            self.state.emit_fmt(format_args!("    li t0, {}", hi as i64));
+            self.state.emit("    sd t0, 8(t5)");
+        } else {
+            // Save t5 (ptr) before operand_to_t0, which may clobber registers.
+            self.state.emit("    mv t3, t5");
+            self.operand_to_t0(val);
+            self.state.emit("    fmv.d.x fa0, t0");
+            self.state.emit("    call __extenddftf2");
+            self.state.emit("    sd a0, 0(t3)");
+            self.state.emit("    sd a1, 8(t3)");
+            self.state.reg_cache.invalidate_all();
+        }
+    }
+
+    /// Store an F128 value via an indirect pointer (ptr in a slot).
+    fn emit_f128_store_indirect(&mut self, val: &Operand, slot: StackSlot, ptr_id: u32) {
+        self.emit_load_ptr_from_slot(slot, ptr_id);
+        // t5 now has the pointer
+        self.emit_f128_store_to_addr_in_t5(val);
+    }
+
+    /// Load an F128 value (16 bytes) from a direct stack slot.
+    /// Loads the 16-byte f128 into a0:a1, calls __trunctfdf2 to get f64 in t0.
+    fn emit_f128_load_from_slot(&mut self, slot: StackSlot) {
+        self.emit_load_from_s0("a0", slot.0, "ld");
+        self.emit_load_from_s0("a1", slot.0 + 8, "ld");
+        self.state.emit("    call __trunctfdf2");
+        // f64 result in fa0
+        self.state.emit("    fmv.x.d t0, fa0");
+        self.state.reg_cache.invalidate_all();
+    }
+
+    /// Load an F128 value from the address in t5. Converts f128→f64 via __trunctfdf2.
+    fn emit_f128_load_from_addr_in_t5(&mut self) {
+        self.state.emit("    ld a0, 0(t5)");
+        self.state.emit("    ld a1, 8(t5)");
+        self.state.emit("    call __trunctfdf2");
+        self.state.emit("    fmv.x.d t0, fa0");
+        self.state.reg_cache.invalidate_all();
+    }
 }
 
 const RISCV_ARG_REGS: [&str; 8] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
@@ -1065,6 +1344,7 @@ impl ArchCodegen for RiscvCodegen {
         let alloc_result = regalloc::allocate_registers(func, &config);
         self.reg_assignments = alloc_result.assignments;
         self.used_callee_saved = alloc_result.used_regs;
+        self.f128_load_sources.clear();
 
         // Scan inline asm instructions for callee-saved register usage.
         collect_inline_asm_callee_saved_riscv(func, &mut self.used_callee_saved);
@@ -1246,30 +1526,32 @@ impl ArchCodegen for RiscvCodegen {
                     }
                 }
                 ParamClass::F128GpPair { lo_reg_idx, hi_reg_idx } => {
-                    // F128 in GP register pair: call __trunctfdf2 to convert to f64.
+                    // F128 in GP register pair: store full 16-byte f128 directly to alloca.
+                    // This preserves quad precision (e.g., LDBL_MIN != 0).
                     if func.is_variadic {
                         let lo_off = (lo_reg_idx as i64) * 8;
                         let hi_off = (hi_reg_idx as i64) * 8;
-                        self.emit_load_from_s0("a0", lo_off, "ld");
-                        self.emit_load_from_s0("a1", hi_off, "ld");
+                        self.emit_load_from_s0("t0", lo_off, "ld");
+                        self.emit_store_to_s0("t0", slot.0, "sd");
+                        self.emit_load_from_s0("t0", hi_off, "ld");
+                        self.emit_store_to_s0("t0", slot.0 + 8, "sd");
                     } else {
                         // Load from F128 save area.
                         let lo_off = f128_save_offset + (lo_reg_idx as i64) * 8;
                         let hi_off = f128_save_offset + (hi_reg_idx as i64) * 8;
-                        self.state.emit_fmt(format_args!("    ld a0, {}(sp)", lo_off));
-                        self.state.emit_fmt(format_args!("    ld a1, {}(sp)", hi_off));
+                        self.state.emit_fmt(format_args!("    ld t0, {}(sp)", lo_off));
+                        self.emit_store_to_s0("t0", slot.0, "sd");
+                        self.state.emit_fmt(format_args!("    ld t0, {}(sp)", hi_off));
+                        self.emit_store_to_s0("t0", slot.0 + 8, "sd");
                     }
-                    self.state.emit("    call __trunctfdf2");
-                    self.state.emit("    fmv.x.d t0, fa0");
-                    self.emit_store_to_s0("t0", slot.0, "sd");
                 }
                 ParamClass::F128Stack { offset } | ParamClass::F128AlwaysStack { offset } => {
+                    // F128 from stack: store full 16-byte f128 directly to alloca.
                     let src = stack_base + offset;
-                    self.emit_load_from_s0("a0", src, "ld");
-                    self.emit_load_from_s0("a1", src + 8, "ld");
-                    self.state.emit("    call __trunctfdf2");
-                    self.state.emit("    fmv.x.d t0, fa0");
+                    self.emit_load_from_s0("t0", src, "ld");
                     self.emit_store_to_s0("t0", slot.0, "sd");
+                    self.emit_load_from_s0("t0", src + 8, "ld");
+                    self.emit_store_to_s0("t0", slot.0 + 8, "sd");
                 }
                 ParamClass::I128Stack { offset } => {
                     let src = stack_base + offset;
@@ -1419,6 +1701,167 @@ impl ArchCodegen for RiscvCodegen {
 
     fn load_instr_for_type(&self, ty: IrType) -> &'static str {
         Self::load_for_type(ty)
+    }
+
+    /// Override emit_store for F128: store full 16 bytes to preserve quad precision.
+    /// For F128 constants, converts x87 bytes to f128 bytes directly.
+    /// For F128 runtime values (f64 approx in t0), extends to f128 via __extenddftf2.
+    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        if ty == IrType::F128 {
+            let addr = self.state.resolve_slot_addr(ptr.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        self.emit_f128_store_to_slot(val, slot);
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        // Compute aligned address into t5, then store 16 bytes
+                        self.emit_f128_store_to_slot_aligned(val, slot, id);
+                    }
+                    SlotAddr::Indirect(slot) => {
+                        // ptr is in a slot; load it, then store 16 bytes
+                        self.emit_f128_store_indirect(val, slot, ptr.0);
+                    }
+                }
+            }
+            return;
+        }
+        crate::backend::traits::emit_store_default(self, val, ptr, ty);
+    }
+
+    /// Override emit_load for F128: load full 16 bytes from source, copy to dest's
+    /// 16-byte slot. Also convert to f64 in t0 for non-F128-aware consumers.
+    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if ty == IrType::F128 {
+            // Track which alloca+offset this F128 value was loaded from, so that
+            // emit_f128_operand_to_a0_a1 can load the full 16-byte f128 directly
+            // from the original memory for comparisons (avoiding f64 precision loss).
+            self.f128_load_sources.insert(dest.0, (ptr.0, 0));
+
+            let addr = self.state.resolve_slot_addr(ptr.0);
+            if let Some(addr) = addr {
+                // Load the full 16-byte f128 from the source into a0:a1
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        self.emit_load_from_s0("a0", slot.0, "ld");
+                        self.emit_load_from_s0("a1", slot.0 + 8, "ld");
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        self.state.emit("    ld a0, 0(t5)");
+                        self.state.emit("    ld a1, 8(t5)");
+                    }
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, ptr.0);
+                        self.state.emit("    ld a0, 0(t5)");
+                        self.state.emit("    ld a1, 8(t5)");
+                    }
+                }
+                // Convert f128 (a0:a1) to f64 via __trunctfdf2, store f64 in dest slot.
+                // This keeps the normal t0-based data flow working.
+                self.state.emit("    call __trunctfdf2");
+                self.state.emit("    fmv.x.d t0, fa0");
+                self.state.reg_cache.invalidate_all();
+                self.store_t0_to(dest);
+            }
+            return;
+        }
+        crate::backend::traits::emit_load_default(self, dest, ptr, ty);
+    }
+
+    /// Override emit_store_with_const_offset for F128: store full 16 bytes at offset.
+    fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::F128 {
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        self.emit_f128_store_to_slot(val, folded_slot);
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        self.emit_add_offset_to_addr_reg(offset);
+                        // t5 now points to the target address
+                        self.emit_f128_store_to_addr_in_t5(val);
+                    }
+                    SlotAddr::Indirect(_) => {
+                        unreachable!("emit_store_with_const_offset called for non-alloca base");
+                    }
+                }
+            }
+            return;
+        }
+        // For non-F128, emit the operand then use the default path
+        self.emit_load_operand(val);
+        let addr = self.state_ref().resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let store_instr = self.store_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_save_acc();
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                }
+            }
+        }
+    }
+
+    /// Override emit_load_with_const_offset for F128: load full 16 bytes at offset.
+    fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::F128 {
+            // Track the source alloca + offset for full-precision comparison access.
+            self.f128_load_sources.insert(dest.0, (base.0, offset));
+
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        self.emit_f128_load_from_slot(folded_slot);
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        self.emit_add_offset_to_addr_reg(offset);
+                        self.emit_f128_load_from_addr_in_t5();
+                    }
+                    SlotAddr::Indirect(_) => {
+                        unreachable!("emit_load_with_const_offset called for non-alloca base");
+                    }
+                }
+                // t0 now has f64 bits from __trunctfdf2
+                self.store_t0_to(dest);
+            }
+            return;
+        }
+        // Default path for non-F128
+        let addr = self.state_ref().resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let load_instr = self.load_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_load_indirect(load_instr);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_load_from_slot(load_instr, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                }
+            }
+            self.emit_store_result(dest);
+        }
     }
 
     fn emit_typed_store_to_slot(&mut self, instr: &'static str, _ty: IrType, slot: StackSlot) {
@@ -1658,14 +2101,22 @@ impl ArchCodegen for RiscvCodegen {
             return;
         }
 
+        if ty == IrType::F128 {
+            // F128 comparison via soft-float libcalls.
+            // RISC-V has no hardware quad-precision; we must call __eqtf2/__letf2/__gttf2/etc.
+            // Convention: f128 args passed in GP register pairs a0:a1 and a2:a3,
+            // integer result returned in a0.
+            self.emit_f128_cmp(dest, op, lhs, rhs);
+            return;
+        }
+
         if ty.is_float() {
-            // Float comparison: load operands into t1/t2, then move to float regs.
-            // F128 uses F64 instructions (long double computed at double precision).
+            // Float comparison (F32/F64): load operands into t1/t2, then move to float regs.
             self.operand_to_t0(lhs);
             self.state.emit("    mv t1, t0");
             self.operand_to_t0(rhs);
             self.state.emit("    mv t2, t0");
-            let s = if ty == IrType::F64 || ty == IrType::F128 { "d" } else { "s" };
+            let s = if ty == IrType::F64 { "d" } else { "s" };
             let fmv = if s == "d" { "fmv.d.x" } else { "fmv.w.x" };
             self.state.emit_fmt(format_args!("    {} ft0, t1", fmv));
             self.state.emit_fmt(format_args!("    {} ft1, t2", fmv));
@@ -2638,8 +3089,13 @@ impl ArchCodegen for RiscvCodegen {
     fn emit_float_binop_impl(&mut self, mnemonic: &str, ty: IrType) {
         // On RISC-V: emit_acc_to_secondary does "mv t1, t0", acc (rhs) stays in t0
         // So after shared default: t1 = lhs, t0 = rhs
+        if ty == IrType::F128 {
+            // F128: use soft-float library calls for full quad-precision arithmetic.
+            self.emit_f128_binop_softfloat(mnemonic);
+            return;
+        }
         self.state.emit("    mv t2, t0"); // t2 = rhs
-        if ty == IrType::F64 || ty == IrType::F128 {
+        if ty == IrType::F64 {
             self.state.emit("    fmv.d.x ft0, t1");
             self.state.emit("    fmv.d.x ft1, t2");
             self.state.emit_fmt(format_args!("    {}.d ft0, ft0, ft1", mnemonic));
