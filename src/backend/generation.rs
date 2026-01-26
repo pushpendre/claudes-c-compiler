@@ -959,6 +959,37 @@ pub fn calculate_stack_space_common(
         slot_size: i64,
     }
 
+    // Dead param alloca detection: find param allocas whose Value IDs are never
+    // used in any instruction or terminator. These represent function parameters
+    // that are completely unused in the function body, so we can skip allocating
+    // stack space for them and skip storing incoming register values.
+    let dead_param_allocas: FxHashSet<u32> = {
+        let mut dead = FxHashSet::default();
+        if !func.param_alloca_values.is_empty() {
+            let param_set: FxHashSet<u32> = func.param_alloca_values.iter().map(|v| v.0).collect();
+            // Collect ALL Value IDs referenced anywhere in the function body.
+            let mut used: FxHashSet<u32> = FxHashSet::default();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    for_each_operand_in_instruction(inst, |op| {
+                        if let Operand::Value(v) = op { used.insert(v.0); }
+                    });
+                    for_each_value_use_in_instruction(inst, |v| { used.insert(v.0); });
+                }
+                for_each_operand_in_terminator(&block.terminator, |op| {
+                    if let Operand::Value(v) = op { used.insert(v.0); }
+                });
+            }
+            // Any param alloca whose Value ID never appears as a use is dead.
+            for &pv in &param_set {
+                if !used.contains(&pv) {
+                    dead.insert(pv);
+                }
+            }
+        }
+        dead
+    };
+
     let mut non_local_space = initial_offset;
     let mut deferred_slots: Vec<DeferredSlot> = Vec::new();
     let mut multi_block_values: Vec<MultiBlockValue> = Vec::new();
@@ -979,6 +1010,15 @@ pub fn calculate_stack_space_common(
                 state.alloca_types.insert(dest.0, *ty);
                 if effective_align > 16 {
                     state.alloca_alignments.insert(dest.0, effective_align);
+                }
+
+                // Skip stack slot allocation for dead param allocas.
+                // The alloca is still registered in alloca_values/alloca_types so
+                // the backend recognizes it as an alloca, but no stack slot is
+                // assigned. get_slot() will return None, causing emit_store_params
+                // to skip storing the incoming register value for this parameter.
+                if dead_param_allocas.contains(&dest.0) {
+                    continue;
                 }
 
                 // Allocas always get permanent (non-coalesced) slots because they

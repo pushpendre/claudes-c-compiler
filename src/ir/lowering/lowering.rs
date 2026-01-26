@@ -977,6 +977,9 @@ impl Lowerer {
             ir_allocas.push(alloca);
         }
 
+        // Save param alloca values for the backend to detect unused param allocas.
+        self.func_mut().param_alloca_values = ir_allocas.clone();
+
         // Phase 2 & 3: Process each original parameter by kind
         for (orig_idx, kind) in info.param_kinds.iter().enumerate() {
             let orig_param = &func.params[orig_idx];
@@ -1179,6 +1182,7 @@ impl Lowerer {
         let is_static = func.is_static || self.static_functions.contains(&func.name)
             || is_gnu_inline_no_extern_def;
         let next_val = self.func_mut().next_value;
+        let param_alloca_vals = std::mem::take(&mut self.func_mut().param_alloca_values);
         let ir_func = IrFunction {
             name: func.name.clone(), return_type, params,
             blocks: std::mem::take(&mut self.func_mut().blocks),
@@ -1192,6 +1196,7 @@ impl Lowerer {
             visibility: func.visibility.clone(),
             is_weak: func.is_weak,
             has_inlined_calls: false,
+            param_alloca_values: param_alloca_vals,
         };
         self.module.functions.push(ir_func);
         self.pop_scope();

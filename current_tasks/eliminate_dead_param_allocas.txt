@@ -1,22 +1,9 @@
 Task: Eliminate dead parameter allocas to reduce stack frame sizes
-Status: in_progress
+Status: completed
 
-Problem:
-Every function with N parameters wastes N*8 bytes of stack space because mem2reg
-cannot remove parameter alloca instructions. The backend relies on find_param_alloca()
-which uses positional indexing (the i-th Alloca in the entry block = parameter i).
-Removing any alloca shifts indices and breaks the convention.
-
-Additionally, emit_store_params emits dead stores into these slots for promoted parameters
-(the values are never read back from the slot since mem2reg promoted them to SSA values).
-
-This inflates stack frames and adds unnecessary prologue code. For a function with 6 params,
-that's 48 bytes + 6 dead stores wasted.
-
-Fix plan:
-1. Add a param_slots field to IrFunction that maps param index -> alloca Value
-2. Populate this during lowering when parameter allocas are created
-3. Update mem2reg to allow removing promoted parameter allocas
-4. Update find_param_alloca to use the new mapping instead of positional scanning
-5. If param was promoted (no alloca in IR), emit_store_params skips storing it
-6. Update DCE to allow removing allocas that have no uses
+Solution:
+Track parameter alloca Values in IrFunction (param_alloca_values field). In the backend's
+calculate_stack_space_common, scan all instructions/terminators to find which param alloca
+Values are never referenced. Skip stack slot allocation for those dead param allocas.
+emit_store_params already handles get_slot() returning None with continue, so no backend
+codegen changes needed. This reduces frame size for functions with unused parameters.

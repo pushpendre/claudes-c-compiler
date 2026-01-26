@@ -162,6 +162,11 @@ pub struct IrFunction {
     /// Used by post-inlining passes (mem2reg re-run, symbol resolution) to know
     /// that non-entry blocks may contain allocas from inlined callees.
     pub has_inlined_calls: bool,
+    /// Values corresponding to the allocas created for function parameters.
+    /// Tracked explicitly because lowering creates these allocas, but they may
+    /// become unused after optimization. The backend uses this to detect dead
+    /// param allocas and skip stack slot allocation, reducing frame size.
+    pub param_alloca_values: Vec<Value>,
 }
 
 /// A function parameter.
@@ -1201,6 +1206,7 @@ impl IrFunction {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         }
     }
 

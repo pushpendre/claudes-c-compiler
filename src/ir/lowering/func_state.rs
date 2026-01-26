@@ -128,6 +128,10 @@ pub(super) struct FunctionBuildState {
     /// variables whose declarations are skipped by `goto` still have valid
     /// stack slots at runtime. Merged into blocks[0] in finalize_function.
     pub entry_allocas: Vec<Instruction>,
+    /// Values corresponding to the allocas created for function parameters.
+    /// Populated during allocate_function_params and transferred to IrFunction
+    /// in finalize_function. Used by the backend to detect dead param allocas.
+    pub param_alloca_values: Vec<Value>,
 }
 
 impl FunctionBuildState {
@@ -155,6 +159,7 @@ impl FunctionBuildState {
             vla_stack_save: None,
             has_vla: false,
             entry_allocas: Vec::new(),
+            param_alloca_values: Vec::new(),
         }
     }
 

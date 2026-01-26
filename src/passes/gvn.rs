@@ -377,6 +377,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -443,6 +444,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -500,6 +502,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -563,6 +566,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -626,6 +630,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -693,6 +698,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -787,6 +793,7 @@ mod tests {
             visibility: None,
             is_weak: false,
             has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
         };
 
         let mut module = IrModule {
