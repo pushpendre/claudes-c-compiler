@@ -1,0 +1,19 @@
+Task: fix_builtin_ffs_intrinsic
+Status: in_progress
+Description: Implement __builtin_ffs/ffsl/ffsll as compiler intrinsics instead of external library calls.
+
+Bug: __builtin_ffs/ffsl/ffsll were registered as LibcAlias builtins, generating external calls
+to ffs/ffsl/ffsll. In freestanding environments (e.g., Linux kernel), these functions don't
+exist, causing linker errors like "undefined reference to 'ffsll'".
+
+Fix: Changed registration to BuiltinIntrinsic::Ffs and synthesize the operation inline as:
+  ffs(x) = x == 0 ? 0 : ctz(x) + 1
+
+Files modified:
+  - src/frontend/sema/builtins.rs: Register ffs/ffsl/ffsll as Ffs intrinsic, add Ffs variant
+  - src/ir/lowering/expr_builtins.rs: Add lower_ffs_intrinsic method
+
+Test: tests/builtin-ffs-intrinsic/main.c
+
+Kernel bisect: drivers/gpu/drm/i915/display/intel_hti.c now passes (was failing with
+undefined reference to 'ffsll' from FIELD_GET macro in bitfield.h).
