@@ -1,0 +1,16 @@
+Task: Fix large struct (>16 byte) passing on AArch64 (AAPCS64 by-reference)
+
+Status: in_progress
+
+Problem: On AAPCS64, composite types > 16 bytes must be passed by reference
+(caller makes a copy and passes a pointer). Our compiler currently classifies
+them as LargeStructStack and copies them by value to the stack, which is wrong.
+This causes va_arg for large structs to segfault because the callee expects
+a pointer in the GP register area but finds the struct data instead.
+
+Failing tests: compiler_suite_0172_0024 (ARM only)
+
+Fix approach:
+1. Add large_struct_by_ref config to CallAbiConfig (ARM=true, x86/RISC-V=false)
+2. In classify_call_args, treat >16 byte structs as IntReg (pointer) on ARM
+3. The IR already passes struct pointers, so this should just work
