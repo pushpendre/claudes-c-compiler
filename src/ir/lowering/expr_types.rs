@@ -409,6 +409,36 @@ impl Lowerer {
         IrType::I64
     }
 
+    /// Resolve the CType of a _Generic selection expression.
+    /// Used by get_expr_ctype_lowerer so that typeof(_Generic(...)) resolves correctly.
+    fn resolve_generic_selection_ctype(&self, controlling: &Expr, associations: &[GenericAssociation]) -> Option<CType> {
+        let controlling_ctype = self.get_expr_ctype(controlling);
+        let controlling_ir_type = self.get_expr_type(controlling);
+        let mut default_expr: Option<&Expr> = None;
+        for assoc in associations.iter() {
+            match &assoc.type_spec {
+                None => { default_expr = Some(&assoc.expr); }
+                Some(type_spec) => {
+                    let assoc_ctype = self.type_spec_to_ctype(type_spec);
+                    if let Some(ref ctrl_ct) = controlling_ctype {
+                        if self.ctype_matches_generic(ctrl_ct, &assoc_ctype) {
+                            return self.get_expr_ctype(&assoc.expr);
+                        }
+                    } else {
+                        let assoc_ir_type = self.type_spec_to_ir(type_spec);
+                        if assoc_ir_type == controlling_ir_type {
+                            return self.get_expr_ctype(&assoc.expr);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(def) = default_expr {
+            return self.get_expr_ctype(def);
+        }
+        None
+    }
+
     /// Resolve the type of a _Generic selection expression.
     fn resolve_generic_selection_type(&self, controlling: &Expr, associations: &[GenericAssociation]) -> IrType {
         let controlling_ctype = self.get_expr_ctype(controlling);
@@ -1253,6 +1283,9 @@ impl Lowerer {
             }
             Expr::VaArg(_, type_spec, _) | Expr::CompoundLiteral(type_spec, _, _) => {
                 Some(self.type_spec_to_ctype(type_spec))
+            }
+            Expr::GenericSelection(controlling, associations, _) => {
+                self.resolve_generic_selection_ctype(controlling, associations)
             }
             _ => None,
         }

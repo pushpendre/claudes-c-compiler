@@ -1,0 +1,20 @@
+Task: Fix __builtin_{add,sub,mul}_overflow operand widening for wide result types
+
+Problem: When __builtin_mul_overflow (and add/sub) is called with operands smaller
+than the result type (e.g., int * int -> unsigned __int128), the operands are not
+cast to the result type before the operation. The backend then zero-extends narrow
+values to the wider type, which is incorrect for negative signed operands.
+
+Example: __builtin_mul_overflow(-16, 4, &u128_result)
+  Expected: result = 2^128 - 64, overflow = 1
+  Got:      result = wrong value, overflow = 0
+
+Root cause: lower_overflow_builtin() in src/ir/lowering/expr_builtins.rs line 724
+passes operands in their source types to emit_binop_val with the result type,
+without casting them first.
+
+Fix: Cast each operand from its source IR type to the result IR type (respecting
+source signedness) before the binop and overflow detection.
+
+Files to modify:
+- src/ir/lowering/expr_builtins.rs (lower_overflow_builtin)
