@@ -1,5 +1,5 @@
 Task: fix_pp_paste_va_args_resubstitution
-Status: in_progress
+Status: completed
 Description: Fix preprocessor ##__VA_ARGS__ re-substitution bug where parameter names
 appearing in variadic argument text are incorrectly substituted during macro expansion.
 This causes 16 kernel compile failures in files using dev_dbg/dev_printk patterns.

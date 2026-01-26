@@ -80,6 +80,15 @@ pub struct MacroDef {
 /// stripped from the final output in `expand_line()`.
 const BLUE_PAINT_MARKER: u8 = 0x01;
 
+/// Sentinel markers used to protect text injected by `##` token-paste operations
+/// from further parameter substitution in `substitute_params`. The pasted result
+/// is wrapped in START..END so that `substitute_params` copies it verbatim.
+/// These markers are stripped by `substitute_params` itself and never reach
+/// `expand_line`, but `expand_line` strips them defensively as well.
+/// Uses 0x02/0x03 to avoid collision with BLUE_PAINT_MARKER (0x01).
+const PASTE_PROTECT_START: u8 = 0x02;
+const PASTE_PROTECT_END: u8 = 0x03;
+
 /// Strip all blue-paint markers from a string.
 /// Used when substituting arguments into ## token paste operations,
 /// since the pasted result is a new token that should be rescanned
@@ -142,11 +151,14 @@ impl MacroTable {
     pub fn expand_line(&self, line: &str) -> String {
         let mut expanding = FxHashSet::default();
         let result = self.expand_text(line, &mut expanding);
-        // Strip blue-paint marker bytes (0x01) from the final output.
-        // These markers prevent re-expansion of self-referential macro tokens
-        // per C11 §6.10.3.4 but must not appear in the final result.
-        if result.as_bytes().contains(&BLUE_PAINT_MARKER) {
+        // Strip internal marker bytes from the final output:
+        // - 0x01 (BLUE_PAINT_MARKER): prevents re-expansion per C11 §6.10.3.4
+        // - 0x02/0x03 (PASTE_PROTECT_START/END): should already be consumed by
+        //   substitute_params, but strip defensively in case any leak through.
+        if result.as_bytes().iter().any(|&b| b == BLUE_PAINT_MARKER || b == PASTE_PROTECT_START || b == PASTE_PROTECT_END) {
             result.replace(BLUE_PAINT_MARKER as char, "")
+                  .replace(PASTE_PROTECT_START as char, "")
+                  .replace(PASTE_PROTECT_END as char, "")
         } else {
             result
         }
@@ -694,7 +706,11 @@ impl MacroTable {
                                 result.pop();
                             }
                         } else {
+                            // Wrap in paste-protection markers to prevent
+                            // re-substitution in substitute_params (C11 §6.10.3.3)
+                            result.push(PASTE_PROTECT_START as char);
                             result.push_str(&va_args);
+                            result.push(PASTE_PROTECT_END as char);
                         }
                     } else if let Some(idx) = params.iter().position(|p| p == left_ident.as_str()) {
                         let trim_len = result.len() - left_ident.len();
@@ -703,7 +719,9 @@ impl MacroTable {
                         // Strip blue paint: ## creates a new token that must be rescanned
                         // without inheriting blue paint from operands (C11 §6.10.3.3)
                         let clean_arg = strip_blue_paint(arg);
+                        result.push(PASTE_PROTECT_START as char);
                         result.push_str(&clean_arg);
+                        result.push(PASTE_PROTECT_END as char);
                     }
                 }
 
@@ -730,7 +748,11 @@ impl MacroTable {
                                 result.pop();
                             }
                         } else {
+                            // Wrap in paste-protection markers to prevent
+                            // re-substitution in substitute_params (C11 §6.10.3.3)
+                            result.push(PASTE_PROTECT_START as char);
                             result.push_str(&va_args);
+                            result.push(PASTE_PROTECT_END as char);
                         }
                     } else if let Some(idx) = params.iter().position(|p| p == right_ident) {
                         let is_named_variadic_param = is_variadic && has_named_variadic && idx == params.len() - 1;
@@ -744,7 +766,9 @@ impl MacroTable {
                                     result.pop();
                                 }
                             } else {
+                                result.push(PASTE_PROTECT_START as char);
                                 result.push_str(&va_args);
+                                result.push(PASTE_PROTECT_END as char);
                             }
                         } else {
                             let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
@@ -756,7 +780,9 @@ impl MacroTable {
                                     result.push(' ');
                                 }
                             } else {
+                                result.push(PASTE_PROTECT_START as char);
                                 result.push_str(&clean_arg);
+                                result.push(PASTE_PROTECT_END as char);
                             }
                         }
                     } else {
@@ -838,6 +864,24 @@ impl MacroTable {
         let mut i = 0;
 
         while i < len {
+            // Skip over paste-protected regions (text injected by ## paste).
+            // These regions must not be subject to further parameter substitution
+            // per C11 §6.10.3.3 — the result of ## is a new token sequence that
+            // only undergoes rescanning, not parameter replacement.
+            if bytes[i] == PASTE_PROTECT_START {
+                i += 1; // skip the start marker
+                let start = i;
+                while i < len && bytes[i] != PASTE_PROTECT_END {
+                    i += 1;
+                }
+                // Copy the protected region as-is (UTF-8 safe via str slice)
+                result.push_str(&body[start..i]);
+                if i < len {
+                    i += 1; // skip the end marker
+                }
+                continue;
+            }
+
             if bytes[i] == b'"' || bytes[i] == b'\'' {
                 i = copy_literal_bytes_to_string(bytes, i, bytes[i], &mut result);
                 continue;
