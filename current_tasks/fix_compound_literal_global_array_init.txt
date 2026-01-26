@@ -1,0 +1,18 @@
+Fix compound literal initializers in global/static arrays
+=========================================================
+
+Problem: Compound literals like ((pgprot_t) { value }) used as initializers
+in global/static arrays produce all zeros instead of the correct values.
+This causes Linux kernel boot failures because critical arrays like
+protection_map[] in arch/x86/mm/pgprot.c are initialized to all zeros.
+
+Root cause: eval_const_expr() in const_eval.rs has no handler for
+Expr::CompoundLiteral, falling through to the _ => None catch-all.
+Callers like array init loops then use unwrap_or(zero) as fallback.
+
+Fix: Add CompoundLiteral arm to eval_const_expr that unwraps the inner
+initializer and recursively evaluates the scalar value.
+
+Files:
+- src/ir/lowering/const_eval.rs: Add CompoundLiteral + eval_const_initializer_scalar
+- tests/compound-literal-global-array/: Regression test
