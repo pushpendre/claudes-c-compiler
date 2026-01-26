@@ -883,6 +883,81 @@ pub fn calculate_stack_space_common(
     // All deferred values share a pool starting at non_local_space.
     // Each value's final slot is computed by calling assign_slot with
     // the global base plus the value's block-local offset.
+
+    // Debug: report stack space breakdown for large functions
+    if std::env::var("CCC_DEBUG_STACK").is_ok() && non_local_space > 100000 {
+        let func_name = &func.name;
+        eprintln!("[STACK DEBUG] {}: non_local_space={}, max_block_local_space={}, deferred={}, blocks={}, instructions={}, coalesce={}",
+            func_name, non_local_space, max_block_local_space, deferred_slots.len(), num_blocks, total_instructions, coalesce);
+        // Count alloca vs non-alloca
+        let alloca_count = state.alloca_values.len();
+        let nonlocal_count = state.value_locations.len() - alloca_count;
+        eprintln!("[STACK DEBUG] {}: allocas={}, non-coalescable values={}", func_name, alloca_count, nonlocal_count);
+        // Show allocation details
+        let mut alloca_sizes: Vec<(u32, i64)> = Vec::new();
+        let mut total_non_coal_size: i64 = 0;
+        let mut total_coal_count: usize = 0;
+        let mut total_non_coal_count: usize = 0;
+        for (_block_idx, block) in func.blocks.iter().enumerate() {
+            for inst in &block.instructions {
+                if let Instruction::Alloca { dest, size, .. } = inst {
+                    alloca_sizes.push((dest.0, if *size == 0 { 8 } else { *size as i64 }));
+                } else if let Some(dest) = inst.dest() {
+                    let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
+                    let slot_size: i64 = if is_i128 { 16 } else { 8 };
+                    if single_use_block(dest.0).is_some() {
+                        total_coal_count += 1;
+                    } else {
+                        total_non_coal_count += 1;
+                        total_non_coal_size += slot_size;
+                    }
+                }
+            }
+        }
+        alloca_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        let total_alloca_size: i64 = alloca_sizes.iter().map(|(_, s)| *s).sum();
+        eprintln!("[STACK DEBUG] {}: total alloca size={}, num_allocas={}", func_name, total_alloca_size, alloca_sizes.len());
+        eprintln!("[STACK DEBUG] {}: coalescable={}, non-coalescable={}, non_coal_size={}",
+            func_name, total_coal_count, total_non_coal_count, total_non_coal_size);
+        eprintln!("[STACK DEBUG] {}: expected total={}, actual non_local_space={}",
+            func_name, total_alloca_size + total_non_coal_size, non_local_space);
+        for (id, sz) in alloca_sizes.iter().take(10) {
+            eprintln!("[STACK DEBUG]   alloca v{}: {} bytes", id, sz);
+        }
+        // Analyze WHY values are non-coalescable
+        let mut entry_block_vals = 0usize;
+        let mut multi_block_vals = 0usize;
+        let mut no_use_info_vals = 0usize;
+        for (_block_idx, block) in func.blocks.iter().enumerate() {
+            for inst in &block.instructions {
+                if matches!(inst, Instruction::Alloca { .. }) { continue; }
+                if let Some(dest) = inst.dest() {
+                    if single_use_block(dest.0).is_none() {
+                        // Why is it non-coalescable?
+                        if let Some(&def_blk) = def_block.get(&dest.0) {
+                            if def_blk == 0 {
+                                entry_block_vals += 1;
+                            } else if let Some(blocks) = use_blocks_map.get(&dest.0) {
+                                let mut unique: Vec<usize> = blocks.clone();
+                                unique.sort_unstable();
+                                unique.dedup();
+                                if unique.len() > 1 || (unique.len() == 1 && unique[0] != def_blk) {
+                                    multi_block_vals += 1;
+                                }
+                            } else {
+                                no_use_info_vals += 1;
+                            }
+                        } else {
+                            no_use_info_vals += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("[STACK DEBUG] {}: non-coal reasons: entry_block={}, multi_block={}, no_use_info={}",
+            func_name, entry_block_vals, multi_block_vals, no_use_info_vals);
+    }
+
     if !deferred_slots.is_empty() && max_block_local_space > 0 {
         for ds in &deferred_slots {
             let (slot, _) = assign_slot(non_local_space + ds.block_offset, ds.size, ds.align);

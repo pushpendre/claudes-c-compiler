@@ -1,0 +1,32 @@
+Fix stack slot reuse to prevent massive stack frames
+====================================================
+
+Bug: Functions with many IR values (like bison-generated parsers with huge
+switch statements) generated enormous stack frames. PostgreSQL's base_yyparse
+had a 29MB frame (vs GCC's 2.9KB), causing segfaults due to exceeding the
+OS stack limit.
+
+Root causes:
+1. Same Value ID used as dest of multiple instructions (non-SSA IR), but each
+   encounter allocated a new stack slot, orphaning the previous one.
+   46,799 unique values x ~78 definitions each = 3.6M slot allocations = 29MB.
+
+2. Stack slot reuse liveness analysis didn't account for loop back-edges.
+   Values used at the top of a loop could have their slots reused by values
+   defined later in the loop body, corrupting them on the next iteration.
+
+Fix:
+1. Replace block-local coalescing with global liveness-based slot reuse using
+   min-heap pools. Values with non-overlapping lifetimes share stack slots
+   efficiently via O(log n) heap operations.
+
+2. Skip stack slot assignment for values that already have a slot (only assign
+   on first encounter of each unique Value ID).
+
+3. Add Phase 4 back-edge analysis: for each back-edge (block N -> block M
+   where M <= N), extend last_use of all values in the loop body to at least
+   the back-edge's global instruction index.
+
+Impact: PostgreSQL base_yyparse frame drops from 29MB to 88KB. PostgreSQL
+initdb and regression tests can now run (77/216 pass; remaining failures are
+pre-existing bugs unrelated to stack frames).
