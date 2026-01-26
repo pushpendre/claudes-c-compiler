@@ -85,6 +85,19 @@ impl Parser {
     }
 
     pub(super) fn parse_stmt(&mut self) -> Stmt {
+        // C23 / GNU extension: declarations are allowed in statement position.
+        // This handles declarations after labels (e.g., `label: int x = 5;`),
+        // after case/default, and other contexts where parse_stmt() is called.
+        // We skip __extension__ first since it can precede declarations.
+        self.skip_gcc_extensions();
+        if self.is_type_specifier() {
+            if let Some(decl) = self.parse_local_declaration() {
+                return Stmt::Declaration(decl);
+            }
+            // If parse_local_declaration returns None (e.g. _Static_assert),
+            // fall through to parse a null statement or the next thing
+            return Stmt::Expr(None);
+        }
         match self.peek() {
             TokenKind::Return => {
                 let span = self.peek_span();

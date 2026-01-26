@@ -276,6 +276,9 @@ pub enum Stmt {
     /// Computed goto: goto *expr (GCC extension, labels-as-values)
     GotoIndirect(Box<Expr>, Span),
     Label(String, Box<Stmt>, Span),
+    /// A declaration in statement position (C23: declarations allowed after labels,
+    /// and in other statement contexts like `case`/`default`).
+    Declaration(Declaration),
     InlineAsm {
         template: String,
         outputs: Vec<AsmOperand>,

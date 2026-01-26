@@ -1,0 +1,15 @@
+Task: Fix enum constant values in designated array initializers
+Status: in_progress
+
+Problem: expr_might_be_addr() in global_init_helpers.rs treats ALL identifiers as
+potential address expressions, including enum constants. This causes arrays with
+enum-valued designated initializers (e.g., `{ [35] = INT }` where INT is an enum)
+to be emitted via the Compound (.quad) path instead of the Array path, resulting
+in wrong element sizes and all-zero values.
+
+This bug prevented musl's vfprintf.c from working correctly (the states[][] array
+uses enum values in designated initializers), causing printf with format specifiers
+to silently fail.
+
+Fix: Pass enum_constants map to init_contains_addr_expr/expr_might_be_addr so they
+can distinguish enum constant identifiers from variable/function identifiers.

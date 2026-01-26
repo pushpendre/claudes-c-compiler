@@ -174,6 +174,18 @@ impl Lowerer {
             Stmt::Default(stmt, _) | Stmt::Label(_, stmt, _) => {
                 self.collect_refs_from_stmt(stmt, refs);
             }
+            Stmt::Declaration(decl) => {
+                for declarator in &decl.declarators {
+                    if let Some(ref init) = declarator.init {
+                        self.collect_refs_from_initializer(init, refs);
+                    }
+                    if let Some(ref cleanup_fn) = declarator.cleanup_fn {
+                        if self.known_functions.contains(cleanup_fn) {
+                            refs.insert(cleanup_fn.clone());
+                        }
+                    }
+                }
+            }
             Stmt::GotoIndirect(expr, _) => {
                 self.collect_refs_from_expr(expr, refs);
             }

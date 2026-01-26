@@ -405,6 +405,9 @@ impl Parser {
         while self.consume_if(&TokenKind::Star) {
             pointer_depth += 1;
             self.skip_cv_qualifiers();
+            // Also skip __attribute__(...) after pointer qualifiers.
+            // E.g., `int * __attribute__((unused)) p` is valid GNU C.
+            self.skip_gcc_extensions();
         }
         let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
         let mut is_func_ptr = false;
@@ -485,6 +488,9 @@ impl Parser {
             while self.consume_if(&TokenKind::Star) {
                 inner_ptr_depth += 1;
                 self.skip_cv_qualifiers();
+                // Also skip __attribute__(...) after pointer qualifiers.
+                // E.g., `void (*__attribute__((unused)) fp)(int)` is valid GNU C.
+                self.skip_gcc_extensions();
             }
             let name = if let TokenKind::Identifier(ref n) = self.peek() {
                 let n = n.clone();

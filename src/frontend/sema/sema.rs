@@ -698,6 +698,9 @@ impl SemanticAnalyzer {
             Stmt::Label(_, body, _) => {
                 self.analyze_stmt(body);
             }
+            Stmt::Declaration(decl) => {
+                self.analyze_declaration(decl, /* is_global */ false);
+            }
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Goto(_, _) => {}
             Stmt::GotoIndirect(expr, _) => {
                 self.analyze_expr(expr);

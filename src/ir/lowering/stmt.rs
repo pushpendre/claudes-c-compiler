@@ -912,6 +912,7 @@ impl Lowerer {
             Stmt::Goto(label, _span) => self.lower_goto_stmt(label),
             Stmt::GotoIndirect(expr, _span) => self.lower_goto_indirect_stmt(expr),
             Stmt::Label(name, stmt, _span) => self.lower_label_stmt(name, stmt),
+            Stmt::Declaration(decl) => self.lower_local_decl(decl),
             Stmt::InlineAsm { template, outputs, inputs, clobbers, goto_labels } => {
                 self.lower_inline_asm_stmt(template, outputs, inputs, clobbers, goto_labels);
             }
