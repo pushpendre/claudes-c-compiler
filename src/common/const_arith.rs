@@ -110,8 +110,18 @@ pub fn eval_const_binop_int(op: &BinOp, l: i64, r: i64, is_32bit: bool, is_unsig
     // using the result of a shift) can correctly infer the C type. This is
     // critical for expressions like (1 << 31) / N where the shift result must
     // be recognized as 32-bit (INT_MIN = -2147483648) not 64-bit (positive).
+    //
+    // For unsigned 32-bit results, we must use I64 with zero-extension because
+    // IrConst::I32 is signed and cannot correctly represent unsigned values >= 2^31.
+    // E.g., (2147483647 * 2U + 1U) = 4294967295U would be stored as I32(-1),
+    // which sign-extends to -1 (0xFFFFFFFFFFFFFFFF) when widened to 64-bit.
+    // Using I64(4294967295) preserves the correct unsigned value.
     if is_32bit {
-        Some(IrConst::I32(result as i32))
+        if is_unsigned {
+            Some(IrConst::I64(result as u32 as i64))
+        } else {
+            Some(IrConst::I32(result as i32))
+        }
     } else {
         Some(IrConst::I64(result))
     }
