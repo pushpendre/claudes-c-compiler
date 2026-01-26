@@ -1,0 +1,25 @@
+Bug: global-nested-member-addr-init segfault (exit code -11)
+
+Problem:
+  Pointer arrays with integer literal 0 as null sentinel (e.g.,
+  int *ptrs[] = { &g.a, &g.inner.x, 0 }) produced a segfault because
+  the null value was emitted as .long 0 (4 bytes) instead of .quad 0 (8 bytes).
+
+Root cause:
+  In collect_compound_init_element (global_init.rs), eval_const_expr returns
+  IrConst::I32(0) for integer literal 0 (since 0 fits in i32). The Compound
+  emission path in the backend uses the constant's own type (I32 -> .long),
+  but pointer array elements need 8 bytes (.quad). The Array path already
+  had promotion logic for this case, but the Compound path did not.
+
+Fix:
+  In collect_compound_init_element, promote IrConst::I32 to IrConst::I64
+  when elem_size == 8 (pointer-width elements). This ensures null pointer
+  sentinels in pointer arrays emit as .quad 0 instead of .long 0.
+
+Files changed:
+  - src/ir/lowering/global_init.rs (collect_compound_init_element)
+
+Test: 341/342 pass (99.7%), global-nested-member-addr-init now passes.
+
+Status: COMPLETED

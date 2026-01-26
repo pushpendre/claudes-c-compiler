@@ -1037,6 +1037,16 @@ impl Lowerer {
                     let scoped_label = self.get_or_create_user_label(label_name);
                     elements.push(GlobalInit::GlobalAddr(scoped_label.as_label()));
                 } else if let Some(val) = self.eval_const_expr(expr) {
+                    // Promote narrow integer constants to match element size.
+                    // E.g., integer literal 0 evaluates to I32(0) but in a pointer
+                    // array (elem_size == 8) it must emit as .quad 0, not .long 0.
+                    let val = match val {
+                        IrConst::I32(v) if elem_size == 8 => IrConst::I64(v as i64),
+                        IrConst::I16(v) if elem_size >= 4 => {
+                            if elem_size == 8 { IrConst::I64(v as i64) } else { IrConst::I32(v as i32) }
+                        }
+                        other => other,
+                    };
                     elements.push(GlobalInit::Scalar(val));
                 } else if let Some(label_diff) = self.eval_label_diff_expr(expr, elem_size) {
                     // Label difference: &&lab1 - &&lab2 (computed goto dispatch tables)
