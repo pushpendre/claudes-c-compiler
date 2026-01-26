@@ -1,0 +1,22 @@
+Fix compile-time pointer subtraction in static/const initializers
+
+Problem:
+When two pointer expressions refer to different offsets within the same
+static object, the compiler should compute the difference at compile time.
+Currently the result is always 0, losing the offset information.
+
+Example:
+    static int arr[10];
+    static const int d = &arr[5] - &arr[0];  // should be 5, but is 0
+    static const int d2 = (char*)&arr[5] - (char*)&arr[0]; // should be 20, but is 0
+    static const int d4 = (char*)&s.c - (char*)&s.a; // should be 8, but is 0
+
+Root cause: The constant evaluator likely reduces both &arr[5] and &arr[0]
+to the same symbol (the base address of arr) and loses the byte offsets,
+so when it subtracts them it gets 0 - 0 = 0.
+
+Fix: In the const eval / global initializer lowering, track the byte offset
+from the base symbol for address expressions, and when subtracting two
+addresses that share the same base symbol, return the difference of their offsets.
+
+Status: in_progress
