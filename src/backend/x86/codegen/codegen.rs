@@ -1600,19 +1600,16 @@ impl ArchCodegen for X86Codegen {
         {
             let mut gp_count = 0usize;
             let mut fp_count = 0usize;
-            let mut stack_bytes = 0usize;
+            // First pass: count total GP/FP register usage to know classification
             for p in &func.params {
                 if let Some(size) = p.struct_size {
                     if size <= 16 {
-                        // Small struct uses 1 or 2 GP register slots
                         let regs_needed = if size <= 8 { 1 } else { 2 };
                         gp_count += regs_needed;
-                    } else {
-                        // Large struct always goes on stack
-                        stack_bytes += (size + 7) & !7;
                     }
+                    // Large structs don't consume registers
                 } else if p.ty.is_long_double() {
-                    stack_bytes += 16;
+                    // Long double always on stack, no register
                 } else if p.ty.is_float() {
                     fp_count += 1;
                 } else {
@@ -1621,7 +1618,59 @@ impl ArchCodegen for X86Codegen {
             }
             self.num_named_int_params = gp_count;
             self.num_named_fp_params = fp_count;
-            self.num_named_stack_bytes = stack_bytes;
+
+            // Second pass: simulate forward stack layout of all stack-passed named params,
+            // including alignment padding for F128/I128 (matches compute_stack_arg_padding).
+            // This is necessary because the caller inserts alignment padding before 16-byte
+            // aligned args, and we must account for it in overflow_arg_area.
+            let mut stack_offset = 0usize;
+            let mut gp_idx = 0usize;
+            let mut fp_idx = 0usize;
+            for p in &func.params {
+                if let Some(size) = p.struct_size {
+                    if size <= 16 {
+                        let regs_needed = if size <= 8 { 1 } else { 2 };
+                        if gp_idx + regs_needed <= 6 {
+                            gp_idx += regs_needed;
+                        } else {
+                            // Overflows to stack
+                            stack_offset += (size + 7) & !7;
+                            gp_idx = 6; // All remaining GP go to stack
+                        }
+                    } else {
+                        // Large struct always on stack (8-byte aligned)
+                        stack_offset += (size + 7) & !7;
+                    }
+                } else if p.ty.is_long_double() {
+                    // F128: always on stack, 16-byte aligned
+                    let align_pad = (16 - (stack_offset % 16)) % 16;
+                    stack_offset += align_pad;
+                    stack_offset += 16;
+                } else if p.ty.is_128bit() {
+                    // I128: check if fits in GP regs, else stack with 16-byte alignment
+                    if gp_idx + 2 <= 6 {
+                        gp_idx += 2;
+                    } else {
+                        let align_pad = (16 - (stack_offset % 16)) % 16;
+                        stack_offset += align_pad;
+                        stack_offset += 16;
+                        gp_idx = 6;
+                    }
+                } else if p.ty.is_float() {
+                    if fp_idx < 8 {
+                        fp_idx += 1;
+                    } else {
+                        stack_offset += 8;
+                    }
+                } else {
+                    if gp_idx < 6 {
+                        gp_idx += 1;
+                    } else {
+                        stack_offset += 8;
+                    }
+                }
+            }
+            self.num_named_stack_bytes = stack_offset;
         }
 
         // Run register allocator BEFORE stack space computation so we can
@@ -3773,14 +3822,11 @@ impl ArchCodegen for X86Codegen {
             48 + self.num_named_fp_params.min(8) * 16
         };
         self.state.emit_fmt(format_args!("    movl ${}, 4(%rax)", fp_offset));
-        // overflow_arg_area = rbp + 16 + stack_bytes_for_named_params
-        // Stack-passed named params include:
-        //   - GP params beyond 6 registers (8 bytes each)
-        //   - FP params beyond 8 XMM registers (8 bytes each)
-        //   - long double params (always stack-passed, 16 bytes each)
-        let num_stack_int = if self.num_named_int_params > 6 { self.num_named_int_params - 6 } else { 0 };
-        let num_stack_fp = if self.num_named_fp_params > 8 { self.num_named_fp_params - 8 } else { 0 };
-        let overflow_offset = 16 + (num_stack_int + num_stack_fp) * 8 + self.num_named_stack_bytes;
+        // overflow_arg_area = rbp + 16 + total stack bytes for named params (including alignment padding)
+        // num_named_stack_bytes is computed in calculate_stack_space() by simulating the forward
+        // stack layout of all stack-passed named params (GP overflow, FP overflow, always-stack),
+        // including 16-byte alignment padding before F128/I128 args.
+        let overflow_offset = 16 + self.num_named_stack_bytes;
         self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rcx", overflow_offset));
         self.state.emit("    movq %rcx, 8(%rax)");
         // reg_save_area = address of the saved registers in the prologue

@@ -1,0 +1,3 @@
+Fixing miscompilation of lib/crypto/mpi/ec.c that causes kernel boot failure.
+Bisect identified this file as the sole bad file - the kernel fails to boot
+when this file is compiled with our compiler instead of gcc.
