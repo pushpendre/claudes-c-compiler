@@ -364,7 +364,7 @@ impl SemanticAnalyzer {
             Initializer::List(items) => {
                 // Check for brace-wrapped string literal: char c[] = {"hello"}
                 let is_char_elem = matches!(elem_ty, CType::Char | CType::UChar);
-                let is_int_elem = matches!(elem_ty, CType::Int);
+                let is_int_elem = matches!(elem_ty, CType::Int | CType::UInt);
                 if items.len() == 1 && items[0].designators.is_empty() {
                     if is_char_elem {
                         if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
@@ -374,6 +374,12 @@ impl SemanticAnalyzer {
                     if is_int_elem {
                         if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
                             // For wchar_t arrays, each Unicode codepoint is one element
+                            return Some(s.chars().count() + 1);
+                        }
+                    }
+                    // char16_t array: unsigned short c[] = {u"hello"}
+                    if matches!(elem_ty, CType::UShort | CType::Short) {
+                        if let Initializer::Expr(Expr::Char16StringLiteral(s, _)) = &items[0].init {
                             return Some(s.chars().count() + 1);
                         }
                     }
@@ -461,8 +467,12 @@ impl SemanticAnalyzer {
                     (CType::Char | CType::UChar, Expr::StringLiteral(s, _)) => {
                         Some(s.chars().count() + 1) // +1 for null terminator
                     }
-                    (CType::Int, Expr::WideStringLiteral(s, _)) => {
-                        // For wchar_t arrays, each Unicode codepoint is one element
+                    (CType::Int | CType::UInt, Expr::WideStringLiteral(s, _)) => {
+                        // For wchar_t/char32_t arrays, each Unicode codepoint is one element
+                        Some(s.chars().count() + 1)
+                    }
+                    (CType::UShort | CType::Short, Expr::Char16StringLiteral(s, _)) => {
+                        // For char16_t arrays, each Unicode codepoint is one element
                         Some(s.chars().count() + 1)
                     }
                     _ => None,
@@ -823,6 +833,7 @@ impl SemanticAnalyzer {
             | Expr::ImaginaryLiteralLongDouble(_, _)
             | Expr::StringLiteral(_, _)
             | Expr::WideStringLiteral(_, _)
+            | Expr::Char16StringLiteral(_, _)
             | Expr::CharLiteral(_, _) => {}
             // Label address (&&label) - just a compile-time address
             Expr::LabelAddr(_, _) => {}

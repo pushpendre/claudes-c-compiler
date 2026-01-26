@@ -1023,12 +1023,12 @@ impl Lowerer {
             if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
                 return s.chars().count() + 1; // +1 for null terminator
             }
-            if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
-                return s.chars().count() + 1; // wide string to char array
+            if let Initializer::Expr(Expr::WideStringLiteral(s, _) | Expr::Char16StringLiteral(s, _)) = &items[0].init {
+                return s.chars().count() + 1; // wide/char16 string to char array
             }
         }
         // Special case: wchar_t w[] = {L"hello"} - single brace-wrapped wide string literal
-        if base_ty == IrType::I32
+        if (base_ty == IrType::I32 || base_ty == IrType::U32)
             && items.len() == 1
             && items[0].designators.is_empty()
         {
@@ -1037,6 +1037,18 @@ impl Lowerer {
             }
             if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
                 return s.len() + 1; // narrow string to wchar_t array (each byte is an element)
+            }
+        }
+        // Special case: char16_t c[] = {u"hello"} - single brace-wrapped char16_t string literal
+        if (base_ty == IrType::I16 || base_ty == IrType::U16)
+            && items.len() == 1
+            && items[0].designators.is_empty()
+        {
+            if let Initializer::Expr(Expr::Char16StringLiteral(s, _)) = &items[0].init {
+                return s.chars().count() + 1; // +1 for null terminator (count in char16_t elements)
+            }
+            if let Initializer::Expr(Expr::WideStringLiteral(s, _) | Expr::StringLiteral(s, _)) = &items[0].init {
+                return s.chars().count() + 1; // string to char16_t array
             }
         }
         self.compute_init_list_array_size(items)
@@ -1226,7 +1238,8 @@ impl Lowerer {
     ) -> bool {
         let is_string = matches!(
             init,
-            Initializer::Expr(Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _))
+            Initializer::Expr(Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _)
+                | Expr::Char16StringLiteral(_, _))
         );
         if !is_string {
             return false;

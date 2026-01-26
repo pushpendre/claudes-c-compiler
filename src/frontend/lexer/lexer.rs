@@ -533,6 +533,58 @@ impl Lexer {
         Token::new(TokenKind::WideStringLiteral(s), Span::new(start as u32, self.pos as u32, self.file_id))
     }
 
+    /// Lex a u"..." char16_t string literal. Same parsing as wide string but produces
+    /// Char16StringLiteral token. The Rust String stores Unicode chars; the downstream
+    /// pipeline converts each to a u16 value (truncating code points > 0xFFFF).
+    fn lex_char16_string(&mut self, start: usize) -> Token {
+        self.pos += 1; // skip opening "
+        let mut s = String::new();
+        while self.pos < self.input.len() && self.input[self.pos] != b'"' {
+            if self.input[self.pos] == b'\\' {
+                self.pos += 1;
+                if self.pos < self.input.len() {
+                    s.push(self.lex_escape_char());
+                }
+            } else {
+                let byte = self.input[self.pos];
+                if byte < 0x80 {
+                    s.push(byte as char);
+                    self.pos += 1;
+                } else {
+                    let remaining = &self.input[self.pos..];
+                    if let Ok(text) = std::str::from_utf8(remaining) {
+                        if let Some(ch) = text.chars().next() {
+                            s.push(ch);
+                            self.pos += ch.len_utf8();
+                        } else {
+                            s.push(byte as char);
+                            self.pos += 1;
+                        }
+                    } else {
+                        let end = std::cmp::min(self.pos + 4, self.input.len());
+                        let chunk = &self.input[self.pos..end];
+                        if let Ok(text) = std::str::from_utf8(chunk) {
+                            if let Some(ch) = text.chars().next() {
+                                s.push(ch);
+                                self.pos += ch.len_utf8();
+                            } else {
+                                s.push(byte as char);
+                                self.pos += 1;
+                            }
+                        } else {
+                            s.push(byte as char);
+                            self.pos += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if self.pos < self.input.len() {
+            self.pos += 1; // skip closing "
+        }
+        Token::new(TokenKind::Char16StringLiteral(s), Span::new(start as u32, self.pos as u32, self.file_id))
+    }
+
     fn lex_wide_char(&mut self, start: usize) -> Token {
         self.pos += 1; // skip opening '
         let mut value: u32 = 0;
@@ -720,13 +772,15 @@ impl Lexer {
                         return self.lex_wide_char(start);
                     } else {
                         // Wide/unicode string literal: L"...", u"...", U"...", u8"..."
-                        // For L/U prefixes, produce WideStringLiteral (wchar_t = 4 bytes)
-                        // For u/u8, also produce WideStringLiteral (we treat all as wchar_t for now)
                         let is_wide_32 = text_len == 1 && (prefix[0] == b'L' || prefix[0] == b'U');
+                        let is_char16 = text_len == 1 && prefix[0] == b'u';
                         if is_wide_32 {
                             return self.lex_wide_string(start);
+                        } else if is_char16 {
+                            // u"..." - char16_t string (16-bit elements)
+                            return self.lex_char16_string(start);
                         } else {
-                            // u"..." and u8"..." - treat as narrow string for now
+                            // u8"..." - UTF-8 string, same as narrow string
                             return self.lex_string(start);
                         }
                     }

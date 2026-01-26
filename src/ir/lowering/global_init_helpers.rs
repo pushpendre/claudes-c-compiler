@@ -52,7 +52,8 @@ pub(super) fn has_array_field_designators(items: &[InitializerItem]) -> bool {
 /// including through binary operations and casts (e.g., `"str" + N`).
 pub(super) fn expr_contains_string_literal(expr: &Expr) -> bool {
     match expr {
-        Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
+        Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _)
+        | Expr::Char16StringLiteral(_, _) => true,
         Expr::BinaryOp(_, lhs, rhs, _) => {
             expr_contains_string_literal(lhs) || expr_contains_string_literal(rhs)
         }

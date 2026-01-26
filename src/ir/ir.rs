@@ -28,6 +28,8 @@ pub struct IrModule {
     pub string_literals: Vec<(String, String)>, // (label, value)
     /// Wide string literals (L"..."): (label, chars as u32 values including null terminator)
     pub wide_string_literals: Vec<(String, Vec<u32>)>,
+    /// char16_t string literals (u"..."): (label, chars as u16 values including null terminator)
+    pub char16_string_literals: Vec<(String, Vec<u16>)>,
     pub constructors: Vec<String>, // functions with __attribute__((constructor))
     pub destructors: Vec<String>,  // functions with __attribute__((destructor))
     /// Symbol aliases: (alias_name, target_name, is_weak)
@@ -82,6 +84,9 @@ pub enum GlobalInit {
     /// Wide string literal (stored as array of u32 wchar_t values, no null terminator in vec).
     /// The backend emits each value as .long and adds a null terminator.
     WideString(Vec<u32>),
+    /// char16_t string literal (stored as array of u16 values, no null terminator in vec).
+    /// The backend emits each value as .short and adds a null terminator.
+    Char16String(Vec<u16>),
     /// Address of another global (for pointer globals like `const char *s = "hello"`).
     GlobalAddr(String),
     /// Address of a global plus a byte offset (for `&arr[3]`, `&s.field`, etc.).
@@ -107,6 +112,7 @@ impl GlobalInit {
             GlobalInit::Zero => 0,
             GlobalInit::String(s) => s.len(),
             GlobalInit::WideString(ws) => ws.len() * 4,
+            GlobalInit::Char16String(cs) => cs.len() * 2,
             GlobalInit::GlobalLabelDiff(_, _, size) => *size,
         }
     }
@@ -1058,6 +1064,7 @@ impl IrModule {
             globals: Vec::new(),
             string_literals: Vec::new(),
             wide_string_literals: Vec::new(),
+            char16_string_literals: Vec::new(),
             constructors: Vec::new(),
             destructors: Vec::new(),
             aliases: Vec::new(),

@@ -400,6 +400,14 @@ impl Lowerer {
         if matches!(base, Expr::StringLiteral(_, _)) {
             return 1;
         }
+        // Wide string literals have wchar_t elements (size 4)
+        if matches!(base, Expr::WideStringLiteral(_, _)) {
+            return 4;
+        }
+        // char16_t string literals have char16_t elements (size 2)
+        if matches!(base, Expr::Char16StringLiteral(_, _)) {
+            return 2;
+        }
 
         // Handle struct/union member access: s.field[i] or p->field[i]
         if let Some(elem_size) = self.get_member_array_elem_size(base) {
@@ -480,6 +488,12 @@ impl Lowerer {
         // String literals have char elements (size 1)
         if matches!(base, Expr::StringLiteral(_, _)) {
             return 1;
+        }
+        if matches!(base, Expr::WideStringLiteral(_, _)) {
+            return 4;
+        }
+        if matches!(base, Expr::Char16StringLiteral(_, _)) {
+            return 2;
         }
         if let Expr::Identifier(name, _) = base {
             if let Some(vi) = self.lookup_var_info(name) {

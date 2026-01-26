@@ -8,6 +8,13 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
+
+/// Kind of string literal for extract_string_literal helper.
+enum StringLitKind {
+    Narrow,
+    Wide,
+    Char16,
+}
 use crate::common::types::{IrType, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 use super::global_init_helpers as h;
@@ -67,10 +74,14 @@ impl Lowerer {
                     if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
                         // Char array: char s[] = "hello" -> inline the string bytes
                         return GlobalInit::String(s.clone());
-                    } else if is_array && base_ty == IrType::I32 {
-                        // Narrow string to wchar_t array: promote each byte to I32
+                    } else if is_array && (base_ty == IrType::I32 || base_ty == IrType::U32) {
+                        // Narrow string to wchar_t/char32_t array: promote each byte to I32
                         let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
                         return GlobalInit::WideString(chars);
+                    } else if is_array && (base_ty == IrType::I16 || base_ty == IrType::U16) {
+                        // Narrow string to char16_t array: promote each byte to U16
+                        let chars: Vec<u16> = s.chars().map(|c| c as u16).collect();
+                        return GlobalInit::Char16String(chars);
                     } else {
                         // Pointer: const char *s = "hello" -> reference .rodata label
                         let label = self.intern_string_literal(s);
@@ -79,16 +90,39 @@ impl Lowerer {
                 }
                 // Wide string literal initializer
                 if let Expr::WideStringLiteral(s, _) = expr {
-                    if is_array && base_ty == IrType::I32 {
-                        // wchar_t array: wchar_t s[] = L"hello" -> inline as I32 array
+                    if is_array && (base_ty == IrType::I32 || base_ty == IrType::U32) {
+                        // wchar_t/char32_t array: wchar_t s[] = L"hello" -> inline as I32 array
                         let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
                         return GlobalInit::WideString(chars);
                     } else if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
                         // Wide string to char array (just take low bytes)
                         return GlobalInit::String(s.clone());
+                    } else if is_array && (base_ty == IrType::I16 || base_ty == IrType::U16) {
+                        // Wide string to char16_t array: truncate each char to u16
+                        let chars: Vec<u16> = s.chars().map(|c| c as u16).collect();
+                        return GlobalInit::Char16String(chars);
                     } else {
                         // Pointer: const wchar_t *s = L"hello" -> reference .rodata label
                         let label = self.intern_wide_string_literal(s);
+                        return GlobalInit::GlobalAddr(label);
+                    }
+                }
+                // char16_t string literal initializer (u"...")
+                if let Expr::Char16StringLiteral(s, _) = expr {
+                    if is_array && (base_ty == IrType::I16 || base_ty == IrType::U16) {
+                        // char16_t array: char16_t s[] = u"hello" -> inline as U16 array
+                        let chars: Vec<u16> = s.chars().map(|c| c as u16).collect();
+                        return GlobalInit::Char16String(chars);
+                    } else if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
+                        // char16_t string to char array (just take low bytes)
+                        return GlobalInit::String(s.clone());
+                    } else if is_array && (base_ty == IrType::I32 || base_ty == IrType::U32) {
+                        // char16_t string to wchar_t/char32_t array: promote each to u32
+                        let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
+                        return GlobalInit::WideString(chars);
+                    } else {
+                        // Pointer: const char16_t *s = u"hello" -> reference .rodata label
+                        let label = self.intern_char16_string_literal(s);
                         return GlobalInit::GlobalAddr(label);
                     }
                 }
@@ -501,15 +535,15 @@ impl Lowerer {
         negate: bool,
     ) -> Option<GlobalInit> {
         // Check if str_expr is a string literal (possibly through a cast)
-        let (s, is_wide) = self.extract_string_literal(str_expr)?;
+        let (s, kind) = self.extract_string_literal(str_expr)?;
         let offset_val = self.eval_const_expr(offset_expr)?;
         let offset = self.const_to_i64(&offset_val)?;
         let byte_offset = if negate { -offset } else { offset };
 
-        let label = if is_wide {
-            self.intern_wide_string_literal(&s)
-        } else {
-            self.intern_string_literal(&s)
+        let label = match kind {
+            StringLitKind::Narrow => self.intern_string_literal(&s),
+            StringLitKind::Wide => self.intern_wide_string_literal(&s),
+            StringLitKind::Char16 => self.intern_char16_string_literal(&s),
         };
 
         if byte_offset == 0 {
@@ -520,11 +554,12 @@ impl Lowerer {
     }
 
     /// Extract a string literal from an expression, possibly through casts.
-    /// Returns (string_content, is_wide).
-    fn extract_string_literal(&self, expr: &Expr) -> Option<(String, bool)> {
+    /// Returns (string_content, string_kind).
+    fn extract_string_literal(&self, expr: &Expr) -> Option<(String, StringLitKind)> {
         match expr {
-            Expr::StringLiteral(s, _) => Some((s.clone(), false)),
-            Expr::WideStringLiteral(s, _) => Some((s.clone(), true)),
+            Expr::StringLiteral(s, _) => Some((s.clone(), StringLitKind::Narrow)),
+            Expr::WideStringLiteral(s, _) => Some((s.clone(), StringLitKind::Wide)),
+            Expr::Char16StringLiteral(s, _) => Some((s.clone(), StringLitKind::Char16)),
             Expr::Cast(_, inner, _) => self.extract_string_literal(inner),
             _ => None,
         }

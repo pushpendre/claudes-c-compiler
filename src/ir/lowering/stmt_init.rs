@@ -249,8 +249,10 @@ impl Lowerer {
     ) {
         if da.is_array && (da.base_ty == IrType::I8 || da.base_ty == IrType::U8) {
             self.lower_char_array_init_expr(expr, alloca, da);
-        } else if da.is_array && da.base_ty == IrType::I32 {
+        } else if da.is_array && (da.base_ty == IrType::I32 || da.base_ty == IrType::U32) {
             self.lower_wchar_array_init_expr(expr, alloca, da);
+        } else if da.is_array && (da.base_ty == IrType::I16 || da.base_ty == IrType::U16) {
+            self.lower_char16_array_init_expr(expr, alloca, da);
         } else if da.is_struct {
             self.lower_struct_copy_init(expr, alloca, da);
         } else if is_complex {
@@ -263,7 +265,8 @@ impl Lowerer {
     /// Char array from string literal: `char s[] = "hello"`
     fn lower_char_array_init_expr(&mut self, expr: &Expr, alloca: Value, da: &DeclAnalysis) {
         match expr {
-            Expr::StringLiteral(s, _) | Expr::WideStringLiteral(s, _) => {
+            Expr::StringLiteral(s, _) | Expr::WideStringLiteral(s, _)
+            | Expr::Char16StringLiteral(s, _) => {
                 self.emit_string_to_alloca(alloca, s, 0);
                 // Zero-fill remaining bytes if string is shorter than array
                 let str_len = s.chars().count() + 1; // +1 for null terminator
@@ -283,12 +286,37 @@ impl Lowerer {
     /// wchar_t/int array from wide string: `wchar_t s[] = L"hello"`
     fn lower_wchar_array_init_expr(&mut self, expr: &Expr, alloca: Value, da: &DeclAnalysis) {
         match expr {
-            Expr::WideStringLiteral(s, _) | Expr::StringLiteral(s, _) => {
+            Expr::WideStringLiteral(s, _) | Expr::StringLiteral(s, _)
+            | Expr::Char16StringLiteral(s, _) => {
                 self.emit_wide_string_to_alloca(alloca, s, 0);
             }
             _ => {
                 let val = self.lower_expr(expr);
                 self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty , seg_override: AddressSpace::Default });
+            }
+        }
+    }
+
+    /// char16_t array from u"..." string literal: `char16_t s[] = u"hello"`
+    fn lower_char16_array_init_expr(&mut self, expr: &Expr, alloca: Value, da: &DeclAnalysis) {
+        match expr {
+            Expr::Char16StringLiteral(s, _) | Expr::StringLiteral(s, _)
+            | Expr::WideStringLiteral(s, _) => {
+                self.emit_char16_string_to_alloca(alloca, s, 0);
+                // Zero-fill remaining bytes if string is shorter than array
+                let str_len = (s.chars().count() + 1) * 2; // +1 for null, *2 for u16
+                let arr_size = da.alloc_size;
+                if arr_size > str_len {
+                    // Zero remaining bytes
+                    for i in (str_len..arr_size).step_by(2) {
+                        let val = Operand::Const(IrConst::I16(0));
+                        self.emit_store_at_offset(alloca, i, val, IrType::U16);
+                    }
+                }
+            }
+            _ => {
+                let val = self.lower_expr(expr);
+                self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty, seg_override: AddressSpace::Default });
             }
         }
     }

@@ -654,6 +654,17 @@ impl Lowerer {
         label
     }
 
+    /// Intern a char16_t string literal (u"...") and return its label.
+    /// Each character is stored as a u16 (char16_t), plus a null terminator.
+    pub(super) fn intern_char16_string_literal(&mut self, s: &str) -> String {
+        let label = format!(".Lc16str{}", self.next_string);
+        self.next_string += 1;
+        let mut chars: Vec<u16> = s.chars().map(|c| c as u16).collect();
+        chars.push(0); // null terminator
+        self.module.char16_string_literals.push((label.clone(), chars));
+        label
+    }
+
     pub(super) fn emit(&mut self, inst: Instruction) {
         self.func_mut().instrs.push(inst);
     }
@@ -1580,6 +1591,29 @@ impl Lowerer {
          seg_override: AddressSpace::Default });
     }
 
+    /// Emit a char16_t string (u"...") to a local alloca. Each character is stored as U16.
+    pub(super) fn emit_char16_string_to_alloca(&mut self, alloca: Value, s: &str, base_offset: usize) {
+        for (j, ch) in s.chars().enumerate() {
+            let val = Operand::Const(IrConst::I16(ch as u16 as i16));
+            let byte_offset = base_offset + j * 2;
+            let offset = Operand::Const(IrConst::I64(byte_offset as i64));
+            let addr = self.fresh_value();
+            self.emit(Instruction::GetElementPtr {
+                dest: addr, base: alloca, offset, ty: IrType::I8,
+            });
+            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::U16, seg_override: AddressSpace::Default });
+        }
+        // Null terminator
+        let null_byte_offset = base_offset + s.chars().count() * 2;
+        let null_offset = Operand::Const(IrConst::I64(null_byte_offset as i64));
+        let null_addr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr {
+            dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
+        });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I16(0)), ptr: null_addr, ty: IrType::U16,
+         seg_override: AddressSpace::Default });
+    }
+
     /// Emit a single element store at a given byte offset in an alloca.
     pub(super) fn emit_array_element_store(
         &mut self, alloca: Value, val: Operand, offset: usize, ty: IrType,
@@ -1803,20 +1837,29 @@ impl Lowerer {
                             da.alloc_size = s.chars().count() + 1;
                             da.actual_alloc_size = da.alloc_size;
                         }
-                        if let Expr::WideStringLiteral(s, _) = expr {
+                        if let Expr::WideStringLiteral(s, _) | Expr::Char16StringLiteral(s, _) = expr {
                             da.alloc_size = s.chars().count() + 1;
                             da.actual_alloc_size = da.alloc_size;
                         }
                     }
-                    if da.base_ty == IrType::I32 {
+                    if da.base_ty == IrType::I32 || da.base_ty == IrType::U32 {
                         if let Expr::WideStringLiteral(s, _) = expr {
                             let char_count = s.chars().count() + 1;
                             da.alloc_size = char_count * 4;
                             da.actual_alloc_size = da.alloc_size;
                         }
-                        if let Expr::StringLiteral(s, _) = expr {
+                        if let Expr::StringLiteral(s, _) | Expr::Char16StringLiteral(s, _) = expr {
                             let char_count = s.chars().count() + 1;
                             da.alloc_size = char_count * 4;
+                            da.actual_alloc_size = da.alloc_size;
+                        }
+                    }
+                    if da.base_ty == IrType::I16 || da.base_ty == IrType::U16 {
+                        if let Expr::Char16StringLiteral(s, _)
+                            | Expr::StringLiteral(s, _)
+                            | Expr::WideStringLiteral(s, _) = expr {
+                            let char_count = s.chars().count() + 1;
+                            da.alloc_size = char_count * 2;
                             da.actual_alloc_size = da.alloc_size;
                         }
                     }

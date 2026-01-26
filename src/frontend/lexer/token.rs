@@ -20,6 +20,8 @@ pub enum TokenKind {
     StringLiteral(String),
     /// Wide string literal (L"..."), stores content as Rust chars (each becomes wchar_t = i32)
     WideStringLiteral(String),
+    /// char16_t string literal (u"..."), stores content as Rust chars (each becomes char16_t = u16)
+    Char16StringLiteral(String),
     CharLiteral(char),
 
     // Identifiers and keywords

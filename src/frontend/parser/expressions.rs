@@ -436,11 +436,62 @@ impl Parser {
                 let mut result = s.clone();
                 let span = self.peek_span();
                 self.advance();
-                // Concatenate adjacent string literals. If any is wide, result is wide.
+                // Concatenate adjacent string literals. If any is wide/char16, result upgrades.
                 let mut is_wide = false;
+                let mut is_char16 = false;
                 loop {
                     match self.peek() {
                         TokenKind::StringLiteral(s2) => {
+                            result.push_str(s2);
+                            self.advance();
+                        }
+                        TokenKind::WideStringLiteral(s2) => {
+                            result.push_str(s2);
+                            is_wide = true;
+                            self.advance();
+                        }
+                        TokenKind::Char16StringLiteral(s2) => {
+                            result.push_str(s2);
+                            is_char16 = true;
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                if is_wide {
+                    Expr::WideStringLiteral(result, span)
+                } else if is_char16 {
+                    Expr::Char16StringLiteral(result, span)
+                } else {
+                    Expr::StringLiteral(result, span)
+                }
+            }
+            TokenKind::WideStringLiteral(s) => {
+                let mut result = s.clone();
+                let span = self.peek_span();
+                self.advance();
+                // Concatenate adjacent string literals (wide + narrow = wide)
+                loop {
+                    match self.peek() {
+                        TokenKind::StringLiteral(s2) | TokenKind::WideStringLiteral(s2)
+                        | TokenKind::Char16StringLiteral(s2) => {
+                            result.push_str(s2);
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                Expr::WideStringLiteral(result, span)
+            }
+            TokenKind::Char16StringLiteral(s) => {
+                let mut result = s.clone();
+                let span = self.peek_span();
+                self.advance();
+                // Concatenate adjacent string literals (char16 + narrow = char16, char16 + wide = wide)
+                let mut is_wide = false;
+                loop {
+                    match self.peek() {
+                        TokenKind::StringLiteral(s2) | TokenKind::Char16StringLiteral(s2) => {
                             result.push_str(s2);
                             self.advance();
                         }
@@ -455,24 +506,8 @@ impl Parser {
                 if is_wide {
                     Expr::WideStringLiteral(result, span)
                 } else {
-                    Expr::StringLiteral(result, span)
+                    Expr::Char16StringLiteral(result, span)
                 }
-            }
-            TokenKind::WideStringLiteral(s) => {
-                let mut result = s.clone();
-                let span = self.peek_span();
-                self.advance();
-                // Concatenate adjacent string literals (wide + narrow = wide)
-                loop {
-                    match self.peek() {
-                        TokenKind::StringLiteral(s2) | TokenKind::WideStringLiteral(s2) => {
-                            result.push_str(s2);
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
-                Expr::WideStringLiteral(result, span)
             }
             TokenKind::CharLiteral(c) => {
                 let c = *c;

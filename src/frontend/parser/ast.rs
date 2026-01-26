@@ -309,6 +309,8 @@ pub enum Expr {
     StringLiteral(String, Span),
     /// Wide string literal (L"...") - each char is a wchar_t (32-bit int)
     WideStringLiteral(String, Span),
+    /// char16_t string literal (u"...") - each char is a char16_t (16-bit unsigned)
+    Char16StringLiteral(String, Span),
     CharLiteral(char, Span),
     Identifier(String, Span),
     BinaryOp(BinOp, Box<Expr>, Box<Expr>, Span),
@@ -420,6 +422,7 @@ impl Expr {
             | Expr::FloatLiteral(_, s) | Expr::FloatLiteralF32(_, s) | Expr::FloatLiteralLongDouble(_, s)
             | Expr::ImaginaryLiteral(_, s) | Expr::ImaginaryLiteralF32(_, s) | Expr::ImaginaryLiteralLongDouble(_, s)
             | Expr::StringLiteral(_, s) | Expr::WideStringLiteral(_, s)
+            | Expr::Char16StringLiteral(_, s)
             | Expr::CharLiteral(_, s) | Expr::Identifier(_, s)
             | Expr::BinaryOp(_, _, _, s) | Expr::UnaryOp(_, _, s) | Expr::PostfixOp(_, _, s)
             | Expr::Assign(_, _, s) | Expr::CompoundAssign(_, _, _, s) | Expr::Conditional(_, _, _, s)

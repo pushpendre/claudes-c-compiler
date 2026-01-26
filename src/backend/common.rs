@@ -398,7 +398,8 @@ impl PtrDirective {
 /// Emit all data sections (rodata for string literals, .data and .bss for globals).
 pub fn emit_data_sections(out: &mut AsmOutput, module: &IrModule, ptr_dir: PtrDirective) {
     // String literals in .rodata
-    if !module.string_literals.is_empty() || !module.wide_string_literals.is_empty() {
+    if !module.string_literals.is_empty() || !module.wide_string_literals.is_empty()
+       || !module.char16_string_literals.is_empty() {
         out.emit(".section .rodata");
         for (label, value) in &module.string_literals {
             out.emit_fmt(format_args!("{}:", label));
@@ -410,6 +411,14 @@ pub fn emit_data_sections(out: &mut AsmOutput, module: &IrModule, ptr_dir: PtrDi
             out.emit_fmt(format_args!("{}:", label));
             for &ch in chars {
                 out.emit_fmt(format_args!("  .long {}", ch));
+            }
+        }
+        // char16_t string literals (u"..."): each char is a 2-byte char16_t value
+        for (label, chars) in &module.char16_string_literals {
+            out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(2)));
+            out.emit_fmt(format_args!("{}:", label));
+            for &ch in chars {
+                out.emit_fmt(format_args!("  .short {}", ch));
             }
         }
         out.emit("");
@@ -653,6 +662,18 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
                 out.emit_fmt(format_args!("    .zero {}", g.size - wide_bytes));
             }
         }
+        GlobalInit::Char16String(chars) => {
+            // Emit char16_t string as array of .short values (2 bytes each)
+            for &ch in chars {
+                out.emit_fmt(format_args!("    .short {}", ch));
+            }
+            // Null terminator
+            out.emit("    .short 0");
+            let char16_bytes = (chars.len() + 1) * 2;
+            if g.size > char16_bytes {
+                out.emit_fmt(format_args!("    .zero {}", g.size - char16_bytes));
+            }
+        }
         GlobalInit::GlobalAddr(label) => {
             out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), label));
         }
@@ -699,6 +720,12 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
                             out.emit_fmt(format_args!("    .long {}", ch));
                         }
                         out.emit("    .long 0"); // null terminator
+                    }
+                    GlobalInit::Char16String(chars) => {
+                        for &ch in chars {
+                            out.emit_fmt(format_args!("    .short {}", ch));
+                        }
+                        out.emit("    .short 0"); // null terminator
                     }
                     GlobalInit::Zero => {
                         // Emit a zero-initialized element of the appropriate size

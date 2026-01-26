@@ -75,6 +75,7 @@ impl<'a> ExprTypeChecker<'a> {
             Expr::ImaginaryLiteralLongDouble(_, _) => Some(CType::ComplexLongDouble),
             Expr::StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default)),
             Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
+            Expr::Char16StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::UShort), AddressSpace::Default)),
 
             // Identifiers: look up in symbol table or enum constants
             Expr::Identifier(name, _) => {

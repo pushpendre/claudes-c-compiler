@@ -493,7 +493,8 @@ impl Lowerer {
             Expr::FloatLiteralLongDouble(_, _) => IrType::F128,
             Expr::ImaginaryLiteral(_, _) | Expr::ImaginaryLiteralF32(_, _)
             | Expr::ImaginaryLiteralLongDouble(_, _) => IrType::Ptr,
-            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => IrType::Ptr,
+            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _)
+            | Expr::Char16StringLiteral(_, _) => IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => self.type_spec_to_ir(target_type),
             Expr::UnaryOp(UnaryOp::RealPart, inner, _) | Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
@@ -850,6 +851,8 @@ impl Lowerer {
             Expr::StringLiteral(s, _) => s.chars().count() + 1,
             // Wide string literal: array of wchar_t (4 bytes each), size = (chars + 1) * 4
             Expr::WideStringLiteral(s, _) => (s.chars().count() + 1) * 4,
+            // char16_t string literal: array of char16_t (2 bytes each), size = (chars + 1) * 2
+            Expr::Char16StringLiteral(s, _) => (s.chars().count() + 1) * 2,
 
             // Variable: look up its alloc_size or type
             Expr::Identifier(name, _) => {
@@ -1257,6 +1260,8 @@ impl Lowerer {
             Expr::FloatLiteralLongDouble(_, _) => Some(CType::LongDouble),
             // Wide string literal L"..." has type wchar_t* (which is int* on all targets)
             Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
+            // char16_t string literal u"..." has type char16_t* (which is unsigned short*)
+            Expr::Char16StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::UShort), AddressSpace::Default)),
             Expr::FunctionCall(func, args, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     // __builtin_choose_expr(const_expr, expr1, expr2): return CType

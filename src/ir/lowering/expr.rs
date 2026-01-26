@@ -59,6 +59,7 @@ impl Lowerer {
 
             Expr::StringLiteral(s, _) => self.lower_string_literal(s, false),
             Expr::WideStringLiteral(s, _) => self.lower_string_literal(s, true),
+            Expr::Char16StringLiteral(s, _) => self.lower_char16_string_literal(s),
             Expr::Identifier(name, _) => self.lower_identifier(name),
             Expr::BinaryOp(op, lhs, rhs, _) => self.lower_binary_op(op, lhs, rhs),
             Expr::UnaryOp(op, inner, _) => self.lower_unary_op(*op, inner),
@@ -126,6 +127,13 @@ impl Lowerer {
         } else {
             self.intern_string_literal(s)
         };
+        let dest = self.fresh_value();
+        self.emit(Instruction::GlobalAddr { dest, name: label });
+        Operand::Value(dest)
+    }
+
+    fn lower_char16_string_literal(&mut self, s: &str) -> Operand {
+        let label = self.intern_char16_string_literal(s);
         let dest = self.fresh_value();
         self.emit(Instruction::GlobalAddr { dest, name: label });
         Operand::Value(dest)
@@ -812,9 +820,12 @@ impl Lowerer {
                 // the array size is the string length + 1 (null terminator)
                 if elem_size == 1 && items.len() == 1 {
                     if let Initializer::Expr(ref expr) = items[0].init {
-                        if let Expr::StringLiteral(ref s, _) | Expr::WideStringLiteral(ref s, _) = expr {
+                        if let Expr::StringLiteral(ref s, _) | Expr::WideStringLiteral(ref s, _)
+                            | Expr::Char16StringLiteral(ref s, _) = expr {
                             if matches!(expr, Expr::StringLiteral(_, _)) {
                                 s.chars().count() + 1
+                            } else if matches!(expr, Expr::Char16StringLiteral(_, _)) {
+                                (s.chars().count() + 1) * 2
                             } else {
                                 (s.chars().count() + 1) * 4
                             }

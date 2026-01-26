@@ -143,7 +143,8 @@ impl Lowerer {
                     }
                 }
             }
-            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
+            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _)
+            | Expr::Char16StringLiteral(_, _) => true,
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 match op {
                     BinOp::Add => {
