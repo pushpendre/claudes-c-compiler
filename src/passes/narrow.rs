@@ -549,7 +549,8 @@ fn try_narrow_const(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
         }
         IrType::U16 => {
             if val >= 0 && val <= u16::MAX as i64 {
-                Some(IrConst::I16(val as i16))
+                // Use from_i64 to get zero-extended I64 representation for unsigned
+                Some(IrConst::from_i64(val, IrType::U16))
             } else {
                 None
             }
@@ -563,7 +564,8 @@ fn try_narrow_const(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
         }
         IrType::U8 => {
             if val >= 0 && val <= u8::MAX as i64 {
-                Some(IrConst::I8(val as i8))
+                // Use from_i64 to get zero-extended I64 representation for unsigned
+                Some(IrConst::from_i64(val, IrType::U8))
             } else {
                 None
             }
