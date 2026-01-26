@@ -707,17 +707,31 @@ impl Lowerer {
         // Creates a temporary union, stores the value into the first matching member at offset 0.
         if let CType::Union(ref key) = target_ctype {
             let union_size = self.types.struct_layouts.get(&**key).map(|l| l.size).unwrap_or(0);
+            let inner_ctype = self.expr_ctype(inner);
             let src = self.lower_expr(inner);
-            let from_ty = self.get_expr_type(inner);
 
             // Allocate stack space for the union and zero-initialize it
             let alloca = self.fresh_value();
             self.emit(Instruction::Alloca { dest: alloca, size: union_size, ty: IrType::Ptr, align: 0, volatile: false });
             self.zero_init_alloca(alloca, union_size);
 
-            // Store source value at offset 0 (all union members share offset 0)
-            let store_ty = from_ty;
-            self.emit(Instruction::Store { val: src, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
+            // If the source is an aggregate (struct/union), lower_expr returns a pointer
+            // to the data. We need to memcpy the data, not store the pointer value.
+            match inner_ctype {
+                CType::Struct(_) | CType::Union(_) => {
+                    let src_size = self.ctype_size(&inner_ctype);
+                    let copy_size = src_size.min(union_size);
+                    if copy_size > 0 {
+                        let src_val = self.operand_to_value(src);
+                        self.emit(Instruction::Memcpy { dest: alloca, src: src_val, size: copy_size });
+                    }
+                }
+                _ => {
+                    // Scalar source: store the value directly at offset 0
+                    let store_ty = self.get_expr_type(inner);
+                    self.emit(Instruction::Store { val: src, ptr: alloca, ty: store_ty, seg_override: AddressSpace::Default });
+                }
+            }
 
             return Operand::Value(alloca);
         }

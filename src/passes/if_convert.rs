@@ -265,9 +265,18 @@ fn detect_diamond(
 
             match (true_val, false_val) {
                 (Some(tv), Some(fv)) => {
-                    // Only convert integer/pointer types (cmov doesn't support floats directly)
-                    if !ty.is_float() && !ty.is_long_double() && !ty.is_128bit() {
+                    // Support integer, pointer, F32, and F64 types.
+                    // F32/F64 work because all backends implement Select by
+                    // moving bit patterns through integer registers (cmov/csel/branch).
+                    // Skip long double (F128) and 128-bit integers — they need
+                    // multi-register handling that Select doesn't support.
+                    if !ty.is_long_double() && !ty.is_128bit() {
                         phi_selects.push((*dest, *ty, tv, fv));
+                    } else {
+                        // There's an unconvertible phi (F128/I128) referencing
+                        // both arms. We must NOT partially convert this diamond
+                        // or the remaining phi nodes will reference removed blocks.
+                        return None;
                     }
                 }
                 _ => {
@@ -426,13 +435,18 @@ fn detect_triangle(
 
             match (arm_val, pred_val) {
                 (Some(av), Some(pv)) => {
-                    if !ty.is_float() && !ty.is_long_double() && !ty.is_128bit() {
+                    // Support integer, pointer, F32, and F64 types.
+                    // Skip long double (F128) and 128-bit integers.
+                    if !ty.is_long_double() && !ty.is_128bit() {
                         // Map to true/false values based on which arm the block is
                         if arm_is_true {
                             phi_selects.push((*dest, *ty, av, pv));
                         } else {
                             phi_selects.push((*dest, *ty, pv, av));
                         }
+                    } else {
+                        // Unconvertible phi — bail out to avoid partial conversion.
+                        return None;
                     }
                 }
                 _ => {}
