@@ -1,0 +1,20 @@
+Fix unsigned sub-int (U8/U16) bitwise op constant folding sign-extension bug
+Status: in_progress
+
+Bug: When the narrow optimization pass narrows a bitwise BinOp (AND/OR/XOR) from
+I64 to U8/U16, and the constant fold pass then folds the result, it stores the
+result using IrConst::from_i64(result, ty) which for U8/U16 creates IrConst::I8/I16.
+When this I8/I16 value is later consumed in a wider context (return, store to int),
+to_i64() sign-extends it, producing the wrong value for unsigned types.
+
+Example: unsigned char a = 0xff, b = 0x0f; int r = a ^ b;
+Expected: r = 240 (0xf0 zero-extended to int)
+Actual:   r = -16 (0xf0 sign-extended as signed char)
+
+Fix: In the constant fold pass, when folding a BinOp with unsigned sub-int result
+type (U8/U16), store the result as IrConst::I64 with zero-extension (like sema does).
+This preserves the unsigned value when the constant is later consumed without
+explicit type information.
+
+Files to change:
+- src/passes/constant_fold.rs: fix BinOp folding result storage for U8/U16 types
