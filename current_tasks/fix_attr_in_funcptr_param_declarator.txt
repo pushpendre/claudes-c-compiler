@@ -1,0 +1,11 @@
+Fix: __attribute__ on function pointer parameter declarators
+
+The parser fails to parse function pointer parameters with attributes like:
+  void foo(void (__attribute__((ms_abi)) *handler)(int));
+
+The issue is in parse_paren_param_declarator which doesn't skip __attribute__
+after consuming '(' before checking for '*'. The fix is to add
+skip_gcc_extensions() after consuming '(' in that function.
+
+Also fixes related COMPILE_FAIL for kernel files like dmi_scan.c that use
+efi_call_acpi_prm_handler with __attribute__((ms_abi)) function pointer params.
