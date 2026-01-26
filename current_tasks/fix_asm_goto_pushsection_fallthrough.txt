@@ -1,0 +1,13 @@
+Task: fix_asm_goto_pushsection_fallthrough
+Status: in_progress
+Description:
+  When asm goto with unsatisfiable "i" constraints and .pushsection is
+  skipped, the compiler incorrectly jumps to the last goto label instead
+  of falling through to the next statement. This breaks the kernel's
+  arch_static_branch / jump label pattern (used in tracepoints and static
+  keys), causing tracepoints to always appear active and boot failures.
+
+  The fix removes the incorrect jump-to-last-label behavior and instead
+  falls through (matching GCC's asm goto semantics). This is correct for
+  both arch_static_branch (fallthrough = return false) and _static_cpu_has
+  (fallthrough = t_yes = return true, matching GCC un-patched NOP behavior).
