@@ -1,0 +1,23 @@
+Fix _Generic selection qualifier stripping for non-pointer types
+
+Status: in_progress
+
+Problem:
+_Generic selection wrongly considers top-level qualifiers on the controlling
+expression for non-pointer scalar types. Per C11 6.5.1.1p2, the controlling
+expression undergoes lvalue conversion which strips top-level qualifiers.
+
+Example:
+  int const x = 0;
+  _Generic(x, int: 10, int const: 100) // should be 10, we produce 100
+
+The current code tracks is_const on local variables and uses it in _Generic
+matching. But for non-pointer types, the controlling expression's const
+should be ignored (lvalue conversion strips it).
+
+Fix: In resolve_generic_selection, only use ctrl_is_const for pointer types
+where is_const represents pointee constness (which survives lvalue conversion).
+For non-pointer types, force ctrl_is_const to false.
+
+Failing tests:
+- compiler_suite_0005_0005 (all architectures)
