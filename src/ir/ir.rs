@@ -887,7 +887,13 @@ impl IrConst {
             // Using I32 would sign-extend when loaded as a 64-bit immediate (e.g.,
             // I32(-2147483648) becomes 0xFFFFFFFF80000000 instead of 0x0000000080000000).
             IrType::U32 => IrConst::I64(val as u32 as i64),
-            IrType::I128 | IrType::U128 => IrConst::I128(val as i128),
+            // I128: sign-extend i64 to i128 (preserves signed value)
+            IrType::I128 => IrConst::I128(val as i128),
+            // U128: zero-extend by first reinterpreting i64 as u64, then widening to u128.
+            // Using `val as i128` would sign-extend, turning e.g. the unsigned value
+            // 0xCAFEBABE12345678 (stored as negative i64) into 0xFFFFFFFFFFFFFFFF_CAFEBABE12345678
+            // instead of the correct 0x00000000_00000000_CAFEBABE12345678.
+            IrType::U128 => IrConst::I128((val as u64 as u128) as i128),
             IrType::F32 => IrConst::F32(val as f32),
             IrType::F64 => IrConst::F64(val as f64),
             IrType::F128 => IrConst::long_double_from_i64(val),

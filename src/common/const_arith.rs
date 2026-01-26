@@ -247,8 +247,21 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
 /// Called when at least one operand is I128. Uses native Rust i128/u128 arithmetic
 /// to avoid the truncation that occurs when using the i64 path.
 pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool) -> Option<IrConst> {
-    let l = lhs.to_i128()?;
-    let r = rhs.to_i128()?;
+    // When the operation is unsigned, operands that are smaller than 128-bit
+    // must be zero-extended (not sign-extended) to 128 bits.
+    // E.g., u64 0xCAFEBABE12345678 should become u128 0x00000000_00000000_CAFEBABE12345678,
+    // not 0xFFFFFFFF_FFFFFFFF_CAFEBABE12345678 (which is what sign-extension gives).
+    let l = if is_unsigned && !matches!(lhs, IrConst::I128(_)) {
+        // Zero-extend: treat the i64 bit pattern as u64, then widen to u128
+        (lhs.to_i64()? as u64 as u128) as i128
+    } else {
+        lhs.to_i128()?
+    };
+    let r = if is_unsigned && !matches!(rhs, IrConst::I128(_)) {
+        (rhs.to_i64()? as u64 as u128) as i128
+    } else {
+        rhs.to_i128()?
+    };
 
     let bool_result = |b: bool| -> Option<IrConst> {
         Some(IrConst::I64(if b { 1 } else { 0 }))

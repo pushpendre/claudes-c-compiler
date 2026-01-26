@@ -640,15 +640,17 @@ impl Lowerer {
         CType::Int
     }
 
-    /// Resolve struct field type.
+    /// Resolve struct field type, searching recursively through anonymous
+    /// struct/union members (C11 6.7.2.1p13: members of anonymous structs/unions
+    /// are accessible as direct members of the containing type).
     fn resolve_field_type(&self, struct_type: &CType, field: &str) -> CType {
         match struct_type {
             CType::Struct(key) | CType::Union(key) => {
                 if let Some(layout) = self.types.struct_layouts.get(&**key) {
-                    for f in &layout.fields {
-                        if f.name == field {
-                            return f.ty.clone();
-                        }
+                    // Use field_offset which already handles recursive lookup
+                    // through anonymous struct/union members
+                    if let Some((_, ty)) = layout.field_offset(field, &self.types) {
+                        return ty;
                     }
                 }
                 CType::Int
