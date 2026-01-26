@@ -1,0 +1,30 @@
+Bug: braces-around-scalar initializer not handled in flat struct init
+
+Problem:
+  When flat-initializing a nested struct like:
+    struct outer t = {&a, &a, &a, &a, &b, {&b}, {&a}};
+  The {&b} and {&a} items (braces around scalar) are not consumed properly
+  during flat scalar array filling. The flat init loop breaks when it
+  encounters an Initializer::List item instead of unwrapping the braces
+  and treating the inner expression as a scalar value.
+
+  This causes:
+  - compiler_suite_0054_0007: segfault (NULL pointer dereference)
+  - compiler_suite_0150_0004: segfault (NULL pointer dereference)
+
+Root cause:
+  In struct_init.rs, the flat scalar array init loops (emit_array_field_expr_init
+  and emit_field_array_designated continuation) break out of the loop when they
+  encounter an Initializer::List item. Per C11 6.7.9p13, braces around a scalar
+  initializer are valid ("The initializer for a scalar may optionally be enclosed
+  in braces"), so {&b} should be unwrapped to &b and consumed as a scalar value.
+
+Fix:
+  In emit_array_field_expr_init and emit_field_array_designated, when encountering
+  an Initializer::List in the flat scalar consume loop, use unwrap_nested_init_expr
+  to extract the inner scalar expression and consume it, instead of breaking.
+
+Files to change:
+  - src/ir/lowering/struct_init.rs
+
+Status: IN PROGRESS
