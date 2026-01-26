@@ -1,0 +1,22 @@
+Fix libffi build failures on ARM and RISC-V
+
+Two issues prevent libffi from building on non-x86 architectures:
+
+1. __builtin___clear_cache not implemented
+   - libffi calls __builtin___clear_cache(start, end) to flush instruction caches
+   - On x86 this is a no-op (cache coherent architecture)
+   - On ARM: needs to emit actual cache flush (dc cvau / ic ivau + dsb/isb)
+   - On RISC-V: needs fence.i instruction
+   - Currently falls through to an undefined symbol reference
+
+2. RISC-V inline asm: tied FP register operands use wrong load instruction
+   - copy_metadata_from() doesn't propagate FpReg kind for tied operands
+   - When input constraint "0" ties to "=f" output, the input keeps Tied(0) kind
+   - load_input_to_reg checks is_fp via AsmOperandKind::FpReg match, gets false
+   - Emits "ld ft0, offset(s0)" instead of "fld ft0, offset(s0)"
+   - "ld" into an FP register is illegal on RISC-V
+
+Fix:
+- Add __builtin___clear_cache to builtin registry as a new intrinsic
+- Implement lowering to architecture-specific cache flush operations
+- Fix copy_metadata_from to also copy FpReg kind
