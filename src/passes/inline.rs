@@ -10,8 +10,8 @@
 //! the inlined code and eliminate dead branches.
 
 use crate::ir::ir::{
-    BasicBlock, BlockId, IrFunction, IrModule, Instruction, Operand, Terminator, Value, IrConst,
-    IrBinOp, IrCmpOp,
+    BasicBlock, BlockId, GlobalInit, IrFunction, IrModule, Instruction, Operand, Terminator,
+    Value, IrConst, IrBinOp, IrCmpOp,
 };
 use crate::common::asm_constraints::constraint_is_immediate_only;
 use crate::common::types::{IrType, AddressSpace};
@@ -687,6 +687,35 @@ struct InlineCallSite {
     args: Vec<Operand>,
 }
 
+/// Check if a GlobalInit contains references to local labels (`.Lxx`).
+/// These are produced by `&&label` (label-as-value) in static local initializers.
+fn global_init_contains_local_label(init: &GlobalInit) -> bool {
+    match init {
+        GlobalInit::GlobalAddr(label) => label.starts_with(".L"),
+        GlobalInit::GlobalLabelDiff(lab1, lab2, _) => {
+            lab1.starts_with(".L") || lab2.starts_with(".L")
+        }
+        GlobalInit::Compound(inits) => inits.iter().any(|i| global_init_contains_local_label(i)),
+        _ => false,
+    }
+}
+
+/// Check if a function has static local variables whose initializers reference
+/// local labels (from `&&label`). Such functions cannot be safely inlined because
+/// the label references in static data are stored as strings and are NOT remapped
+/// when the function body's block IDs are remapped during inlining.
+fn func_has_static_locals_with_label_refs(module: &IrModule, func_name: &str) -> bool {
+    let prefix = format!("{}.", func_name);
+    for global in &module.globals {
+        if global.name.starts_with(&prefix) {
+            if global_init_contains_local_label(&global.init) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Build a map of function name -> callee data for functions eligible for inlining.
 fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
     let mut map = HashMap::new();
@@ -783,6 +812,15 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             }
         }
         if has_problematic {
+            continue;
+        }
+
+        // Don't inline functions whose static local variables contain label
+        // address references (&&label). The label references in static data are
+        // stored as assembly label strings (e.g., ".L3") and are NOT remapped
+        // when block IDs are remapped during inlining. This causes dangling
+        // references to non-existent labels, resulting in linker errors.
+        if func_has_static_locals_with_label_refs(module, &func.name) {
             continue;
         }
 

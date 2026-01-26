@@ -1,7 +1,0 @@
-Task: Fix miscompilation of arch/x86/kernel/process_64.c causing kernel boot failure
-
-Problem: arch/x86/kernel/process_64.c is miscompiled by ccc, causing kernel boot failure.
-This is the x86-64 process management code (thread switching, fork, etc).
-Confirmed reproducible 3/3 times.
-
-Status: investigating root cause

@@ -1,0 +1,14 @@
+Task: Fix miscompilation of mm/vmalloc.c causing kernel boot failure
+Status: in_progress
+Started: 2026-01-26
+
+The kernel file mm/vmalloc.c is miscompiled by ccc, causing the kernel to fail to boot.
+This file handles virtual memory allocation (vmalloc/vfree) which is critical for
+kernel operation. The bisect tool reliably identifies this file as the cause of boot failure.
+
+Plan:
+1. Compare ccc output with GCC output for vmalloc.c to find differences
+2. Isolate the specific function/construct causing the miscompilation
+3. Create a minimal test case reproducing the bug
+4. Fix the compiler bug
+5. Verify the fix with the bisect tool

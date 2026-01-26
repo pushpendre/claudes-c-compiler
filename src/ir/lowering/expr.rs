@@ -568,6 +568,15 @@ impl Lowerer {
                 let inner_ty = self.infer_expr_type(inner);
                 let neg_ty = if ty.is_float() || ty.is_128bit() { ty } else { IrType::I64 };
                 let val = self.lower_expr(inner);
+                // C integer promotion (C11 6.3.1.1): sign-extend (or zero-extend
+                // for unsigned) sub-int types to the operation width before negating.
+                // Without this, signed char -13 (0xF3) is zero-extended to 243
+                // instead of sign-extended to -13, producing wrong results.
+                let val = if !neg_ty.is_float() && inner_ty.size() < neg_ty.size() {
+                    Operand::Value(self.emit_cast_val(val, inner_ty, neg_ty))
+                } else {
+                    val
+                };
                 let dest = self.fresh_value();
                 self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src: val, ty: neg_ty });
                 if !neg_ty.is_float() {
@@ -586,6 +595,14 @@ impl Lowerer {
                 let ty = self.get_expr_type(inner);
                 let not_ty = if ty.is_128bit() { ty } else { IrType::I64 };
                 let val = self.lower_expr(inner);
+                // C integer promotion: widen sub-int types before bitwise NOT,
+                // same as for Neg above. E.g. ~(signed char -13) must sign-extend
+                // -13 to int before complementing, giving 12 (not -244).
+                let val = if inner_ty.size() < not_ty.size() {
+                    Operand::Value(self.emit_cast_val(val, inner_ty, not_ty))
+                } else {
+                    val
+                };
                 let dest = self.fresh_value();
                 self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Not, src: val, ty: not_ty });
                 let promoted_ty = Self::integer_promote(inner_ty);

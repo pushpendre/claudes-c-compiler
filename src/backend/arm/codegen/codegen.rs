@@ -4115,6 +4115,10 @@ impl InlineAsmEmitter for ArmCodegen {
                             self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
                             self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
                         }
+                    } else if self.state.is_alloca(v.0) {
+                        // Alloca: the stack slot IS the variable's memory;
+                        // compute its address instead of loading from it.
+                        self.emit_add_sp_offset(reg, slot.0);
                     } else {
                         self.emit_load_from_sp(reg, slot.0, "ldr");
                     }

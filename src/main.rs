@@ -250,8 +250,14 @@ fn real_main() {
                 // Use absolute sign-extended 32-bit addressing instead of RIP-relative.
                 driver.code_model_kernel = true;
             }
+            "-mcmodel=small" | "-mcmodel=medlow" | "-mcmodel=medium" | "-mcmodel=medany" | "-mcmodel=large" => {
+                // Non-kernel code models: disable kernel code model if it was previously set.
+                // GCC uses last-wins semantics for -mcmodel, so -mcmodel=kernel -mcmodel=small
+                // should result in the small code model (e.g., Linux vDSO uses this).
+                driver.code_model_kernel = false;
+            }
             arg if arg.starts_with("-m") => {
-                // -m64, -march=, -mtune=, -mcmodel=small/medium/large, etc. (ignored for now)
+                // -m64, -march=, -mtune=, etc. (ignored for now)
             }
 
             // Feature flags
