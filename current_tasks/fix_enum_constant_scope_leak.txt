@@ -1,0 +1,26 @@
+Fix enum constant scope leak between functions
+================================================
+Status: in_progress
+Date: 2026-01-26
+
+Problem:
+Enum constants defined inside function bodies were not properly cleaned up
+when the function scope ended in sema. This caused them to persist in
+TypeContext.enum_constants and leak into subsequent functions, where they
+could incorrectly shadow local variable names during constant evaluation.
+
+Example: if foo() defines `enum { e1, e2 }` and main() has local variables
+named `e1` and `e2`, the compiler would incorrectly use the enum constant
+values (0, 1) instead of the variable values in && expressions.
+
+Root cause: sema's process_enum_variants() used direct HashMap insertion
+instead of insert_enum_scoped(), so the constants were not tracked for
+cleanup when the scope frame was popped.
+
+Fix:
+1. In sema.rs: use insert_enum_scoped() instead of direct insert
+2. In const_eval.rs: check if local variable shadows enum constant before
+   using the enum constant value in constant evaluation
+
+Tests fixed: compiler_suite_0139_0001 (+ potentially other tests with
+similar enum constant name conflicts across functions)
