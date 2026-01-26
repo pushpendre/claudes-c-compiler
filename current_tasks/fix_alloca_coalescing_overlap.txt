@@ -1,0 +1,22 @@
+Fix alloca coalescing causing stack slot overlap with temporaries
+================================================================
+
+Bug: When stack slot coalescing is enabled, alloca instructions (local arrays,
+structs) could be coalesced into the block-local pool. Since the coalescing
+pool is shared across blocks, an alloca's memory could overlap with temporary
+values from other blocks that access the alloca's memory through derived
+pointers (GEPs).
+
+Root cause: The alloca coalescing logic only tracked direct uses of the alloca
+pointer value, not indirect uses through GEP chains. An alloca whose pointer
+was used in only one block could be coalesced, but memory at that address
+might be accessed from many blocks via derived GEP pointers.
+
+Fix: Never coalesce allocas. Allocas represent addressable memory that can be
+accessed indirectly, making them unsafe to coalesce without full alias analysis.
+Only non-alloca SSA values (temporaries) are coalesced.
+
+Impact: Fixes 4 test failures (array-init-001, compiler_suite_0036_0013,
+compiler_suite_0148_0056, compiler_suite_0149_0052). Zero regressions.
+
+Status: COMPLETE - ready to commit and push.
