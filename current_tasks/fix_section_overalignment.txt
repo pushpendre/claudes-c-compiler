@@ -1,0 +1,28 @@
+Task: Fix section alignment promotion breaking kernel .init.setup
+Status: in_progress
+Agent: claude
+
+Problem: The effective_align() function in backend/common.rs promoted alignment to 16
+for any global with size >= 16, including globals placed in custom sections via
+__attribute__((section("..."))). This caused the linker to insert 8 bytes of padding
+in the kernel's .init.setup section (which contains tightly-packed 24-byte
+obs_kernel_param structs), corrupting the early param parsing and causing a NULL
+pointer dereference during boot (Page Fault in parameq called from do_early_param).
+
+Root cause: effective_align() did not check whether the global had a custom section
+attribute before promoting alignment. GCC respects explicit __aligned() attributes
+to override its own alignment promotion, but our compiler's promotion in
+effective_align() was applied after the explicit alignment was already resolved.
+
+Fix: Skip the 16-byte alignment promotion for globals with custom section attributes
+(g.section.is_some()). These globals should use their natural/explicit alignment only.
+Also fixed a secondary bug: missing ptr_dir.align_arg() wrapper on line 461 (custom
+section zero-init path).
+
+Files modified:
+- src/backend/common.rs (effective_align function + line 461 align_arg fix)
+
+Test: tests/section-attr-no-overalign/main.c
+
+Kernel bisect: init/calibrate.c and drivers/pcmcia/cs.c now pass (were failing
+with boot hangs due to corrupted .init.setup section).
