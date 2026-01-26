@@ -1,0 +1,33 @@
+Task: implement_cleanup_attribute
+Status: in_progress
+Description: Implement __attribute__((cleanup(func))) for local variables.
+
+Bug: The cleanup attribute is silently ignored. When a variable declared with
+__attribute__((cleanup(func))) goes out of scope, the compiler should call func(&var)
+as a cleanup/destructor. This is critical for Linux kernel code that uses guard(),
+scoped_guard(), and __free() macros (from include/linux/cleanup.h) to implement
+RAII-style automatic mutex_unlock, spin_unlock, kfree, etc.
+
+Without this, every guard(mutex) and scoped_guard(spinlock, ...) in the kernel silently
+drops the unlock call, causing deadlocks and boot hangs.
+
+Impact: sound/core/init.c (and likely many other files) causes boot hang because
+mutex_lock is called but mutex_unlock (via cleanup destructor) is never emitted.
+
+Fix plan:
+1. Parse "cleanup" attribute in parser.rs, store cleanup function name
+2. Add cleanup_fn field to InitDeclarator AST node
+3. Add cleanup_fn field to LocalInfo in IR lowering
+4. Track cleanup variables per scope in FuncScopeFrame
+5. At scope exit (pop_scope), emit calls to cleanup functions for all variables
+   in the exiting scope (in reverse declaration order)
+6. Before return statements, emit cleanup calls for all active scopes
+7. Handle goto/break/continue that exit scopes with cleanup variables
+
+Files to modify:
+- src/frontend/parser/parser.rs (parse cleanup attribute)
+- src/frontend/parser/ast.rs (store cleanup fn name)
+- src/ir/lowering/definitions.rs (LocalInfo cleanup field)
+- src/ir/lowering/func_state.rs (track cleanup vars per scope)
+- src/ir/lowering/lowering.rs (emit cleanup on scope exit)
+- src/ir/lowering/stmt.rs (emit cleanup on return, attach to local decl)

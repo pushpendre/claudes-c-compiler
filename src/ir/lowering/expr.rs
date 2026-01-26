@@ -1585,6 +1585,12 @@ impl Lowerer {
             let result = self.emit_binop_val(ir_op, Operand::Value(loaded_val), step, binop_ty);
             let store_op = if self.is_bool_lvalue(inner) {
                 self.emit_bool_normalize_typed(Operand::Value(result), binop_ty)
+            } else if ty != binop_ty && ty.is_integer() && binop_ty.is_integer() {
+                // When the add/sub was done in a wider type than the variable's type
+                // (e.g. U32 variable incremented via I64 add), truncate back to the
+                // variable's type so wrapping semantics are correct. Without this,
+                // 0xFFFFFFFF + 1 would be 0x100000000 instead of wrapping to 0.
+                self.emit_implicit_cast(Operand::Value(result), binop_ty, ty)
             } else {
                 Operand::Value(result)
             };

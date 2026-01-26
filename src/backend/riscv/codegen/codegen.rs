@@ -1477,6 +1477,16 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    add t0, t1, t0");
     }
 
+    fn emit_add_imm_to_acc(&mut self, imm: i64) {
+        if imm >= -2048 && imm <= 2047 {
+            self.state.emit_fmt(format_args!("    addi t0, t0, {}", imm));
+        } else {
+            // Large immediate: load into t1 (secondary), then add
+            self.state.emit_fmt(format_args!("    li t1, {}", imm));
+            self.state.emit("    add t0, t0, t1");
+        }
+    }
+
     fn emit_round_up_acc_to_16(&mut self) {
         self.state.emit("    addi t0, t0, 15");
         self.state.emit("    andi t0, t0, -16");

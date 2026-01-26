@@ -2347,6 +2347,11 @@ impl ArchCodegen for X86Codegen {
         self.state.reg_cache.invalidate_acc();
     }
 
+    fn emit_add_imm_to_acc(&mut self, imm: i64) {
+        self.state.emit_fmt(format_args!("    addq ${}, %rax", imm));
+        self.state.reg_cache.invalidate_acc();
+    }
+
     fn emit_round_up_acc_to_16(&mut self) {
         self.state.emit("    addq $15, %rax");
         self.state.emit("    andq $-16, %rax");

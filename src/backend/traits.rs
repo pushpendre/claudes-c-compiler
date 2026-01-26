@@ -645,6 +645,9 @@ pub trait ArchCodegen {
 
     // --- Dynamic alloca primitives ---
 
+    /// Add an immediate value to the accumulator.
+    fn emit_add_imm_to_acc(&mut self, imm: i64);
+
     /// Round up the accumulator to 16-byte alignment.
     fn emit_round_up_acc_to_16(&mut self);
 
@@ -841,8 +844,21 @@ pub trait ArchCodegen {
     fn function_type_directive(&self) -> &'static str { "@function" }
 
     /// Emit dynamic stack allocation.
+    ///
+    /// When alignment > 16, we must allocate `size + (align - 1)` bytes
+    /// (rounded up to 16) so that after aligning the base pointer upward,
+    /// the aligned pointer plus `size` bytes stays within the allocated region.
+    /// Without this extra padding, the upward-aligned pointer can overlap with
+    /// the callee-saved register save area or return address above the VLA.
     fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
         self.emit_load_operand(size);
+        if align > 16 {
+            // Add (align - 1) extra bytes for alignment padding, then round
+            // to 16 to keep SP properly aligned. This guarantees: after we
+            // subtract the padded size from SP and align the pointer UP to
+            // `align`, the aligned pointer + original size <= old SP.
+            self.emit_add_imm_to_acc((align - 1) as i64);
+        }
         self.emit_round_up_acc_to_16();
         self.emit_sub_sp_by_acc();
         self.emit_mov_sp_to_acc();

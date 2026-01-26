@@ -1486,6 +1486,18 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    add x0, x1, x0");
     }
 
+    fn emit_add_imm_to_acc(&mut self, imm: i64) {
+        if imm >= 0 && imm <= 4095 {
+            self.state.emit_fmt(format_args!("    add x0, x0, #{}", imm));
+        } else if imm < 0 && (-imm) <= 4095 {
+            self.state.emit_fmt(format_args!("    sub x0, x0, #{}", -imm));
+        } else {
+            // Large immediate: load into x1 (secondary), then add
+            self.state.emit_fmt(format_args!("    mov x1, #{}", imm));
+            self.state.emit("    add x0, x0, x1");
+        }
+    }
+
     fn emit_round_up_acc_to_16(&mut self) {
         self.state.emit("    add x0, x0, #15");
         self.state.emit("    and x0, x0, #-16");
