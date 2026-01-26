@@ -672,6 +672,21 @@ impl RiscvCodegen {
                     self.store_t0_to(d);
                 }
             }
+            IntrinsicOp::FrameAddress => {
+                // __builtin_frame_address(0): return current frame pointer (s0)
+                self.state.emit("    mv t0, s0");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
+            IntrinsicOp::ReturnAddress => {
+                // __builtin_return_address(0): ra is saved at s0-8 in prologue;
+                // ra itself gets clobbered by subsequent calls, so load from stack
+                self.state.emit("    ld t0, -8(s0)");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
         }
     }
 

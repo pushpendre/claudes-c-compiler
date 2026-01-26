@@ -30,21 +30,17 @@ FAILING:
             binary — if it also fails, this is an environment issue.
 
   postgres:
-    Status: PARTIALLY FIXED (75/216 tests pass after peephole indirect jump fix)
-    Notes: Previous SIGSEGV crash during boolean queries is now FIXED.
-           Root cause: peephole store forwarding pass did not classify
-           `jmpq *%rax` (computed goto indirect jump) as a jump, so
-           computed goto target labels were treated as fallthrough-only.
-           This caused incorrect store-to-load forwarding across labels
-           that could be entered via indirect jump with different register
-           state. Fixed by adding JmpIndirect classification and marking
-           all labels as jump targets when indirect jumps are present.
-           Remaining failures (~141/216) are due to:
-           1. Wrong numeric ln()/sqrt()/log() results (original values
-              returned instead of correct computation)
-           2. Possible test runner timeout or connection issues for
-              later test groups
-    Action: Fix numeric computation bugs (ln/sqrt/log functions).
+    Status: PARTIALLY FIXED (78/216 tests pass)
+    Notes: __builtin_frame_address(0) was returning NULL (stub), causing
+           postgres stack depth check to fail and infinite_recurse test to
+           crash the server. Now fixed: infinite_recurse passes.
+           Remaining failures (~138/216) are due to:
+           1. Wrong numeric ln()/sqrt()/log() results (postgres arbitrary-
+              precision numeric library computes wrong values)
+           2. "could not open relation with OID 108544" errors in some tests
+           3. Server crash cascade from test 88 onwards (sanity_check)
+           4. ENOENT text instead of "No such file or directory" in strerror
+    Action: Investigate numeric computation bug and OID corruption.
 
 PRIORITY ORDER for fixing:
   1. Fix postgres wrong numeric ln()/sqrt()/log() computation

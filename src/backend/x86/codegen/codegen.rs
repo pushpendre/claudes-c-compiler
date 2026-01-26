@@ -1208,6 +1208,20 @@ impl X86Codegen {
                     self.store_rax_to(d);
                 }
             }
+            IntrinsicOp::FrameAddress => {
+                // __builtin_frame_address(0): return current frame pointer (rbp)
+                self.state.emit("    movq %rbp, %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::ReturnAddress => {
+                // __builtin_return_address(0): return address is at (%rbp)+8
+                self.state.emit("    movq 8(%rbp), %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
         }
     }
 }

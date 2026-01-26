@@ -175,9 +175,12 @@ impl Lowerer {
                 None
             };
 
-            let alloca = self.fresh_value();
+            let alloca;
             if let Some(vla_size_val) = vla_size {
                 // VLA: allocate dynamically on the stack using DynAlloca.
+                // VLAs must stay at the declaration point (not hoisted) because
+                // their size is computed at runtime.
+                alloca = self.fresh_value();
                 // First, save the stack pointer if this is the first VLA in the function.
                 if !self.func().has_vla {
                     self.func_mut().has_vla = true;
@@ -192,13 +195,15 @@ impl Lowerer {
                     align,
                 });
             } else {
-                self.emit(Instruction::Alloca {
-                    dest: alloca,
-                    ty: if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
-                    size: da.actual_alloc_size,
-                    align: decl.alignment.unwrap_or(0),
-                    volatile: decl.is_volatile,
-                });
+                // Hoist static-size allocas to the entry block so that variables
+                // whose declarations are skipped by `goto` still have valid
+                // stack slots at runtime.
+                alloca = self.emit_entry_alloca(
+                    if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
+                    da.actual_alloc_size,
+                    decl.alignment.unwrap_or(0),
+                    decl.is_volatile,
+                );
             }
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
             local_info.vla_size = vla_size;

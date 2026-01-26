@@ -836,6 +836,25 @@ impl ArmCodegen {
                     }
                 }
             }
+            IntrinsicOp::FrameAddress => {
+                // __builtin_frame_address(0): return current frame pointer (x29)
+                self.state.emit("    mov x0, x29");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            IntrinsicOp::ReturnAddress => {
+                // __builtin_return_address(0): return address saved at [x29, #8]
+                // x30 (lr) is clobbered by bl instructions, so read from stack
+                self.state.emit("    ldr x0, [x29, #8]");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
         }
     }
 }

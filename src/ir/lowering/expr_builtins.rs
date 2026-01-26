@@ -503,6 +503,41 @@ impl Lowerer {
                 });
                 Some(Operand::Value(dest_val))
             }
+            // __builtin_frame_address(level) / __builtin_return_address(level)
+            // Only level 0 is supported; higher levels return 0.
+            BuiltinIntrinsic::FrameAddress | BuiltinIntrinsic::ReturnAddress => {
+                // Evaluate the level argument
+                let level = if !args.is_empty() {
+                    self.lower_expr(&args[0])
+                } else {
+                    Operand::Const(IrConst::I64(0))
+                };
+                // Only level 0 is supported; for other levels return NULL
+                let is_level_zero = match &level {
+                    Operand::Const(IrConst::I64(0)) => true,
+                    Operand::Const(IrConst::I32(0)) => true,
+                    _ => false,
+                };
+                if is_level_zero {
+                    let op = if *intrinsic == BuiltinIntrinsic::FrameAddress {
+                        IntrinsicOp::FrameAddress
+                    } else {
+                        IntrinsicOp::ReturnAddress
+                    };
+                    let dest_val = self.fresh_value();
+                    self.emit(Instruction::Intrinsic {
+                        dest: Some(dest_val),
+                        op,
+                        dest_ptr: None,
+                        args: vec![],
+                    });
+                    Some(Operand::Value(dest_val))
+                } else {
+                    // TODO: support non-zero levels by walking the frame pointer chain
+                    // Non-zero levels: return NULL (matching GCC behavior for non-optimized)
+                    Some(Operand::Const(IrConst::I64(0)))
+                }
+            }
         }
     }
 

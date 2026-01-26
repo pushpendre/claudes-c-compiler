@@ -89,9 +89,9 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_alloca", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
     m.insert("__builtin_alloca_with_align", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
 
-    // Return address / frame address (return 0 as approximation)
-    m.insert("__builtin_return_address", BuiltinInfo::constant_i64(0));
-    m.insert("__builtin_frame_address", BuiltinInfo::constant_i64(0));
+    // Return address / frame address
+    m.insert("__builtin_return_address", BuiltinInfo::intrinsic(BuiltinIntrinsic::ReturnAddress));
+    m.insert("__builtin_frame_address", BuiltinInfo::intrinsic(BuiltinIntrinsic::FrameAddress));
     m.insert("__builtin_extract_return_addr", BuiltinInfo::identity());
 
     // Compiler hints (these become no-ops or identity)
@@ -352,6 +352,10 @@ pub enum BuiltinIntrinsic {
     SubOverflow,
     /// __builtin_mul_overflow(a, b, result_ptr) -> bool (1 if overflow)
     MulOverflow,
+    /// __builtin_frame_address(level) -> returns frame pointer
+    FrameAddress,
+    /// __builtin_return_address(level) -> returns return address
+    ReturnAddress,
     // X86 SSE intrinsics
     X86Lfence,
     X86Mfence,

@@ -904,6 +904,10 @@ pub enum IntrinsicOp {
     Crc32_16,
     Crc32_32,
     Crc32_64,
+    /// __builtin_frame_address(0) - returns current frame pointer
+    FrameAddress,
+    /// __builtin_return_address(0) - returns current return address
+    ReturnAddress,
 }
 
 impl Instruction {

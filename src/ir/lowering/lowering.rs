@@ -617,6 +617,17 @@ impl Lowerer {
         self.func_mut().instrs.push(inst);
     }
 
+    /// Emit an alloca into the entry block buffer.
+    /// Used for local variable declarations so that variables whose
+    /// declarations are skipped by `goto` still have valid stack slots.
+    pub(super) fn emit_entry_alloca(&mut self, ty: IrType, size: usize, align: usize, volatile: bool) -> Value {
+        let dest = self.fresh_value();
+        self.func_mut().entry_allocas.push(Instruction::Alloca {
+            dest, ty, size, align, volatile,
+        });
+        dest
+    }
+
     /// Emit a binary operation and return the result Value.
     pub(super) fn emit_binop_val(&mut self, op: IrBinOp, lhs: Operand, rhs: Operand, ty: IrType) -> Value {
         let dest = self.fresh_value();
@@ -1034,6 +1045,23 @@ impl Lowerer {
         {
             let ret_op = if return_type == IrType::Void { None } else { Some(Operand::Const(IrConst::I32(0))) };
             self.terminate(Terminator::Return(ret_op));
+        }
+
+        // Merge deferred entry-block allocas into blocks[0], right after
+        // the existing parameter allocas. mem2reg skips the first N allocas
+        // (where N = param count) so deferred local allocas must come after them.
+        let entry_allocas = std::mem::take(&mut self.func_mut().entry_allocas);
+        if !entry_allocas.is_empty() {
+            if let Some(entry_block) = self.func_mut().blocks.first_mut() {
+                // Find the insertion point: right after the last Alloca instruction
+                // in the entry block (these are parameter allocas).
+                let insert_pos = entry_block.instructions.iter()
+                    .rposition(|inst| matches!(inst, Instruction::Alloca { .. }))
+                    .map(|pos| pos + 1)
+                    .unwrap_or(0);
+                // Splice deferred allocas at the insertion point.
+                entry_block.instructions.splice(insert_pos..insert_pos, entry_allocas);
+            }
         }
 
         // extern inline with __attribute__((gnu_inline)) should be treated as local

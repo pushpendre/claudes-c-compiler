@@ -109,6 +109,11 @@ pub(super) struct FunctionBuildState {
     /// Whether the function has any VLA declarations.
     /// Used to decide whether to emit StackSave/StackRestore around gotos.
     pub has_vla: bool,
+    /// Alloca instructions deferred to the entry block.
+    /// Local variable allocas are collected here during lowering so that
+    /// variables whose declarations are skipped by `goto` still have valid
+    /// stack slots at runtime. Merged into blocks[0] in finalize_function.
+    pub entry_allocas: Vec<Instruction>,
 }
 
 impl FunctionBuildState {
@@ -135,6 +140,7 @@ impl FunctionBuildState {
             next_value: 0,
             vla_stack_save: None,
             has_vla: false,
+            entry_allocas: Vec::new(),
         }
     }
 
