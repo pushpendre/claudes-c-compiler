@@ -107,7 +107,11 @@ pub struct RiscvCodegen {
     pub(super) state: CodegenState,
     current_return_type: IrType,
     /// Number of named integer params for current variadic function.
+    /// This is the effective GP register index after classification (including
+    /// alignment gaps for I128/F128 pairs), capped at 8.
     va_named_gp_count: usize,
+    /// Total bytes of named params that overflow to the caller's stack.
+    va_named_stack_bytes: usize,
     /// Current frame size (below s0, not including the register save area above s0).
     current_frame_size: i64,
     /// Whether the current function is variadic.
@@ -132,6 +136,7 @@ impl RiscvCodegen {
             state: CodegenState::new(),
             current_return_type: IrType::I64,
             va_named_gp_count: 0,
+            va_named_stack_bytes: 0,
             current_frame_size: 0,
             is_variadic: false,
             asm_gp_scratch_idx: 0,
@@ -1391,11 +1396,12 @@ impl ArchCodegen for RiscvCodegen {
         // This is critical for va_start to correctly point to the first variadic arg.
         if func.is_variadic {
             // For variadic callee, call_abi_config() already has variadic_floats_in_gp: true.
-            let param_classes = classify_params(func, &self.call_abi_config());
-            self.va_named_gp_count = param_classes.iter()
-                .map(|c| c.gp_reg_count())
-                .sum::<usize>()
-                .min(8);
+            let classification = crate::backend::call_emit::classify_params_full(func, &self.call_abi_config());
+            // Use the effective GP register index (includes alignment gaps for I128/F128 pairs)
+            // rather than summing gp_reg_count(), so we correctly skip over alignment padding.
+            self.va_named_gp_count = classification.int_reg_idx.min(8);
+            // Track stack bytes consumed by named params that overflowed to the caller's stack.
+            self.va_named_stack_bytes = crate::backend::call_emit::named_params_stack_bytes(&classification.classes);
             self.is_variadic = true;
         } else {
             self.is_variadic = false;
@@ -2874,11 +2880,23 @@ impl ArchCodegen for RiscvCodegen {
             self.emit_load_from_s0("t0", slot.0, "ld");
         }
 
-        // Variadic args start at a[named_gp_count] in the register save area.
-        // a0 is at s0+0, a1 at s0+8, ..., a7 at s0+56.
-        // If all 8 GP regs are used by named params, variadic args start on the
-        // caller's stack at s0+64.
-        let vararg_offset = (self.va_named_gp_count as i64) * 8;
+        // Variadic args start after all named params in the contiguous
+        // register-save-area + caller-stack layout:
+        //   s0+0..s0+56  = register save area (a0-a7)
+        //   s0+64+       = caller's stack-passed arguments
+        //
+        // If named params consumed N GP regs (including alignment gaps), the
+        // first variadic arg is at s0 + N*8 (if N < 8, it's in the save area).
+        // If all 8 GP regs are consumed by named params AND some named params
+        // also overflowed to the stack, the variadic args follow the stack-passed
+        // named args at s0 + 64 + named_stack_bytes.
+        let vararg_offset = if self.va_named_gp_count >= 8 {
+            // All GP regs consumed; variadic args are on the stack after named stack args
+            64 + self.va_named_stack_bytes as i64
+        } else {
+            // Some GP regs still available; variadic args start in the register save area
+            (self.va_named_gp_count as i64) * 8
+        };
         self.emit_addi_s0("t1", vararg_offset);
         self.state.emit("    sd t1, 0(t0)");
     }

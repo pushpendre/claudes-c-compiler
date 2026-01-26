@@ -99,8 +99,9 @@ pub struct ArmCodegen {
     va_named_gp_count: usize,
     /// Number of named (non-variadic) FP params for current variadic function.
     va_named_fp_count: usize,
-    /// Number of named GP params that are passed on the stack (beyond 8 register args).
-    va_named_stack_gp_count: usize,
+    /// Total bytes of named (non-variadic) params passed on the stack.
+    /// This includes all stack-passed scalars, F128, I128, and structs with alignment.
+    va_named_stack_bytes: usize,
     /// Scratch register index for inline asm GP register allocation
     asm_scratch_idx: usize,
     /// Scratch register index for inline asm FP register allocation
@@ -126,7 +127,7 @@ impl ArmCodegen {
             va_fp_save_offset: 0,
             va_named_gp_count: 0,
             va_named_fp_count: 0,
-            va_named_stack_gp_count: 0,
+            va_named_stack_bytes: 0,
             asm_scratch_idx: 0,
             asm_fp_scratch_idx: 0,
             reg_assignments: FxHashMap::default(),
@@ -1677,8 +1678,9 @@ impl ArchCodegen for ArmCodegen {
             }
             self.va_named_gp_count = named_gp.min(8);
             self.va_named_fp_count = named_fp.min(8);
-            // Track stack-passed named args (GP args beyond 8 register slots)
-            self.va_named_stack_gp_count = named_gp.saturating_sub(8);
+            // Compute total stack bytes consumed by named params (scalars, F128, structs, etc.)
+            // This is needed so va_start's __stack pointer skips past all named stack args.
+            self.va_named_stack_bytes = crate::backend::call_emit::named_params_stack_bytes(&param_classes);
         }
 
         // Reserve space for saving callee-saved registers (8 bytes each).
@@ -3370,9 +3372,9 @@ impl ArchCodegen for ArmCodegen {
         // After prologue: sp = x29, [x29] = saved fp, [x29+8] = saved lr,
         // [x29+16..x29+frame_size-1] = local slots.
         // Caller's stack args are at x29 + frame_size (above our frame).
-        // If there are named args on the stack (more than 8 GP params), we must
-        // skip past them to point to the first variadic stack arg.
-        let stack_offset = self.current_frame_size + (self.va_named_stack_gp_count as i64 * 8);
+        // If named params overflow to the stack (e.g., ints beyond 8 GP regs, or
+        // F128 beyond 8 FP regs), we must skip past all of them.
+        let stack_offset = self.current_frame_size + self.va_named_stack_bytes as i64;
         if stack_offset <= 4095 {
             self.state.emit_fmt(format_args!("    add x1, x29, #{}", stack_offset));
         } else {

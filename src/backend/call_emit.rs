@@ -79,6 +79,22 @@ impl ParamClass {
         )
     }
 
+    /// Returns the number of stack bytes consumed by this parameter classification.
+    /// Used by variadic function handling to compute how many stack bytes named
+    /// parameters occupy, so va_start can skip past them.
+    pub fn stack_bytes(&self) -> usize {
+        match self {
+            ParamClass::StackScalar { .. } => 8,
+            ParamClass::I128Stack { .. } => 16,
+            ParamClass::F128Stack { .. } => 16,
+            ParamClass::F128AlwaysStack { .. } => 16,
+            ParamClass::StructStack { size, .. } => (*size + 7) & !7,
+            ParamClass::LargeStructStack { size, .. } => (*size + 7) & !7,
+            ParamClass::LargeStructByRefStack { .. } => 8, // pointer on stack
+            _ => 0, // register-passed params don't consume stack space
+        }
+    }
+
     /// Returns the number of GP registers consumed by this parameter classification.
     /// Used by variadic function handling to compute the correct va_start offset.
     pub fn gp_reg_count(&self) -> usize {
@@ -98,11 +114,23 @@ impl ParamClass {
     }
 }
 
+/// Result of parameter classification, including the final register allocation state.
+/// The `int_reg_idx` field captures the effective GP register index after all named
+/// params are classified, which is needed by RISC-V va_start to correctly skip
+/// alignment padding gaps (e.g., when an F128 pair couldn't fit and bumped the index).
+pub struct ParamClassification {
+    pub classes: Vec<ParamClass>,
+    /// Final GP register index after classifying all named params.
+    /// Includes alignment bumps for I128/F128 pairs. Capped at max_int_regs.
+    pub int_reg_idx: usize,
+}
+
 /// Classify all parameters of a function for callee-side store emission.
 ///
 /// Uses the same `CallAbiConfig` as `classify_call_args` to ensure caller and callee
-/// agree on parameter locations. Returns one `ParamClass` per parameter.
-pub fn classify_params(func: &IrFunction, config: &CallAbiConfig) -> Vec<ParamClass> {
+/// agree on parameter locations. Returns one `ParamClass` per parameter plus the final
+/// register allocation state.
+pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamClassification {
     let mut result = Vec::with_capacity(func.params.len());
     let mut int_reg_idx = 0usize;
     let mut float_reg_idx = 0usize;
@@ -279,5 +307,33 @@ pub fn classify_params(func: &IrFunction, config: &CallAbiConfig) -> Vec<ParamCl
         }
     }
 
-    result
+    ParamClassification {
+        classes: result,
+        int_reg_idx,
+    }
+}
+
+/// Classify all parameters of a function for callee-side store emission.
+///
+/// Uses the same `CallAbiConfig` as `classify_call_args` to ensure caller and callee
+/// agree on parameter locations. Returns one `ParamClass` per parameter.
+pub fn classify_params(func: &IrFunction, config: &CallAbiConfig) -> Vec<ParamClass> {
+    classify_params_full(func, config).classes
+}
+
+/// Compute the total stack space (in bytes) consumed by named parameters that are
+/// passed on the stack. This is needed for variadic functions: va_start must set its
+/// stack pointer past all named stack-passed args to point at the first variadic arg.
+///
+/// This correctly accounts for alignment padding (e.g., 16-byte alignment for F128/I128).
+pub fn named_params_stack_bytes(param_classes: &[ParamClass]) -> usize {
+    let mut total: usize = 0;
+    for class in param_classes {
+        // Align for 16-byte types before adding their size
+        if matches!(class, ParamClass::F128Stack { .. } | ParamClass::I128Stack { .. }) {
+            total = (total + 15) & !15;
+        }
+        total += class.stack_bytes();
+    }
+    total
 }
