@@ -1,0 +1,12 @@
+Bug: Static struct initializers with array-of-struct fields produce all zeros
+when another field in the outer struct requires a relocation (address constant).
+
+Root cause: In emit_compound_field_init (global_init_compound.rs), when a non-pointer
+array-of-struct field is serialized to bytes, it falls through to fill_scalar_list_to_bytes
+which only handles Initializer::Expr items, silently skipping Initializer::List items
+(which is what struct element initializers are). This leaves the byte buffer as all zeros.
+
+Fix: Add a check for struct/union element types before calling fill_scalar_list_to_bytes,
+and dispatch to fill_array_of_composites instead when the array elements are structs/unions.
+
+Status: in_progress
