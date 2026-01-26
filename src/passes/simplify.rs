@@ -1,6 +1,6 @@
 //! Algebraic simplification and strength reduction pass.
 //!
-//! Applies algebraic identities to simplify instructions:
+//! Applies algebraic identities to simplify instructions (integer types):
 //! - x + 0 => x, 0 + x => x
 //! - x - 0 => x, x - x => 0
 //! - x * 0 => 0, x * 1 => x
@@ -10,6 +10,10 @@
 //! - x | 0 => x, x | x => x
 //! - x ^ 0 => x, x ^ x => 0
 //! - x << 0 => x, x >> 0 => x
+//!
+//! Float-unsafe simplifications (x + 0, 0 + x, x * 0, x - x, x / x) are
+//! restricted to integer types to preserve IEEE 754 semantics (signed zeros,
+//! NaN propagation, infinity arithmetic).
 //!
 //! Strength reduction (integer types only):
 //! - x * 2^k => x << k  (multiply by power-of-2 to shift)
@@ -370,25 +374,30 @@ fn simplify_binop(
     let lhs_one = is_one(lhs);
     let rhs_one = is_one(rhs);
     let same_value = same_value_operands(lhs, rhs);
+    let is_float = ty.is_float();
 
     match op {
         IrBinOp::Add => {
-            if rhs_zero {
-                // x + 0 => x
-                return Some(Instruction::Copy { dest, src: *lhs });
-            }
-            if lhs_zero {
-                // 0 + x => x
-                return Some(Instruction::Copy { dest, src: *rhs });
+            // For floats, x + 0 => x is invalid because -0.0 + 0.0 = +0.0, not -0.0.
+            // IEEE 754: the sign of a sum differs from at most one addend.
+            if !is_float {
+                if rhs_zero {
+                    // x + 0 => x (integers only)
+                    return Some(Instruction::Copy { dest, src: *lhs });
+                }
+                if lhs_zero {
+                    // 0 + x => x (integers only)
+                    return Some(Instruction::Copy { dest, src: *rhs });
+                }
             }
         }
         IrBinOp::Sub => {
-            if rhs_zero {
-                // x - 0 => x
+            if rhs_zero && (!is_float || is_positive_zero(rhs)) {
+                // x - 0 => x (for floats, only valid when rhs is +0.0; -0.0 - (-0.0) = +0.0)
                 return Some(Instruction::Copy { dest, src: *lhs });
             }
-            if same_value {
-                // x - x => 0
+            if !is_float && same_value {
+                // x - x => 0 (integers only; for floats, Inf - Inf = NaN)
                 return Some(Instruction::Copy {
                     dest,
                     src: Operand::Const(IrConst::zero(ty)),
@@ -396,19 +405,19 @@ fn simplify_binop(
             }
         }
         IrBinOp::Mul => {
-            if rhs_zero || lhs_zero {
-                // x * 0 or 0 * x => 0
+            if !is_float && (rhs_zero || lhs_zero) {
+                // x * 0 or 0 * x => 0 (integers only; for floats, NaN*0=NaN, -x*0=-0)
                 return Some(Instruction::Copy {
                     dest,
                     src: Operand::Const(IrConst::zero(ty)),
                 });
             }
             if rhs_one {
-                // x * 1 => x
+                // x * 1 => x (valid for both int and float)
                 return Some(Instruction::Copy { dest, src: *lhs });
             }
             if lhs_one {
-                // 1 * x => x
+                // 1 * x => x (valid for both int and float)
                 return Some(Instruction::Copy { dest, src: *rhs });
             }
             // Strength reduction: multiply by power-of-2 => shift left
@@ -458,11 +467,11 @@ fn simplify_binop(
         }
         IrBinOp::SDiv | IrBinOp::UDiv => {
             if rhs_one {
-                // x / 1 => x
+                // x / 1 => x (valid for both int and float)
                 return Some(Instruction::Copy { dest, src: *lhs });
             }
-            if same_value {
-                // x / x => 1 (assuming x != 0, which is UB anyway)
+            if !is_float && same_value {
+                // x / x => 1 (integers only; for floats, 0/0=NaN, Inf/Inf=NaN)
                 return Some(Instruction::Copy {
                     dest,
                     src: Operand::Const(IrConst::one(ty)),
@@ -577,9 +586,20 @@ fn simplify_binop(
     None
 }
 
-/// Check if an operand is zero.
+/// Check if an operand is zero (including both +0.0 and -0.0 for floats).
 fn is_zero(op: &Operand) -> bool {
     matches!(op, Operand::Const(c) if c.is_zero())
+}
+
+/// Check if a float operand is positive zero (+0.0), using the bit pattern.
+/// Returns false for -0.0, non-zero values, and non-float types.
+fn is_positive_zero(op: &Operand) -> bool {
+    match op {
+        Operand::Const(IrConst::F32(v)) => *v == 0.0 && !v.is_sign_negative(),
+        Operand::Const(IrConst::F64(v)) => *v == 0.0 && !v.is_sign_negative(),
+        Operand::Const(IrConst::LongDouble(v)) => *v == 0.0 && !v.is_sign_negative(),
+        _ => false,
+    }
 }
 
 /// Check if an operand is one.
@@ -994,5 +1014,139 @@ mod tests {
             }
             _ => panic!("Expected Copy of base, got {:?}", result),
         }
+    }
+
+    // === IEEE 754 float safety tests ===
+
+    #[test]
+    fn test_float_add_zero_not_simplified() {
+        // -0.0 + 0.0 must NOT be simplified to -0.0 (result should be +0.0)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Add,
+            lhs: Operand::Const(IrConst::F64(-0.0)),
+            rhs: Operand::Const(IrConst::F64(0.0)),
+            ty: IrType::F64,
+        };
+        // Should NOT simplify (float add with zero)
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_add_zero_lhs_not_simplified() {
+        // 0.0 + (-0.0) must NOT simplify to -0.0
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Add,
+            lhs: Operand::Const(IrConst::F64(0.0)),
+            rhs: Operand::Const(IrConst::F64(-0.0)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_mul_zero_not_simplified() {
+        // x * 0.0 must NOT simplify for floats (NaN*0=NaN, -5.0*0=-0.0)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Mul,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::F64(0.0)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_sub_self_not_simplified() {
+        // x - x must NOT simplify for floats (Inf - Inf = NaN)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(2),
+            op: IrBinOp::Sub,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Value(Value(1)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_div_self_not_simplified() {
+        // x / x must NOT simplify for floats (0/0=NaN, Inf/Inf=NaN)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(2),
+            op: IrBinOp::SDiv,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Value(Value(1)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_sub_positive_zero_ok() {
+        // x - (+0.0) is safe (subtracting +0 preserves value)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Sub,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::F64(0.0)),
+            ty: IrType::F64,
+        };
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Value(v), .. } => assert_eq!(v.0, 1),
+            _ => panic!("Expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_float_sub_negative_zero_not_simplified() {
+        // x - (-0.0) is NOT safe (equivalent to x + 0.0, changes -0.0 to +0.0)
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Sub,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::F64(-0.0)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_mul_one_not_simplified() {
+        // x * F64(1.0) is not simplified because is_one() only matches integer 1.
+        // This is fine -- the constant folder handles float-float folding separately.
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Mul,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::F64(1.0)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_float_div_one_not_simplified() {
+        // x / F64(1.0) is not simplified because is_one() only matches integer 1.
+        let empty_defs = no_defs();
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::SDiv,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::F64(1.0)),
+            ty: IrType::F64,
+        };
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
     }
 }

@@ -52,6 +52,16 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             if ty.is_128bit() {
                 return None;
             }
+            // Try float folding first
+            if ty.is_float() {
+                let l = as_f64_const(lhs)?;
+                let r = as_f64_const(rhs)?;
+                let result = fold_float_binop(*op, l, r)?;
+                return Some(Instruction::Copy {
+                    dest: *dest,
+                    src: Operand::Const(make_float_const(result, *ty)),
+                });
+            }
             let lhs_const = as_i64_const(lhs)?;
             let rhs_const = as_i64_const(rhs)?;
             let result = fold_binop(*op, lhs_const, rhs_const)?;
@@ -65,6 +75,15 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             if ty.is_128bit() {
                 return None;
             }
+            // Try float unary folding
+            if ty.is_float() {
+                let s = as_f64_const(src)?;
+                let result = fold_float_unaryop(*op, s)?;
+                return Some(Instruction::Copy {
+                    dest: *dest,
+                    src: Operand::Const(make_float_const(result, *ty)),
+                });
+            }
             let src_const = as_i64_const(src)?;
             let result = fold_unaryop(*op, src_const, *ty)?;
             Some(Instruction::Copy {
@@ -76,6 +95,16 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             // Skip 128-bit comparison types
             if ty.is_128bit() {
                 return None;
+            }
+            // Try float comparison folding
+            if ty.is_float() {
+                let l = as_f64_const(lhs)?;
+                let r = as_f64_const(rhs)?;
+                let result = fold_float_cmp(*op, l, r);
+                return Some(Instruction::Copy {
+                    dest: *dest,
+                    src: Operand::Const(IrConst::I32(result as i32)),
+                });
             }
             let lhs_const = as_i64_const(lhs)?;
             let rhs_const = as_i64_const(rhs)?;
@@ -89,6 +118,10 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             // Skip casts involving 128-bit types
             if from_ty.is_128bit() || to_ty.is_128bit() {
                 return None;
+            }
+            // Handle float-to-int and int-to-float casts
+            if from_ty.is_float() || to_ty.is_float() {
+                return try_fold_float_cast(*dest, src, *from_ty, *to_ty);
             }
             let src_const = as_i64_const(src)?;
             let result = fold_cast(src_const, *from_ty, *to_ty);
@@ -116,6 +149,103 @@ fn as_i64_const(op: &Operand) -> Option<i64> {
         Operand::Const(c) => c.to_i64(),
         Operand::Value(_) => None,
     }
+}
+
+/// Extract a constant floating-point value from an operand.
+fn as_f64_const(op: &Operand) -> Option<f64> {
+    match op {
+        Operand::Const(IrConst::F32(v)) => Some(*v as f64),
+        Operand::Const(IrConst::F64(v)) => Some(*v),
+        Operand::Const(IrConst::LongDouble(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Create a float constant of the appropriate type from an f64 value.
+fn make_float_const(val: f64, ty: IrType) -> IrConst {
+    match ty {
+        IrType::F32 => IrConst::F32(val as f32),
+        IrType::F64 => IrConst::F64(val),
+        IrType::F128 => IrConst::LongDouble(val),
+        _ => unreachable!("make_float_const called with non-float type"),
+    }
+}
+
+/// Evaluate a binary operation on two constant floats.
+/// Uses Rust's native f64 arithmetic which is IEEE 754 compliant.
+fn fold_float_binop(op: IrBinOp, lhs: f64, rhs: f64) -> Option<f64> {
+    Some(match op {
+        IrBinOp::Add => lhs + rhs,
+        IrBinOp::Sub => lhs - rhs,
+        IrBinOp::Mul => lhs * rhs,
+        // For division, allow folding even for division by zero (produces Inf/-Inf/NaN per IEEE 754)
+        IrBinOp::SDiv | IrBinOp::UDiv => lhs / rhs,
+        IrBinOp::SRem | IrBinOp::URem => lhs % rhs,
+        // Bitwise ops don't apply to floats
+        _ => return None,
+    })
+}
+
+/// Evaluate a unary operation on a constant float.
+fn fold_float_unaryop(op: IrUnaryOp, src: f64) -> Option<f64> {
+    match op {
+        IrUnaryOp::Neg => Some(-src),
+        _ => None,
+    }
+}
+
+/// Evaluate a comparison on two constant floats.
+/// Uses IEEE 754 comparison semantics (NaN comparisons return false for ordered ops).
+fn fold_float_cmp(op: IrCmpOp, lhs: f64, rhs: f64) -> bool {
+    match op {
+        IrCmpOp::Eq => lhs == rhs,
+        IrCmpOp::Ne => lhs != rhs,
+        // For floats, we use ordered comparisons (signed variants)
+        IrCmpOp::Slt | IrCmpOp::Ult => lhs < rhs,
+        IrCmpOp::Sle | IrCmpOp::Ule => lhs <= rhs,
+        IrCmpOp::Sgt | IrCmpOp::Ugt => lhs > rhs,
+        IrCmpOp::Sge | IrCmpOp::Uge => lhs >= rhs,
+    }
+}
+
+/// Try to fold a cast involving float types.
+// TODO: simplify.rs also has float cast folding via IrConst::cast_float_to_target
+// which doesn't check for NaN/Inf. These should be unified eventually.
+fn try_fold_float_cast(dest: Value, src: &Operand, from_ty: IrType, to_ty: IrType) -> Option<Instruction> {
+    let src_const = match src {
+        Operand::Const(c) => c,
+        _ => return None,
+    };
+    let result = match (from_ty.is_float(), to_ty.is_float()) {
+        (true, true) => {
+            // float-to-float conversion
+            let val = as_f64_const(src)?;
+            make_float_const(val, to_ty)
+        }
+        (true, false) => {
+            // float-to-int conversion
+            let val = as_f64_const(src)?;
+            // Don't fold if value can't be represented as i64
+            if !val.is_finite() || val < i64::MIN as f64 || val > i64::MAX as f64 {
+                return None;
+            }
+            IrConst::from_i64(val as i64, to_ty)
+        }
+        (false, true) => {
+            // int-to-float conversion
+            let val = src_const.to_i64()?;
+            if from_ty.is_unsigned() {
+                make_float_const(val as u64 as f64, to_ty)
+            } else {
+                make_float_const(val as f64, to_ty)
+            }
+        }
+        _ => return None,
+    };
+    Some(Instruction::Copy {
+        dest,
+        src: Operand::Const(result),
+    })
 }
 
 /// Evaluate a binary operation on two constant integers.
@@ -385,5 +515,162 @@ mod tests {
             ty: IrType::I32,
         };
         assert!(try_fold(&inst).is_none());
+    }
+
+    // === Float constant folding tests ===
+
+    #[test]
+    fn test_fold_float_neg_zero_add() {
+        // -0.0 + 0.0 = +0.0 (IEEE 754)
+        let result = fold_float_binop(IrBinOp::Add, -0.0, 0.0).unwrap();
+        assert!(result == 0.0 && !result.is_sign_negative(), "Expected +0.0");
+    }
+
+    #[test]
+    fn test_fold_float_neg_zero_add_self() {
+        // -0.0 + -0.0 = -0.0 (IEEE 754)
+        let result = fold_float_binop(IrBinOp::Add, -0.0, -0.0).unwrap();
+        assert!(result == 0.0 && result.is_sign_negative(), "Expected -0.0");
+    }
+
+    #[test]
+    fn test_fold_float_nan_mul_zero() {
+        // NaN * 0.0 = NaN (IEEE 754)
+        let result = fold_float_binop(IrBinOp::Mul, f64::NAN, 0.0).unwrap();
+        assert!(result.is_nan(), "Expected NaN");
+    }
+
+    #[test]
+    fn test_fold_float_neg_mul_zero() {
+        // -5.0 * 0.0 = -0.0 (IEEE 754)
+        let result = fold_float_binop(IrBinOp::Mul, -5.0, 0.0).unwrap();
+        assert!(result == 0.0 && result.is_sign_negative(), "Expected -0.0");
+    }
+
+    #[test]
+    fn test_fold_float_div_by_zero() {
+        // 1.0 / 0.0 = +Inf (IEEE 754)
+        let result = fold_float_binop(IrBinOp::SDiv, 1.0, 0.0).unwrap();
+        assert!(result.is_infinite() && result.is_sign_positive());
+    }
+
+    #[test]
+    fn test_fold_float_neg_div_zero() {
+        // -1.0 / 0.0 = -Inf (IEEE 754)
+        let result = fold_float_binop(IrBinOp::SDiv, -1.0, 0.0).unwrap();
+        assert!(result.is_infinite() && result.is_sign_negative());
+    }
+
+    #[test]
+    fn test_fold_float_cmp_neg_zero_eq() {
+        // -0.0 == 0.0 is true (IEEE 754)
+        assert!(fold_float_cmp(IrCmpOp::Eq, -0.0, 0.0));
+    }
+
+    #[test]
+    fn test_fold_float_cmp_nan_ne() {
+        // NaN != NaN is true (IEEE 754)
+        assert!(fold_float_cmp(IrCmpOp::Ne, f64::NAN, f64::NAN));
+        // NaN == NaN is false
+        assert!(!fold_float_cmp(IrCmpOp::Eq, f64::NAN, f64::NAN));
+        // NaN < 1.0 is false
+        assert!(!fold_float_cmp(IrCmpOp::Slt, f64::NAN, 1.0));
+    }
+
+    #[test]
+    fn test_fold_float_unary_neg() {
+        let result = fold_float_unaryop(IrUnaryOp::Neg, 5.0).unwrap();
+        assert_eq!(result, -5.0);
+        // Negating -0.0 gives +0.0
+        let result = fold_float_unaryop(IrUnaryOp::Neg, -0.0).unwrap();
+        assert!(result == 0.0 && !result.is_sign_negative());
+    }
+
+    #[test]
+    fn test_fold_float_cast_int_to_float() {
+        let inst = Instruction::Cast {
+            dest: Value(0),
+            src: Operand::Const(IrConst::I32(42)),
+            from_ty: IrType::I32,
+            to_ty: IrType::F64,
+        };
+        let result = try_fold(&inst).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Const(IrConst::F64(v)), .. } => {
+                assert_eq!(v, 42.0);
+            }
+            _ => panic!("Expected Copy with F64(42.0)"),
+        }
+    }
+
+    #[test]
+    fn test_fold_float_cast_float_to_int() {
+        let inst = Instruction::Cast {
+            dest: Value(0),
+            src: Operand::Const(IrConst::F64(3.14)),
+            from_ty: IrType::F64,
+            to_ty: IrType::I32,
+        };
+        let result = try_fold(&inst).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Const(IrConst::I32(v)), .. } => {
+                assert_eq!(v, 3);
+            }
+            _ => panic!("Expected Copy with I32(3)"),
+        }
+    }
+
+    #[test]
+    fn test_fold_float_cast_nan_to_int_no_fold() {
+        // NaN to int should not fold
+        let inst = Instruction::Cast {
+            dest: Value(0),
+            src: Operand::Const(IrConst::F64(f64::NAN)),
+            from_ty: IrType::F64,
+            to_ty: IrType::I32,
+        };
+        assert!(try_fold(&inst).is_none());
+    }
+
+    #[test]
+    fn test_fold_float_cast_overflow_to_int_no_fold() {
+        // 1e20 exceeds i32 range, should not fold
+        let inst = Instruction::Cast {
+            dest: Value(0),
+            src: Operand::Const(IrConst::F64(1e20)),
+            from_ty: IrType::F64,
+            to_ty: IrType::I32,
+        };
+        assert!(try_fold(&inst).is_none());
+    }
+
+    #[test]
+    fn test_fold_float_cast_inf_to_int_no_fold() {
+        let inst = Instruction::Cast {
+            dest: Value(0),
+            src: Operand::Const(IrConst::F64(f64::INFINITY)),
+            from_ty: IrType::F64,
+            to_ty: IrType::I64,
+        };
+        assert!(try_fold(&inst).is_none());
+    }
+
+    #[test]
+    fn test_fold_float_binop_instruction() {
+        // Full instruction folding: F64(3.0) + F64(4.0) => F64(7.0)
+        let inst = Instruction::BinOp {
+            dest: Value(0),
+            op: IrBinOp::Add,
+            lhs: Operand::Const(IrConst::F64(3.0)),
+            rhs: Operand::Const(IrConst::F64(4.0)),
+            ty: IrType::F64,
+        };
+        let result = try_fold(&inst).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Const(IrConst::F64(v)), .. } => {
+                assert_eq!(v, 7.0);
+            }
+            _ => panic!("Expected Copy with F64(7.0)"),
+        }
     }
 }
