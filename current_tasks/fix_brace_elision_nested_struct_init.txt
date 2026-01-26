@@ -1,0 +1,23 @@
+Fix brace elision in nested struct/array initializers
+
+Problem: When a struct contains an array of structs, and the inner struct contains
+an array member, brace elision during static initialization drops some elements.
+The compiler incorrectly determines when an open brace starts a sub-aggregate
+initializer for an array-of-structs member that itself contains an array.
+
+Example:
+  struct inner { char **ptrs[2]; };
+  struct outer { char ch; struct inner inners[2]; };
+  static struct outer x = { 'A',
+      { {&strings[0], &strings[1]},    // Should fill ptrs[0] and ptrs[1]
+        {&strings[2], &strings[3]} }   // But ptrs[1] gets NULL
+  };
+
+With explicit braces ({{ {&s[0], &s[1]} }, { {&s[2], &s[3]} }}) it works.
+
+Affects: compiler_suite_0094_0000, compiler_suite_0011_0092, and likely
+5+ other struct initialization edge case tests across all architectures.
+
+Fix: Correct the brace elision logic in the initializer handling code
+(frontend/parser or sema/initializer code) to properly track which
+sub-aggregate is being initialized when consuming brace-elided elements.
