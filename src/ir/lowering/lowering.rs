@@ -1388,8 +1388,16 @@ impl Lowerer {
             let align = {
                 let c_align = self.alignof_type(&decl.type_spec);
                 let natural = if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() };
-                if let Some(explicit) = decl.alignment {
-                    natural.max(explicit)
+                // Resolve _Alignas alignment: use the lowerer's alignof_type (which can
+                // resolve typedefs) for the alignas type specifier, falling back to the
+                // parser's pre-computed numeric alignment.
+                let explicit = if let Some(ref alignas_ts) = decl.alignas_type {
+                    Some(self.alignof_type(alignas_ts))
+                } else {
+                    decl.alignment
+                };
+                if let Some(explicit_val) = explicit {
+                    natural.max(explicit_val)
                 } else {
                     natural
                 }

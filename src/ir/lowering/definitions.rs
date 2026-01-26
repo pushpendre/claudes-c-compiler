@@ -7,7 +7,7 @@
 
 use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, RcLayout, CType};
+use crate::common::types::{AddressSpace, IrType, RcLayout, CType};
 
 /// Type metadata shared between local and global variables.
 ///
@@ -166,7 +166,8 @@ pub(super) enum LValue {
     /// A direct variable: the alloca is the address.
     Variable(Value),
     /// An address computed at runtime (e.g., arr[i], *ptr).
-    Address(Value),
+    /// The AddressSpace tracks segment overrides (e.g., __seg_gs for per-CPU vars).
+    Address(Value, AddressSpace),
 }
 
 /// A single level of switch statement context, pushed/popped as switches nest.

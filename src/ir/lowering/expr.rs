@@ -81,6 +81,10 @@ impl Lowerer {
                 let align = self.alignof_type(type_spec);
                 Operand::Const(IrConst::I64(align as i64))
             }
+            Expr::AlignofExpr(ref inner_expr, _) => {
+                let align = self.alignof_expr(inner_expr);
+                Operand::Const(IrConst::I64(align as i64))
+            }
             Expr::AddressOf(inner, _) => self.lower_address_of(inner),
             Expr::Deref(inner, _) => self.lower_deref(inner),
             Expr::ArraySubscript(base, index, _) => self.lower_array_subscript(expr, base, index),

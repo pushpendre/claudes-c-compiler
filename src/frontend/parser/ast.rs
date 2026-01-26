@@ -71,6 +71,10 @@ pub struct Declaration {
     pub is_transparent_union: bool,
     /// Alignment override from _Alignas(N) or __attribute__((aligned(N))).
     pub alignment: Option<usize>,
+    /// Type specifier from _Alignas(type) that the lowerer should resolve for alignment.
+    /// The parser can't resolve typedef names, so when _Alignas takes a type argument,
+    /// we store the type specifier here for proper resolution during lowering.
+    pub alignas_type: Option<TypeSpecifier>,
     pub span: Span,
 }
 
@@ -88,6 +92,7 @@ impl Declaration {
             is_common: false,
             is_transparent_union: false,
             alignment: None,
+            alignas_type: None,
             span: Span::dummy(),
         }
     }
@@ -325,6 +330,8 @@ pub enum Expr {
     /// __builtin_va_arg(ap, type): extract next variadic argument of given type
     VaArg(Box<Expr>, TypeSpecifier, Span),
     Alignof(TypeSpecifier, Span),
+    /// __alignof__(expr) - alignment of expression's type (GCC extension)
+    AlignofExpr(Box<Expr>, Span),
     Comma(Box<Expr>, Box<Expr>, Span),
     AddressOf(Box<Expr>, Span),
     Deref(Box<Expr>, Span),
@@ -419,7 +426,8 @@ impl Expr {
             | Expr::FunctionCall(_, _, s) | Expr::ArraySubscript(_, _, s)
             | Expr::MemberAccess(_, _, s) | Expr::PointerMemberAccess(_, _, s)
             | Expr::Cast(_, _, s) | Expr::CompoundLiteral(_, _, s) | Expr::StmtExpr(_, s)
-            | Expr::Sizeof(_, s) | Expr::VaArg(_, _, s) | Expr::Alignof(_, s) | Expr::Comma(_, _, s)
+            | Expr::Sizeof(_, s) | Expr::VaArg(_, _, s) | Expr::Alignof(_, s)
+            | Expr::AlignofExpr(_, s) | Expr::Comma(_, _, s)
             | Expr::AddressOf(_, s) | Expr::Deref(_, s)
             | Expr::GenericSelection(_, _, s) | Expr::LabelAddr(_, s)
             | Expr::BuiltinTypesCompatibleP(_, _, s) => *s,

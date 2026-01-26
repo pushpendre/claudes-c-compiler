@@ -20,7 +20,7 @@ impl Lowerer {
                     if let Some(global_name) = static_global_name {
                         let addr = self.fresh_value();
                         self.emit(Instruction::GlobalAddr { dest: addr, name: global_name });
-                        return Some(LValue::Address(addr));
+                        return Some(LValue::Address(addr, AddressSpace::Default));
                     }
                     return Some(LValue::Variable(alloca));
                 }
@@ -28,7 +28,7 @@ impl Lowerer {
                 if let Some(mangled) = self.func_state.as_ref().and_then(|fs| fs.static_local_names.get(name).cloned()) {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
-                    return Some(LValue::Address(addr));
+                    return Some(LValue::Address(addr, AddressSpace::Default));
                 }
                 if let Some(ginfo) = self.globals.get(name) {
                     // Global register variables have no storage, so they are not
@@ -41,28 +41,29 @@ impl Lowerer {
                     // Global variable: emit GlobalAddr to get its address
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
-                    Some(LValue::Address(addr))
+                    Some(LValue::Address(addr, AddressSpace::Default))
                 } else {
                     None
                 }
             }
             Expr::Deref(inner, _) => {
                 // *ptr -> the address is the value of ptr
+                let addr_space = self.get_addr_space_of_ptr_expr(inner);
                 let ptr_val = self.lower_expr(inner);
                 match ptr_val {
-                    Operand::Value(v) => Some(LValue::Address(v)),
+                    Operand::Value(v) => Some(LValue::Address(v, addr_space)),
                     Operand::Const(_) => {
                         // Constant address - copy to a value
                         let dest = self.fresh_value();
                         self.emit(Instruction::Copy { dest, src: ptr_val });
-                        Some(LValue::Address(dest))
+                        Some(LValue::Address(dest, addr_space))
                     }
                 }
             }
             Expr::ArraySubscript(base, index, _) => {
                 // base[index] -> compute address of element
                 let addr = self.compute_array_element_addr(base, index);
-                Some(LValue::Address(addr))
+                Some(LValue::Address(addr, AddressSpace::Default))
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 // s.field as lvalue -> compute address of the field
@@ -75,10 +76,11 @@ impl Lowerer {
                     offset: Operand::Const(IrConst::I64(field_offset as i64)),
                     ty: IrType::Ptr,
                 });
-                Some(LValue::Address(field_addr))
+                Some(LValue::Address(field_addr, AddressSpace::Default))
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 // p->field as lvalue -> load pointer, compute field address
+                let addr_space = self.get_addr_space_of_ptr_expr(base_expr);
                 let ptr_val = self.lower_expr(base_expr);
                 let base_addr = match ptr_val {
                     Operand::Value(v) => v,
@@ -96,13 +98,13 @@ impl Lowerer {
                     offset: Operand::Const(IrConst::I64(field_offset as i64)),
                     ty: IrType::Ptr,
                 });
-                Some(LValue::Address(field_addr))
+                Some(LValue::Address(field_addr, addr_space))
             }
             Expr::UnaryOp(UnaryOp::RealPart, inner, _) => {
                 // __real__ z as lvalue -> address of real part (offset 0 from complex base)
                 if let Some(lv) = self.lower_lvalue(inner) {
                     let addr = self.lvalue_addr(&lv);
-                    Some(LValue::Address(addr))
+                    Some(LValue::Address(addr, AddressSpace::Default))
                 } else {
                     None
                 }
@@ -124,7 +126,7 @@ impl Lowerer {
                         offset: Operand::Const(IrConst::I64(comp_size)),
                         ty: IrType::I8,
                     });
-                    Some(LValue::Address(imag_addr))
+                    Some(LValue::Address(imag_addr, AddressSpace::Default))
                 } else {
                     None
                 }
@@ -144,22 +146,32 @@ impl Lowerer {
     pub(super) fn lvalue_addr(&self, lv: &LValue) -> Value {
         match lv {
             LValue::Variable(v) => *v,
-            LValue::Address(v) => *v,
+            LValue::Address(v, _) => *v,
+        }
+    }
+
+    /// Get the address space from an LValue.
+    pub(super) fn lvalue_addr_space(&self, lv: &LValue) -> AddressSpace {
+        match lv {
+            LValue::Variable(_) => AddressSpace::Default,
+            LValue::Address(_, seg) => *seg,
         }
     }
 
     /// Load the value from an lvalue with a specific type.
     pub(super) fn load_lvalue_typed(&mut self, lv: &LValue, ty: IrType) -> Operand {
         let addr = self.lvalue_addr(lv);
+        let seg_override = self.lvalue_addr_space(lv);
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Load { dest, ptr: addr, ty , seg_override });
         Operand::Value(dest)
     }
 
     /// Store a value to an lvalue with a specific type.
     pub(super) fn store_lvalue_typed(&mut self, lv: &LValue, val: Operand, ty: IrType) {
         let addr = self.lvalue_addr(lv);
-        self.emit(Instruction::Store { val, ptr: addr, ty , seg_override: AddressSpace::Default });
+        let seg_override = self.lvalue_addr_space(lv);
+        self.emit(Instruction::Store { val, ptr: addr, ty , seg_override });
     }
 
     /// Compute the address of an array element: base_addr + index * elem_size.

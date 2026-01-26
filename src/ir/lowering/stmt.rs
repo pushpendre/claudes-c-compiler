@@ -89,6 +89,7 @@ impl Lowerer {
                 is_common: decl.is_common,
                 is_transparent_union: decl.is_transparent_union,
                 alignment: decl.alignment,
+                alignas_type: decl.alignas_type.clone(),
                 span: decl.span,
             };
             &resolved_decl
@@ -198,7 +199,13 @@ impl Lowerer {
                         self.func_mut().scope_stack.last_mut().unwrap().scope_stack_save = Some(scope_save);
                     }
                 }
-                let align = decl.alignment.unwrap_or(16).max(16);
+                // Resolve _Alignas alignment for VLAs: prefer the lowerer's resolved
+                // type alignment over the parser's pre-computed numeric alignment.
+                let align = if let Some(ref alignas_ts) = decl.alignas_type {
+                    self.alignof_type(alignas_ts).max(16)
+                } else {
+                    decl.alignment.unwrap_or(16).max(16)
+                };
                 self.emit(Instruction::DynAlloca {
                     dest: alloca,
                     size: Operand::Value(vla_size_val),
@@ -208,10 +215,17 @@ impl Lowerer {
                 // Hoist static-size allocas to the entry block so that variables
                 // whose declarations are skipped by `goto` still have valid
                 // stack slots at runtime.
+                // Resolve _Alignas alignment: prefer the lowerer's resolved type alignment
+                // over the parser's pre-computed numeric alignment (which can't resolve typedefs).
+                let explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
+                    self.alignof_type(alignas_ts)
+                } else {
+                    decl.alignment.unwrap_or(0)
+                };
                 alloca = self.emit_entry_alloca(
                     if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
                     da.actual_alloc_size,
-                    decl.alignment.unwrap_or(0),
+                    explicit_align,
                     decl.is_volatile,
                 );
             }
@@ -285,8 +299,14 @@ impl Lowerer {
             GlobalInit::Zero
         };
 
-        // Respect explicit __attribute__((aligned(N))) / _Alignas(N) on static locals
-        let align = if let Some(explicit) = decl.alignment {
+        // Respect explicit __attribute__((aligned(N))) / _Alignas(N) on static locals.
+        // Resolve _Alignas(type) via the lowerer for accurate typedef resolution.
+        let explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
+            Some(self.alignof_type(alignas_ts))
+        } else {
+            decl.alignment
+        };
+        let align = if let Some(explicit) = explicit_align {
             da.var_ty.align().max(explicit)
         } else {
             da.var_ty.align()
@@ -1292,7 +1312,7 @@ impl Lowerer {
             let out_seg = self.get_asm_operand_addr_space(&out.expr);
             let ptr = if let Some(lv) = self.lower_lvalue(&out.expr) {
                 match lv {
-                    LValue::Variable(v) | LValue::Address(v) => v,
+                    LValue::Variable(v) | LValue::Address(v, _) => v,
                 }
             } else if let Expr::Identifier(ref var_name, _) = out.expr {
                 // Global register variables are pinned to specific hardware registers
@@ -1364,7 +1384,7 @@ impl Lowerer {
             } else if constraint_is_memory_only(&constraint) {
                 if let Some(lv) = self.lower_lvalue(&inp.expr) {
                     let ptr = match lv {
-                        LValue::Variable(v) | LValue::Address(v) => v,
+                        LValue::Variable(v) | LValue::Address(v, _) => v,
                     };
                     Operand::Value(ptr)
                 } else {

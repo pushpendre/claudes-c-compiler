@@ -811,7 +811,7 @@ impl Lowerer {
             }
 
             // sizeof(sizeof(...)) or sizeof(_Alignof(...)) -> size_t = 8 on 64-bit
-            Expr::Sizeof(_, _) | Expr::Alignof(_, _) => 8,
+            Expr::Sizeof(_, _) | Expr::Alignof(_, _) | Expr::AlignofExpr(_, _) => 8,
 
             // Cast: size of the target type
             Expr::Cast(target_type, _, _) => {
@@ -899,6 +899,25 @@ impl Lowerer {
 
             // Default
             _ => 4,
+        }
+    }
+
+    /// Compute alignof for an expression by inferring its type and returning
+    /// the type's alignment. This implements GCC's __alignof__(expr) semantics.
+    pub(super) fn alignof_expr(&self, expr: &Expr) -> usize {
+        // Try to get the CType of the expression for accurate alignment
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            return self.ctype_align(&ctype);
+        }
+        // Fallback: derive alignment from the expression's size
+        // (this handles literals and simple cases where CType isn't available)
+        let size = self.sizeof_expr(expr);
+        match size {
+            1 => 1,
+            2 => 2,
+            4 => 4,
+            16 => 16,  // long double, __int128
+            _ => 8,
         }
     }
 

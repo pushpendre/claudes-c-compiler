@@ -224,6 +224,13 @@ impl<'a> SemaConstEval<'a> {
                 Some(IrConst::I64(align as i64))
             }
 
+            // __alignof__(expr) - GCC extension: alignment of expression's type
+            Expr::AlignofExpr(ref inner_expr, _) => {
+                let ctype = self.infer_expr_ctype(inner_expr)?;
+                let align = ctype.align_ctx(&self.types.struct_layouts);
+                Some(IrConst::I64(align as i64))
+            }
+
             // Ternary conditional
             Expr::Conditional(cond, then_e, else_e, _) => {
                 let cond_val = self.eval_const_expr(cond)?;

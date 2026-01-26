@@ -91,6 +91,9 @@ pub struct Parser {
     /// Set when parse_type_specifier or consume_post_type_qualifiers encounters _Alignas(N).
     /// Consumed and reset by callers that need it (e.g., struct field parsing).
     pub(super) parsed_alignas: Option<usize>,
+    /// When _Alignas takes a type argument, store the type specifier so the lowerer can
+    /// resolve typedefs and compute the correct alignment (the parser can't resolve typedefs).
+    pub(super) parsed_alignas_type: Option<TypeSpecifier>,
     /// Stack for #pragma pack alignment values.
     /// Current effective alignment is the last element (or None for default).
     pub(super) pragma_pack_stack: Vec<Option<usize>>,
@@ -127,6 +130,7 @@ impl Parser {
             parsing_gnu_inline: false,
             parsing_always_inline: false,
             parsed_alignas: None,
+            parsed_alignas_type: None,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
             error_count: 0,
@@ -743,6 +747,9 @@ impl Parser {
                 let result_type = self.parse_abstract_declarator_suffix(ts);
                 if matches!(self.peek(), TokenKind::RParen) {
                     self.advance(); // consume )
+                    // Save the type specifier so the lowerer can resolve typedefs
+                    // and compute accurate alignment (parser can't resolve typedefs).
+                    self.parsed_alignas_type = Some(result_type.clone());
                     return Some(Self::alignof_type_spec(&result_type));
                 }
             }
@@ -808,13 +815,25 @@ impl Parser {
             TypeSpecifier::ComplexDouble => 8,
             TypeSpecifier::ComplexLongDouble => 16,
             TypeSpecifier::Array(elem, _) => Self::alignof_type_spec(elem),
-            TypeSpecifier::Struct(_, _, is_packed, _, struct_aligned) => {
+            TypeSpecifier::Struct(_, fields, is_packed, _, struct_aligned)
+            | TypeSpecifier::Union(_, fields, is_packed, _, struct_aligned) => {
                 if *is_packed { return 1; }
-                if let Some(a) = struct_aligned { return *a; }
-                // Fallback: structs are at least 8-byte aligned on x86-64
-                8
+                // Explicit struct/union-level __attribute__((aligned(N))) overrides
+                let mut align = struct_aligned.unwrap_or(0);
+                // Compute max alignment from fields if available
+                if let Some(field_list) = fields {
+                    for field in field_list {
+                        let field_align = if let Some(fa) = field.alignment {
+                            fa
+                        } else {
+                            Self::alignof_type_spec(&field.type_spec)
+                        };
+                        align = align.max(field_align);
+                    }
+                }
+                // Fallback for empty struct/union or tag-only (no fields available)
+                if align == 0 { 8 } else { align }
             }
-            TypeSpecifier::Union(..) => 8,
             TypeSpecifier::Enum(_, _) => 4,
             TypeSpecifier::TypedefName(_) => 8, // conservative default
             _ => 8,

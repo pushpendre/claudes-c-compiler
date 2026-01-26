@@ -265,11 +265,10 @@ impl Parser {
                     self.expect(&TokenKind::RParen);
                     Expr::Alignof(result_type, span)
                 } else {
-                    // Fallback: treat as sizeof-like with expression
+                    // GCC extension: __alignof__(expr) - alignment of expression's type
                     let expr = self.parse_assignment_expr();
                     self.expect(&TokenKind::RParen);
-                    let _ = expr; // suppress unused warning
-                    Expr::IntLiteral(8, span)
+                    Expr::AlignofExpr(Box::new(expr), span)
                 }
             }
             _ => self.parse_postfix_expr(),

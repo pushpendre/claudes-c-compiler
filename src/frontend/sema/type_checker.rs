@@ -104,7 +104,7 @@ impl<'a> ExprTypeChecker<'a> {
             }
 
             // Sizeof and Alignof always produce size_t (unsigned long on 64-bit)
-            Expr::Sizeof(_, _) | Expr::Alignof(_, _) => Some(CType::ULong),
+            Expr::Sizeof(_, _) | Expr::Alignof(_, _) | Expr::AlignofExpr(_, _) => Some(CType::ULong),
 
             // Address-of wraps in Pointer
             Expr::AddressOf(inner, _) => {
