@@ -1,0 +1,11 @@
+Fix: Add missing internal vector type definitions to bundled SSE headers
+
+The bundled emmintrin.h and xmmintrin.h headers were missing the internal
+vector type definitions (__v2di, __v4si, __v2df, etc.) that GCC's system
+headers (wmmintrin.h, immintrin.h) reference. This caused parse errors
+when including <immintrin.h> or <wmmintrin.h>.
+
+Added all 10 SSE2 vector types to emmintrin.h and __v4sf to xmmintrin.h.
+Fixes 5 x86 asm tests. No regressions on any architecture.
+
+Status: COMPLETE

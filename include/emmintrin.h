@@ -20,6 +20,20 @@ typedef struct __attribute__((__aligned__(1))) {
     double __val[2];
 } __m128d_u;
 
+/* Internal vector types referenced by GCC system headers (wmmintrin.h, etc.).
+ * These enable parsing of system headers that use (__v2di)expr casts.
+ * Note: vector_size attribute is parsed but vectors are lowered as aggregates. */
+typedef double __v2df __attribute__ ((__vector_size__ (16)));
+typedef long long __v2di __attribute__ ((__vector_size__ (16)));
+typedef unsigned long long __v2du __attribute__ ((__vector_size__ (16)));
+typedef int __v4si __attribute__ ((__vector_size__ (16)));
+typedef unsigned int __v4su __attribute__ ((__vector_size__ (16)));
+typedef short __v8hi __attribute__ ((__vector_size__ (16)));
+typedef unsigned short __v8hu __attribute__ ((__vector_size__ (16)));
+typedef char __v16qi __attribute__ ((__vector_size__ (16)));
+typedef signed char __v16qs __attribute__ ((__vector_size__ (16)));
+typedef unsigned char __v16qu __attribute__ ((__vector_size__ (16)));
+
 /* === Load / Store === */
 
 static __inline__ __m128i __attribute__((__always_inline__))
