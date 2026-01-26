@@ -1,0 +1,14 @@
+Fix: Missing function pointer signature registration for static local function pointers
+
+Problem: When a function pointer is declared as a static local variable
+(e.g., `static float (*sfp)()`), the compiler does not register its
+function pointer signature in func_meta.ptr_sigs. This causes calls
+through static function pointers to not apply default argument promotions
+(float->double for unprototyped function pointers).
+
+Root cause: lower_local_static_decl in stmt.rs was missing the ptr_sigs
+registration that the auto-local path had.
+
+Fix: Add the same ptr_sigs registration loop to lower_local_static_decl.
+
+Affects all architectures (frontend/IR issue).
