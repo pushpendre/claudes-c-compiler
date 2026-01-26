@@ -1,0 +1,14 @@
+Fix ARM AArch64 va_arg/va_start/va_copy register allocation bug
+
+Problem:
+ARM backend's emit_va_arg, emit_va_start, and emit_va_copy always loaded
+the va_list pointer from the stack slot, but when the value was register-
+allocated by the linear scan allocator, store_x0_to() only stored to the
+callee-saved register (skipping the stack slot). This caused SIGSEGV when
+the codegen tried to load from an uninitialized stack slot.
+
+Fix:
+Check register allocation assignments before loading va_list pointers,
+matching the pattern already used by x86 and RISC-V backends.
+
+Impact: Fixes ~14+ ARM struct-passing varargs tests that were SIGSEGV'ing.
