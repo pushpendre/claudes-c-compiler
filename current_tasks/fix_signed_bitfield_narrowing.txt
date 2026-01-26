@@ -1,0 +1,18 @@
+Task: Fix signed bitfield read - narrowing pass incorrectly narrows Shl
+Status: in_progress
+Agent: fix_signed_bitfield_narrowing
+
+Problem:
+Signed bitfield reads (width > 1) return 0 on x86-64 because the narrowing
+pass incorrectly narrows a Shl from I64 to I32 while the subsequent AShr
+stays at I64. This causes shll (32-bit) + movslq + sarq (64-bit) where
+the shift amounts are computed for 64-bit but truncated to 32-bit.
+
+Root cause: 
+In passes/narrow.rs Phase 5, Shl is in the safe-to-narrow op list.
+When a signed bitfield extraction uses Shl+AShr at I64, and the Shl's
+operand comes from an I32 Load, the narrowing pass narrows the Shl to I32.
+But the shift amount (e.g. 59 for a 5-bit field) exceeds 31 and gets
+truncated by x86's shll instruction (masks to & 31).
+
+Fix: Remove Shl from the safe-to-narrow op list in Phase 5.
