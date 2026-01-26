@@ -275,7 +275,8 @@ fn define_float_macros(macros: &mut MacroTable) {
     def(macros, "DBL_MIN", "2.2250738585072014e-308");
     def(macros, "DBL_EPSILON", "2.2204460492503131e-16");
 
-    // Long double (same as double on x86-64 for now)
+    // Long double: x87 80-bit extended precision for x86-64 (default).
+    // For aarch64/riscv64 (IEEE binary128), overridden by set_target().
     def(macros, "LDBL_MANT_DIG", "64");
     def(macros, "LDBL_DIG", "18");
     def(macros, "LDBL_MIN_EXP", "(-16381)");

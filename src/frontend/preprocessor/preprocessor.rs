@@ -668,6 +668,8 @@ impl Preprocessor {
                         self.system_include_paths.insert(0, path);
                     }
                 }
+                // AArch64 uses IEEE 754 binary128 for long double (not x87 80-bit)
+                self.override_ldbl_binary128();
             }
             "riscv64" => {
                 // Remove x86 macros
@@ -720,11 +722,34 @@ impl Preprocessor {
                         self.system_include_paths.insert(0, path);
                     }
                 }
+                // RISC-V uses IEEE 754 binary128 for long double (not x87 80-bit)
+                self.override_ldbl_binary128();
             }
             _ => {
                 // x86_64 is already the default
             }
         }
+    }
+
+    /// Override long double macros from x87 80-bit extended to IEEE 754 binary128.
+    /// Called by set_target() for aarch64 and riscv64 which use quad precision.
+    fn override_ldbl_binary128(&mut self) {
+        // GCC predefined macros (__LDBL_*__)
+        self.define_simple_macro("__LDBL_MANT_DIG__", "113");
+        self.define_simple_macro("__LDBL_DIG__", "33");
+        self.define_simple_macro("__LDBL_EPSILON__", "1.92592994438723585305597794258492732e-34L");
+        self.define_simple_macro("__LDBL_MAX__", "1.18973149535723176508575932662800702e+4932L");
+        self.define_simple_macro("__LDBL_MIN__", "3.36210314311209350626267781732175260e-4932L");
+        self.define_simple_macro("__LDBL_DENORM_MIN__", "6.47517511943802511092443895822764655e-4966L");
+        self.define_simple_macro("__LDBL_DECIMAL_DIG__", "36");
+        self.define_simple_macro("__DECIMAL_DIG__", "36");
+        // MIN_EXP, MAX_EXP, MIN_10_EXP, MAX_10_EXP are the same for x87 and binary128
+        // (both use 15-bit exponent fields), so no override needed.
+
+        // <float.h> macros (LDBL_*)
+        self.define_simple_macro("LDBL_MANT_DIG", "113");
+        self.define_simple_macro("LDBL_DIG", "33");
+        self.define_simple_macro("DECIMAL_DIG", "36");
     }
 
     /// Get the list of includes encountered during preprocessing.
