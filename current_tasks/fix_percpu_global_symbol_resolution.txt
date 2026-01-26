@@ -1,0 +1,20 @@
+Fix per-CPU global symbol resolution in inline asm memory constraints and __seg_gs pointer dereferences
+
+Bug: When inline asm uses a memory ("m" or "+m") constraint on a global variable
+expression like *((type *)(uintptr_t)(&global_var.field)), the compiler loads the
+address into a register and uses register-indirect addressing (e.g., (%rcx)).
+Similarly, __seg_gs pointer dereferences of global symbols use register-indirect.
+
+This is incorrect for per-CPU variables where the inline asm template or the
+__seg_gs pointer adds a %gs: segment prefix - %gs:(%rcx) uses the absolute
+address as a GS-relative offset, corrupting memory. The correct form is
+%gs:symbol+offset(%rip) which the linker resolves to the per-CPU section offset.
+
+Fix: Three changes:
+1. IR lowering (stmt.rs): Extract global symbol names for memory constraints
+   (both "m" and "+m") so the backend can emit direct symbol references.
+2. Backend inline_asm.rs: Propagate symbol names from synthetic "+" inputs
+   to their corresponding output operands.
+3. Backend generation.rs + x86 codegen: Build a global_addr_map to detect when
+   segment-overridden loads/stores target global symbols, and emit direct
+   symbol(%rip) references instead of register-indirect.
