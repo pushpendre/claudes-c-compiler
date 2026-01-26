@@ -1,7 +1,0 @@
-Task: Fix mm/mempolicy.c miscompilation causing kernel boot failure
-Status: in_progress
-Started: 2026-01-26
-
-The kernel file mm/mempolicy.c (NUMA memory policy management) is being miscompiled
-by ccc, causing a boot failure. Need to identify the root cause by comparing ccc and
-gcc output and fix the compiler bug.

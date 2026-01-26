@@ -174,7 +174,9 @@ impl Lowerer {
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.types.struct_layouts.get(&format!("struct.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("struct.{}", tag))
+                        .or_else(|| self.types.struct_layouts.get(tag.as_str()))
+                    {
                         return Some(layout.clone());
                     }
                 }
@@ -183,10 +185,17 @@ impl Lowerer {
             }
             TypeSpecifier::Struct(Some(tag), None, _, _, _) => {
                 self.types.struct_layouts.get(&format!("struct.{}", tag)).cloned()
+                    .or_else(|| {
+                        // Anonymous structs from typeof/ctype_to_type_spec use the
+                        // raw CType key (e.g., "__anon_struct_N") as the tag.
+                        self.types.struct_layouts.get(tag.as_str()).cloned()
+                    })
             }
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.types.struct_layouts.get(&format!("union.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("union.{}", tag))
+                        .or_else(|| self.types.struct_layouts.get(tag.as_str()))
+                    {
                         return Some(layout.clone());
                     }
                 }
@@ -195,6 +204,11 @@ impl Lowerer {
             }
             TypeSpecifier::Union(Some(tag), None, _, _, _) => {
                 self.types.struct_layouts.get(&format!("union.{}", tag)).cloned()
+                    .or_else(|| {
+                        // Anonymous unions from typeof/ctype_to_type_spec use the
+                        // raw CType key (e.g., "__anon_struct_N") as the tag.
+                        self.types.struct_layouts.get(tag.as_str()).cloned()
+                    })
             }
             // For typedef'd array types like `typedef S arr_t[4]`, peel the
             // Array wrapper(s) to find the inner struct/union element type.

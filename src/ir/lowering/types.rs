@@ -181,18 +181,22 @@ impl Lowerer {
             ),
             CType::Struct(key) => {
                 // Extract tag name from key (e.g., "struct.Foo" -> "Foo")
+                // For anonymous structs (key like "__anon_struct_N"), use the
+                // full key as the tag so get_struct_layout_for_type can find it.
                 if let Some(tag) = key.strip_prefix("struct.") {
                     TypeSpecifier::Struct(Some(tag.to_string()), None, false, None, None)
                 } else {
-                    TypeSpecifier::Int // anonymous struct fallback
+                    TypeSpecifier::Struct(Some(key.to_string()), None, false, None, None)
                 }
             }
             CType::Union(key) => {
                 // Extract tag name from key (e.g., "union.Bar" -> "Bar")
+                // For anonymous unions (key like "__anon_struct_N"), use the
+                // full key as the tag so get_struct_layout_for_type can find it.
                 if let Some(tag) = key.strip_prefix("union.") {
                     TypeSpecifier::Union(Some(tag.to_string()), None, false, None, None)
                 } else {
-                    TypeSpecifier::Int // anonymous union fallback
+                    TypeSpecifier::Union(Some(key.to_string()), None, false, None, None)
                 }
             }
             CType::Enum(et) => {
@@ -1221,7 +1225,16 @@ impl Lowerer {
             self.types.ctype_cache.borrow_mut().insert(key, result.clone());
             result
         } else if let Some(tag) = name {
-            let key = format!("{}.{}", prefix, tag);
+            // If the tag is already an anonymous struct/union key (e.g. from
+            // typeof resolution via ctype_to_type_spec), use it directly instead
+            // of prepending the struct/union prefix. This avoids creating a
+            // mismatched key like "struct.__anon_struct_N" when the real layout
+            // is stored at "__anon_struct_N".
+            let key = if tag.starts_with("__anon_struct_") || tag.starts_with("__anon_union_") {
+                tag.clone()
+            } else {
+                format!("{}.{}", prefix, tag)
+            };
             // Check cache first
             if let Some(cached) = self.types.ctype_cache.borrow().get(&key) {
                 return cached.clone();

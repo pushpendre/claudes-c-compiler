@@ -142,7 +142,26 @@ impl Lowerer {
                     if let crate::frontend::parser::ast::BlockItem::Statement(
                         crate::frontend::parser::ast::Stmt::Expr(Some(inner_expr))
                     ) = last {
-                        return self.struct_value_size(inner_expr);
+                        if let Some(size) = self.struct_value_size(inner_expr) {
+                            return Some(size);
+                        }
+                        // Fallback: the inner variable may not be lowered yet (it's
+                        // declared inside the statement expression). Scan the compound
+                        // statement's declarations to resolve its type and size.
+                        if let Expr::Identifier(name, _) = inner_expr {
+                            for item in &compound.items {
+                                if let crate::frontend::parser::ast::BlockItem::Declaration(decl) = item {
+                                    for declarator in &decl.declarators {
+                                        if declarator.name == *name {
+                                            let ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                                            if ctype.is_struct_or_union() {
+                                                return Some(self.ctype_size(&ctype));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 None
