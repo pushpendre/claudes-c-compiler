@@ -1,0 +1,1 @@
+fix_struct_cast_in_init_list
