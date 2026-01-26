@@ -1,0 +1,17 @@
+Task: Fix ARM I32 constant sign-extension to 64-bit register
+
+Bug: When loading IrConst::I32 values with large negative magnitudes into x0 on ARM,
+the backend zero-extends instead of sign-extending. For example, I32(-1073741824)
+(0xC0000000) gets loaded as 0x00000000C0000000 instead of 0xFFFFFFFFC0000000.
+
+Root cause: operand_to_x0() for IrConst::I32 decomposed the value as u32 into two
+16-bit halves using mov/movk, which zero-extends to 64 bits. Negative I32 values
+need the upper 32 bits set to 0xFFFFFFFF for correct sign extension.
+
+Fix: Use emit_load_imm64 with sign-extended i64 value (*v as i64) instead of u32
+decomposition for large I32 constants.
+
+Impact: Fixes mquickjs test_builtin.js failure on ARM (Uint8Array typed arrays
+returned undefined values due to int64_is_short_int() returning wrong results).
+
+Status: IN PROGRESS
