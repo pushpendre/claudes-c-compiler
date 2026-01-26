@@ -536,9 +536,13 @@ pub fn emit_inline_asm_common_impl(
     }
 
     // Pre-load read-write output values (non-x87)
+    // Skip Specific register constraints (e.g., {rsp}) because the synthetic + input
+    // already loaded the correct register value via load_input_to_reg. Preloading from
+    // the output alloca would overwrite the register with uninitialized data, which is
+    // catastrophic for registers like RSP (global register variables bound to the stack pointer).
     for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
         if constraint.contains('+') {
-            if !matches!(operands[i].kind, AsmOperandKind::Memory | AsmOperandKind::X87St0 | AsmOperandKind::X87St1) {
+            if !matches!(operands[i].kind, AsmOperandKind::Memory | AsmOperandKind::X87St0 | AsmOperandKind::X87St1 | AsmOperandKind::Specific(_)) {
                 emitter.preload_readwrite_output(&operands[i], ptr);
             }
         }

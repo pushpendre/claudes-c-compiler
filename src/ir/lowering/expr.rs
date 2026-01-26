@@ -134,7 +134,7 @@ impl Lowerer {
     /// Emit an inline asm to read a global register variable (e.g., `register long x asm("rsp")`).
     /// Creates a temporary alloca, uses the inline asm output constraint `={regname}` to
     /// store the register value into the alloca, then loads the result.
-    fn read_global_register(&mut self, reg_name: &str, ty: IrType) -> Operand {
+    pub(super) fn read_global_register(&mut self, reg_name: &str, ty: IrType) -> Operand {
         // Create a temporary alloca for the inline asm output
         let tmp_alloca = self.fresh_value();
         self.emit(Instruction::Alloca { dest: tmp_alloca, ty, size: ty.size(), align: ty.align(), volatile: false });

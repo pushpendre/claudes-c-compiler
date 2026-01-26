@@ -1352,9 +1352,29 @@ impl Lowerer {
                 continue;
             };
             if constraint.contains('+') {
-                let cur_val = self.fresh_value();
-                self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
-                ir_inputs.push((constraint.replace('+', "").to_string(), Operand::Value(cur_val), name.clone()));
+                // For global register variables (e.g., `register long x asm("rsp")`),
+                // the alloca is just a placeholder and is uninitialized. We must read
+                // the current register value via an inline asm instead of loading from
+                // the uninitialized alloca, which would corrupt the register (especially
+                // critical for stack pointer register variables).
+                let is_global_reg = if let Expr::Identifier(ref var_name, _) = out.expr {
+                    self.get_asm_register(var_name).is_some() && self.lower_lvalue(&out.expr).is_none()
+                } else {
+                    false
+                };
+                let input_operand = if is_global_reg {
+                    if let Expr::Identifier(ref var_name, _) = &out.expr {
+                        let asm_reg = self.get_asm_register(var_name).unwrap();
+                        self.read_global_register(&asm_reg, out_ty)
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    let cur_val = self.fresh_value();
+                    self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
+                    Operand::Value(cur_val)
+                };
+                ir_inputs.push((constraint.replace('+', "").to_string(), input_operand, name.clone()));
                 plus_input_types.push(out_ty);
                 plus_input_segs.push(out_seg);
             }
