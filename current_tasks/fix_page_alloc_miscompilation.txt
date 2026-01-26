@@ -1,0 +1,8 @@
+Task: Fix miscompilation of mm/page_alloc.c causing kernel boot failure
+Status: in_progress
+Started: 2026-01-26
+
+The kernel file mm/page_alloc.c (page allocator) is miscompiled by ccc,
+causing a boot failure. Delta debugging confirmed this single file causes
+the failure. Need to identify root cause by comparing ccc and gcc output
+and fix the compiler bug.
