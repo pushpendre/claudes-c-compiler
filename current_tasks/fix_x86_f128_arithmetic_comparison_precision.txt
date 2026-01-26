@@ -1,0 +1,13 @@
+Fix x86 long double (F128) arithmetic and comparison precision
+
+Problem:
+- x86 emit_float_binop for F128 loads operands as f64 via fldl, losing 80-bit precision
+- x86 emit_cmp for F128 uses SSE ucomisd on f64 values instead of x87 fucomip
+- float/double to F128 cast produces f64 not full 80-bit extended
+
+Fix:
+- emit_float_binop: use fldt from f128_direct_slots stack slots for full precision
+- emit_cmp: use x87 fucomip for F128 comparisons with fldt from slots
+- cast: properly convert double/float to 80-bit extended when targeting F128
+
+Status: in_progress
