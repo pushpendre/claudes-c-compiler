@@ -104,6 +104,10 @@ pub struct Parser {
     /// When _Alignas takes a type argument, store the type specifier so the lowerer can
     /// resolve typedefs and compute the correct alignment (the parser can't resolve typedefs).
     pub(super) parsed_alignas_type: Option<TypeSpecifier>,
+    /// When `__attribute__((aligned(sizeof(type))))` is used, the parser may not accurately
+    /// compute sizeof for struct/union types.  Store the type here so sema/lowerer can
+    /// recompute sizeof with full layout information.
+    pub(super) parsed_alignment_sizeof_type: Option<TypeSpecifier>,
     /// Stack for #pragma pack alignment values.
     /// Current effective alignment is the last element (or None for default).
     pub(super) pragma_pack_stack: Vec<Option<usize>>,
@@ -154,6 +158,7 @@ impl Parser {
             parsing_cleanup_fn: None,
             parsed_alignas: None,
             parsed_alignas_type: None,
+            parsed_alignment_sizeof_type: None,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
             pragma_visibility_stack: Vec::new(),
@@ -853,6 +858,14 @@ impl Parser {
         // Consume closing )
         if matches!(self.peek(), TokenKind::RParen) {
             self.advance();
+        }
+        // If the expression is sizeof(type), capture the type so sema/lowerer can
+        // recompute with accurate struct/union layout info (the parser's sizeof
+        // uses a conservative default for struct/union types).
+        if let Expr::Sizeof(ref arg, _) = expr {
+            if let SizeofArg::Type(ref ts) = **arg {
+                self.parsed_alignment_sizeof_type = Some(ts.clone());
+            }
         }
         let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
         Self::eval_const_int_expr_with_enums(&expr, enums).map(|v| v as usize)

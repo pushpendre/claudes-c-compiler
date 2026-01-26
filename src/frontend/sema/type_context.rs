@@ -85,6 +85,10 @@ pub struct TypeScopeFrame {
     pub typedefs_added: Vec<String>,
     /// Keys that were overwritten in `typedefs`: (key, previous_value).
     pub typedefs_shadowed: Vec<(String, CType)>,
+    /// Keys newly inserted into `typedef_alignments`.
+    pub typedef_alignments_added: Vec<String>,
+    /// Keys that were overwritten in `typedef_alignments`: (key, previous_value).
+    pub typedef_alignments_shadowed: Vec<(String, usize)>,
 }
 
 impl TypeScopeFrame {
@@ -97,6 +101,8 @@ impl TypeScopeFrame {
             ctype_cache_shadowed: Vec::new(),
             typedefs_added: Vec::new(),
             typedefs_shadowed: Vec::new(),
+            typedef_alignments_added: Vec::new(),
+            typedef_alignments_shadowed: Vec::new(),
         }
     }
 }
@@ -116,6 +122,11 @@ pub struct TypeContext {
     pub enum_constants: FxHashMap<String, i64>,
     /// Typedef mappings (name -> resolved CType)
     pub typedefs: FxHashMap<String, CType>,
+    /// Per-typedef alignment overrides from `__attribute__((aligned(N)))` on typedef
+    /// declarations.  E.g. `typedef struct S aligned_S __attribute__((aligned(32)));`
+    /// stores `"aligned_S" -> 32`.  Consulted when computing field / variable alignment
+    /// for declarations that use the typedef name.
+    pub typedef_alignments: FxHashMap<String, usize>,
     /// Function typedef info (bare function typedefs like `typedef int func_t(int)`)
     pub function_typedefs: FxHashMap<String, FunctionTypedefInfo>,
     /// Set of typedef names that are function pointer types
@@ -154,6 +165,7 @@ impl TypeContext {
             struct_layouts: FxHashMap::default(),
             enum_constants: FxHashMap::default(),
             typedefs: FxHashMap::default(),
+            typedef_alignments: FxHashMap::default(),
             function_typedefs: FxHashMap::default(),
             func_ptr_typedefs: FxHashSet::default(),
             func_ptr_typedef_info: FxHashMap::default(),
@@ -230,6 +242,12 @@ impl TypeContext {
             for (key, val) in frame.typedefs_shadowed {
                 self.typedefs.insert(key, val);
             }
+            for key in frame.typedef_alignments_added {
+                self.typedef_alignments.remove(&key);
+            }
+            for (key, val) in frame.typedef_alignments_shadowed {
+                self.typedef_alignments.insert(key, val);
+            }
         }
     }
 
@@ -268,6 +286,19 @@ impl TypeContext {
             }
         }
         self.typedefs.insert(name, ctype);
+    }
+
+    /// Insert a typedef alignment, tracking the change in the current scope frame
+    /// so it can be undone on scope exit.
+    pub fn insert_typedef_alignment_scoped(&mut self, name: String, align: usize) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.typedef_alignments.get(&name).copied() {
+                frame.typedef_alignments_shadowed.push((name.clone(), prev));
+            } else {
+                frame.typedef_alignments_added.push(name.clone());
+            }
+        }
+        self.typedef_alignments.insert(name, align);
     }
 
     /// Invalidate a ctype_cache entry, tracking the change in the current scope frame

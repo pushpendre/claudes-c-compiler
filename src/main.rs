@@ -245,8 +245,13 @@ fn real_main() {
                 // we must not emit XMM instructions (e.g., in variadic prologues).
                 driver.no_sse = true;
             }
+            "-mcmodel=kernel" => {
+                // Kernel code model: all symbols in the negative 2GB of virtual address space.
+                // Use absolute sign-extended 32-bit addressing instead of RIP-relative.
+                driver.code_model_kernel = true;
+            }
             arg if arg.starts_with("-m") => {
-                // -m64, -march=, -mtune=, etc. (ignored for now)
+                // -m64, -march=, -mtune=, -mcmodel=small/medium/large, etc. (ignored for now)
             }
 
             // Feature flags

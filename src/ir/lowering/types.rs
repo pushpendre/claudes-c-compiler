@@ -559,11 +559,21 @@ impl Lowerer {
                     }
                 }
             }
+            // Merge per-field alignment with typedef alignment.
+            // If the field's type is a typedef with __aligned__, that alignment
+            // must be applied even when the field itself has no explicit alignment.
+            let field_alignment = {
+                let mut align = f.alignment;
+                if let Some(&ta) = self.typedef_alignment_for_type_spec(&f.type_spec) {
+                    align = Some(align.map_or(ta, |a| a.max(ta)));
+                }
+                align
+            };
             StructField {
                 name: f.name.clone().unwrap_or_default(),
                 ty,
                 bit_width,
-                alignment: f.alignment,
+                alignment: field_alignment,
             }
         }).collect();
         if is_union {
@@ -613,12 +623,18 @@ impl Lowerer {
 
     /// Compute the alignment of a type in bytes (_Alignof).
     pub(super) fn alignof_type(&self, ts: &TypeSpecifier) -> usize {
-        // Handle TypedefName through CType
+        // Handle TypedefName through CType, incorporating typedef alignment overrides
         if let TypeSpecifier::TypedefName(name) = ts {
-            if let Some(ctype) = self.types.typedefs.get(name) {
-                return self.ctype_align(ctype);
+            let natural = if let Some(ctype) = self.types.typedefs.get(name) {
+                self.ctype_align(ctype)
+            } else {
+                8 // fallback
+            };
+            // If the typedef has an __aligned__ override, take the max
+            if let Some(&td_align) = self.types.typedef_alignments.get(name) {
+                return natural.max(td_align);
             }
-            return 8; // fallback
+            return natural;
         }
         // Handle typeof(expr) by resolving the expression's type
         if let TypeSpecifier::Typeof(expr) = ts {
@@ -635,6 +651,16 @@ impl Lowerer {
             return self.alignof_type(elem);
         }
         self.struct_union_layout(ts).map(|l| l.align).unwrap_or(8)
+    }
+
+    /// Return the typedef alignment override for a type specifier, if any.
+    /// For `TypeSpecifier::TypedefName("foo")`, looks up `foo` in `typedef_alignments`.
+    pub(super) fn typedef_alignment_for_type_spec(&self, ts: &TypeSpecifier) -> Option<&usize> {
+        if let TypeSpecifier::TypedefName(name) = ts {
+            self.types.typedef_alignments.get(name)
+        } else {
+            None
+        }
     }
 
     /// Collect array dimensions from derived declarators.

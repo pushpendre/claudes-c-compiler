@@ -291,6 +291,32 @@ impl SemanticAnalyzer {
                 // Store resolved CType for the typedef
                 let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                 self.result.type_context.typedefs.insert(declarator.name.clone(), resolved_ctype);
+
+                // Preserve alignment override from __attribute__((aligned(N))) on the typedef.
+                // E.g. typedef struct S aligned_S __attribute__((aligned(32)));
+                // Also handle _Alignas(type) on typedefs by computing alignment from the type.
+                //
+                // When alignment_sizeof_type is set, the parser saw aligned(sizeof(type))
+                // but may have computed sizeof incorrectly for struct/union types.  Recompute
+                // sizeof here with full struct layout information and use that as alignment.
+                let effective_alignment = {
+                    let mut align = decl.alignment;
+                    if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                        let ctype = self.type_spec_to_ctype(sizeof_ts);
+                        let real_sizeof = ctype.size_ctx(&self.result.type_context);
+                        align = Some(align.map_or(real_sizeof, |a| a.max(real_sizeof)));
+                    }
+                    align.or_else(|| {
+                        decl.alignas_type.as_ref().map(|ts| {
+                            // _Alignas(type) means align to alignof(type)
+                            let ctype = self.type_spec_to_ctype(ts);
+                            ctype.align_ctx(&self.result.type_context)
+                        })
+                    })
+                };
+                if let Some(align) = effective_alignment {
+                    self.result.type_context.typedef_alignments.insert(declarator.name.clone(), align);
+                }
             }
             return; // typedefs don't declare variables
         }
@@ -924,13 +950,37 @@ impl SemanticAnalyzer {
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
                 self.eval_const_expr(bw).map(|v| v as u32)
             });
+            // Merge per-field alignment with typedef alignment.
+            // If the field's type is a typedef with __aligned__, that alignment
+            // must be applied even when the field itself has no explicit alignment.
+            let field_alignment = {
+                let mut align = f.alignment;
+                // Check if the field type is a typedef with an alignment override
+                let typedef_align = self.resolve_typedef_alignment(&f.type_spec);
+                if let Some(ta) = typedef_align {
+                    align = Some(align.map_or(ta, |a| a.max(ta)));
+                }
+                align
+            };
             Some(crate::common::types::StructField {
                 name,
                 ty,
                 bit_width,
-                alignment: f.alignment,
+                alignment: field_alignment,
             })
         }).collect()
+    }
+
+    /// Resolve the alignment override carried by a typedef, if any.
+    /// For a `TypeSpecifier::TypedefName("foo")`, looks up `foo` in
+    /// `typedef_alignments`.  Returns `None` when the type specifier is not
+    /// a typedef name or the typedef has no alignment attribute.
+    fn resolve_typedef_alignment(&self, ts: &TypeSpecifier) -> Option<usize> {
+        if let TypeSpecifier::TypedefName(name) = ts {
+            self.result.type_context.typedef_alignments.get(name).copied()
+        } else {
+            None
+        }
     }
 
     /// Build a full CType from a TypeSpecifier + derived declarators.

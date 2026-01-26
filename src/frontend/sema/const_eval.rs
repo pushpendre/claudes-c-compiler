@@ -1043,11 +1043,20 @@ impl<'a> SemaConstEval<'a> {
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
                 self.eval_const_expr(bw)?.to_i64().map(|v| v as u32)
             });
+            let field_alignment = {
+                let mut align = f.alignment;
+                if let TypeSpecifier::TypedefName(td_name) = &f.type_spec {
+                    if let Some(&ta) = self.types.typedef_alignments.get(td_name) {
+                        align = Some(align.map_or(ta, |a| a.max(ta)));
+                    }
+                }
+                align
+            };
             Some(crate::common::types::StructField {
                 name,
                 ty,
                 bit_width,
-                alignment: f.alignment,
+                alignment: field_alignment,
             })
         }).collect()
     }

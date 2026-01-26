@@ -90,6 +90,7 @@ impl Lowerer {
                 is_transparent_union: decl.is_transparent_union,
                 alignment: decl.alignment,
                 alignas_type: decl.alignas_type.clone(),
+                alignment_sizeof_type: decl.alignment_sizeof_type.clone(),
                 address_space: decl.address_space,
                 span: decl.span,
             };
@@ -109,6 +110,22 @@ impl Lowerer {
                     }
                     let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                     self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
+
+                    // Preserve alignment override from __attribute__((aligned(N))) on the typedef.
+                    // When alignment_sizeof_type is set, recompute sizeof with full layout info.
+                    let effective_alignment = {
+                        let mut align = decl.alignment;
+                        if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                            let real_sizeof = self.sizeof_type(sizeof_ts);
+                            align = Some(align.map_or(real_sizeof, |a| a.max(real_sizeof)));
+                        }
+                        align.or_else(|| {
+                            decl.alignas_type.as_ref().map(|ts| self.alignof_type(ts))
+                        })
+                    };
+                    if let Some(align) = effective_alignment {
+                        self.types.insert_typedef_alignment_scoped(declarator.name.clone(), align);
+                    }
 
                     // For VLA typedefs (e.g., `typedef char buf[n][m]`), compute the
                     // runtime sizeof and store it so that `sizeof(buf)` can use it.
@@ -202,10 +219,19 @@ impl Lowerer {
                 }
                 // Resolve _Alignas alignment for VLAs: prefer the lowerer's resolved
                 // type alignment over the parser's pre-computed numeric alignment.
-                let align = if let Some(ref alignas_ts) = decl.alignas_type {
-                    self.alignof_type(alignas_ts).max(16)
-                } else {
-                    decl.alignment.unwrap_or(16).max(16)
+                let align = {
+                    let mut a = if let Some(ref alignas_ts) = decl.alignas_type {
+                        self.alignof_type(alignas_ts)
+                    } else {
+                        decl.alignment.unwrap_or(16)
+                    };
+                    if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                        a = a.max(self.sizeof_type(sizeof_ts));
+                    }
+                    if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
+                        a = a.max(td_align);
+                    }
+                    a.max(16)
                 };
                 self.emit(Instruction::DynAlloca {
                     dest: alloca,
@@ -218,11 +244,19 @@ impl Lowerer {
                 // stack slots at runtime.
                 // Resolve _Alignas alignment: prefer the lowerer's resolved type alignment
                 // over the parser's pre-computed numeric alignment (which can't resolve typedefs).
-                let explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
+                let mut explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
                     self.alignof_type(alignas_ts)
                 } else {
                     decl.alignment.unwrap_or(0)
                 };
+                // Recompute sizeof for aligned(sizeof(type)) with full layout info
+                if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                    explicit_align = explicit_align.max(self.sizeof_type(sizeof_ts));
+                }
+                // Also incorporate alignment from typedef (e.g., typedef int aligned_int __aligned__(16))
+                if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
+                    explicit_align = explicit_align.max(td_align);
+                }
                 alloca = self.emit_entry_alloca(
                     if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
                     da.actual_alloc_size,
@@ -322,11 +356,20 @@ impl Lowerer {
 
         // Respect explicit __attribute__((aligned(N))) / _Alignas(N) on static locals.
         // Resolve _Alignas(type) via the lowerer for accurate typedef resolution.
-        let explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
+        let mut explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
             Some(self.alignof_type(alignas_ts))
         } else {
             decl.alignment
         };
+        // Recompute sizeof for aligned(sizeof(type)) with full layout info
+        if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+            let real_sizeof = self.sizeof_type(sizeof_ts);
+            explicit_align = Some(explicit_align.map_or(real_sizeof, |a| a.max(real_sizeof)));
+        }
+        // Also incorporate alignment from typedef
+        if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
+            explicit_align = Some(explicit_align.map_or(td_align, |a: usize| a.max(td_align)));
+        }
         let has_explicit_align = explicit_align.is_some();
         let align = if let Some(explicit) = explicit_align {
             da.var_ty.align().max(explicit)

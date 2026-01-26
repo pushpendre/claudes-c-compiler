@@ -1,0 +1,12 @@
+Task: Implement -fno-jump-tables flag to disable switch jump table emission
+Status: in_progress
+
+The compiler ignores -fno-jump-tables, so it still emits indirect jumps via
+jump tables in switch statements. The Linux kernel builds with -fno-jump-tables
+and -mindirect-branch=thunk-extern (retpoline), and objtool rejects indirect
+jumps in RETPOLINE builds. This causes mm/vmscan.c (and potentially other files)
+to fail the kernel boot check.
+
+Fix: Add no_jump_tables flag to Driver, CodegenOptions, CodegenState. Parse
+-fno-jump-tables in CLI. In emit_switch (traits.rs), skip jump table path when
+the flag is set, falling back to compare-and-branch chains.

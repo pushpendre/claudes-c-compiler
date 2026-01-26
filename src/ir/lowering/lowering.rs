@@ -1354,6 +1354,21 @@ impl Lowerer {
                     if is_enum_type && declarator.derived.is_empty() {
                         self.types.enum_typedefs.insert(declarator.name.clone());
                     }
+                    // Preserve alignment override from __attribute__((aligned(N))) on the typedef.
+                    // Recompute sizeof for aligned(sizeof(type)) with full layout info.
+                    let effective_alignment = {
+                        let mut align = decl.alignment;
+                        if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                            let real_sizeof = self.sizeof_type(sizeof_ts);
+                            align = Some(align.map_or(real_sizeof, |a| a.max(real_sizeof)));
+                        }
+                        align.or_else(|| {
+                            decl.alignas_type.as_ref().map(|ts| self.alignof_type(ts))
+                        })
+                    };
+                    if let Some(align) = effective_alignment {
+                        self.types.typedef_alignments.insert(declarator.name.clone(), align);
+                    }
                 }
             }
             // Mark transparent_union on the union's StructLayout
@@ -1469,11 +1484,20 @@ impl Lowerer {
                 // Resolve _Alignas alignment: use the lowerer's alignof_type (which can
                 // resolve typedefs) for the alignas type specifier, falling back to the
                 // parser's pre-computed numeric alignment.
-                let explicit = if let Some(ref alignas_ts) = decl.alignas_type {
+                let mut explicit = if let Some(ref alignas_ts) = decl.alignas_type {
                     Some(self.alignof_type(alignas_ts))
                 } else {
                     decl.alignment
                 };
+                // Recompute sizeof for aligned(sizeof(type)) with full layout info
+                if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                    let real_sizeof = self.sizeof_type(sizeof_ts);
+                    explicit = Some(explicit.map_or(real_sizeof, |a| a.max(real_sizeof)));
+                }
+                // Also incorporate alignment from typedef
+                if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
+                    explicit = Some(explicit.map_or(td_align, |a| a.max(td_align)));
+                }
                 if let Some(explicit_val) = explicit {
                     (natural.max(explicit_val), true)
                 } else {

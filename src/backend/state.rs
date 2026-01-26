@@ -129,6 +129,10 @@ pub struct CodegenState {
     /// __attribute__((section("..."))). Used to restore the correct section
     /// after emitting data (e.g., jump tables) in other sections.
     pub current_text_section: String,
+    /// Whether to use the kernel code model (-mcmodel=kernel).
+    /// When true, global symbol addresses use absolute sign-extended 32-bit
+    /// addressing instead of RIP-relative, producing R_X86_64_32S relocations.
+    pub code_model_kernel: bool,
 }
 
 impl CodegenState {
@@ -153,6 +157,7 @@ impl CodegenState {
             f128_load_sources: FxHashMap::default(),
             f128_direct_slots: FxHashSet::default(),
             current_text_section: ".text".to_string(),
+            code_model_kernel: false,
         }
     }
 

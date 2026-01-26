@@ -115,6 +115,7 @@ impl Parser {
                 is_transparent_union: false,
                 alignment: None,
                 alignas_type: None,
+                alignment_sizeof_type: None,
                 address_space: self.parsing_address_space,
                 span: start,
             }));
@@ -131,6 +132,7 @@ impl Parser {
         // Per C11, alignment can only increase (6.7.5), so take the maximum.
         let mut merged_alignment = self.parsed_alignas.take();
         let alignas_type = self.parsed_alignas_type.take();
+        let alignment_sizeof_type = self.parsed_alignment_sizeof_type.take();
         for a in [decl_aligned, post_aligned].iter().copied().flatten() {
             merged_alignment = Some(merged_alignment.map_or(a, |prev| prev.max(a)));
         }
@@ -164,7 +166,7 @@ impl Parser {
         if is_funcdef {
             self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility, is_weak)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, is_noreturn, cleanup_fn)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, alignment_sizeof_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, is_noreturn, cleanup_fn)
         }
     }
 
@@ -412,6 +414,7 @@ impl Parser {
         mut is_common: bool,
         mut alignment: Option<usize>,
         alignas_type: Option<TypeSpecifier>,
+        alignment_sizeof_type: Option<TypeSpecifier>,
         is_weak: bool,
         alias_target: Option<String>,
         visibility: Option<String>,
@@ -549,6 +552,7 @@ impl Parser {
             is_transparent_union,
             alignment,
             alignas_type,
+            alignment_sizeof_type,
             address_space: self.parsing_address_space,
             span: start,
         }))
@@ -575,7 +579,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, address_space: self.parsing_address_space, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, alignment_sizeof_type: None, address_space: self.parsing_address_space, span: start });
         }
 
         let mut mode_kind: Option<ModeKind> = None;
@@ -654,9 +658,10 @@ impl Parser {
             alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
         }
         let alignas_type = self.parsed_alignas_type.take();
+        let alignment_sizeof_type = self.parsed_alignment_sizeof_type.take();
         let is_transparent_union = self.parsing_transparent_union;
         self.parsing_transparent_union = false;
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, address_space: self.parsing_address_space, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, alignment_sizeof_type, address_space: self.parsing_address_space, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.

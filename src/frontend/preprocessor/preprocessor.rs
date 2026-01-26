@@ -275,8 +275,10 @@ impl Preprocessor {
             ("__GCC_ATOMIC_LONG_LOCK_FREE", "2"),
             ("__GCC_ATOMIC_LLONG_LOCK_FREE", "2"),
             ("__GCC_ATOMIC_POINTER_LOCK_FREE", "2"),
-            // ELF/PIC
-            ("__ELF__", "1"), ("__PIC__", "2"), ("__pic__", "2"),
+            // ELF
+            ("__ELF__", "1"),
+            // Note: __PIC__/__pic__ are conditionally defined via set_pic(),
+            // not here, so they are only present when -fPIC is active.
             // CET (Control-flow Enforcement Technology) - match GCC's default
             // This is x86_64-only; removed for other targets in set_target().
             // Value 3 = IBT (bit 0) + SHSTK (bit 1), matching GCC's default.
@@ -632,6 +634,21 @@ impl Preprocessor {
         let canonical = std::fs::canonicalize(&path)
             .unwrap_or_else(|_| path);
         self.include_stack.push(canonical);
+    }
+
+    /// Define or undefine __PIC__/__pic__ based on whether PIC mode is active.
+    /// GCC defines these to 1 for -fpic and 2 for -fPIC; we always use 2.
+    /// When PIC is disabled (e.g. -fno-PIC), these must not be defined, as
+    /// kernel code (RIP_REL_REF) checks `#ifndef __pic__` to decide whether
+    /// to use RIP-relative inline asm for position-independent references.
+    pub fn set_pic(&mut self, enabled: bool) {
+        if enabled {
+            self.define_simple_macro("__PIC__", "2");
+            self.define_simple_macro("__pic__", "2");
+        } else {
+            self.macros.undefine("__PIC__");
+            self.macros.undefine("__pic__");
+        }
     }
 
     /// Set the target architecture, updating predefined macros and include paths.

@@ -579,34 +579,85 @@ impl ArmCodegen {
         }
     }
 
-    /// Load a large immediate into a register.
+    /// Load an immediate into a register using the most efficient sequence.
+    /// Handles all 64-bit values including negatives via MOVZ/MOVK or MOVN/MOVK.
     fn load_large_imm(&mut self, reg: &str, val: i64) {
-        if val <= 65535 {
-            self.state.emit_fmt(format_args!("    mov {}, #{}", reg, val));
-        } else {
-            self.state.emit_fmt(format_args!("    movz {}, #{}", reg, val & 0xFFFF));
-            if (val >> 16) & 0xFFFF != 0 {
-                self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #16", reg, (val >> 16) & 0xFFFF));
-            }
-        }
+        self.emit_load_imm64(reg, val);
     }
 
-    /// Load a 64-bit immediate value into a register using mov/movk sequence.
+    /// Load a 64-bit immediate value into a register using movz/movn + movk sequence.
+    /// Uses MOVN (move-not) for values where most halfwords are 0xFFFF, which
+    /// gives shorter sequences for negative numbers and large values.
     fn emit_load_imm64(&mut self, reg: &str, val: i64) {
         let bits = val as u64;
         if bits == 0 {
             self.state.emit_fmt(format_args!("    mov {}, #0", reg));
             return;
         }
-        self.state.emit_fmt(format_args!("    mov {}, #{}", reg, bits & 0xffff));
-        if (bits >> 16) & 0xffff != 0 {
-            self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #16", reg, (bits >> 16) & 0xffff));
+        if bits == 0xFFFFFFFF_FFFFFFFF {
+            // All-ones: MOVN reg, #0 produces NOT(0) = 0xFFFFFFFFFFFFFFFF
+            self.state.emit_fmt(format_args!("    movn {}, #0", reg));
+            return;
         }
-        if (bits >> 32) & 0xffff != 0 {
-            self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #32", reg, (bits >> 32) & 0xffff));
-        }
-        if (bits >> 48) & 0xffff != 0 {
-            self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #48", reg, (bits >> 48) & 0xffff));
+
+        // Extract 16-bit halfwords
+        let hw: [u16; 4] = [
+            (bits & 0xffff) as u16,
+            ((bits >> 16) & 0xffff) as u16,
+            ((bits >> 32) & 0xffff) as u16,
+            ((bits >> 48) & 0xffff) as u16,
+        ];
+
+        // Count how many halfwords are 0x0000 vs 0xFFFF to pick MOVZ vs MOVN
+        let zeros = hw.iter().filter(|&&h| h == 0x0000).count();
+        let ones = hw.iter().filter(|&&h| h == 0xFFFF).count();
+
+        if ones > zeros {
+            // Use MOVN (move-not) strategy: start with all-ones, patch non-0xFFFF halfwords
+            // MOVN sets the register to NOT(imm16 << shift)
+            let mut first = true;
+            for (i, &h) in hw.iter().enumerate() {
+                if h != 0xFFFF {
+                    let shift = i * 16;
+                    let not_h = (!h) as u64 & 0xffff;
+                    if first {
+                        if shift == 0 {
+                            self.state.emit_fmt(format_args!("    movn {}, #{}", reg, not_h));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movn {}, #{}, lsl #{}", reg, not_h, shift));
+                        }
+                        first = false;
+                    } else {
+                        if shift == 0 {
+                            self.state.emit_fmt(format_args!("    movk {}, #{}", reg, h as u64));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #{}", reg, h as u64, shift));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Use MOVZ (move-zero) strategy: start with all-zeros, patch non-0x0000 halfwords
+            let mut first = true;
+            for (i, &h) in hw.iter().enumerate() {
+                if h != 0x0000 {
+                    let shift = i * 16;
+                    if first {
+                        if shift == 0 {
+                            self.state.emit_fmt(format_args!("    movz {}, #{}", reg, h as u64));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movz {}, #{}, lsl #{}", reg, h as u64, shift));
+                        }
+                        first = false;
+                    } else {
+                        if shift == 0 {
+                            self.state.emit_fmt(format_args!("    movk {}, #{}", reg, h as u64));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movk {}, #{}, lsl #{}", reg, h as u64, shift));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1312,7 +1363,7 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_switch_case_branch(&mut self, case_val: i64, label: &str) {
         // Load case value into x1, compare, and branch if equal.
-        self.state.emit_fmt(format_args!("    mov x1, #{}", case_val));
+        self.emit_load_imm64("x1", case_val);
         self.state.emit("    cmp x0, x1");
         self.state.emit_fmt(format_args!("    b.eq {}", label));
     }
@@ -1888,7 +1939,7 @@ impl ArchCodegen for ArmCodegen {
             self.state.emit_fmt(format_args!("    sub x0, x0, #{}", -imm));
         } else {
             // Large immediate: load into x1 (secondary), then add
-            self.state.emit_fmt(format_args!("    mov x1, #{}", imm));
+            self.emit_load_imm64("x1", imm);
             self.state.emit("    add x0, x0, x1");
         }
     }
@@ -3195,7 +3246,7 @@ impl ArchCodegen for ArmCodegen {
             }
             Operand::Const(IrConst::F64(f)) => {
                 let bits = f.to_bits();
-                self.state.emit_fmt(format_args!("    mov x0, #{}", bits));
+                self.emit_load_imm64("x0", bits as i64);
                 self.state.emit("    fmov d1, x0");
             }
             _ => {
@@ -3223,7 +3274,9 @@ impl ArchCodegen for ArmCodegen {
             }
             Operand::Const(IrConst::F32(f)) => {
                 let bits = f.to_bits();
-                self.state.emit_fmt(format_args!("    mov w0, #{}", bits));
+                // Use x0 (64-bit) for the load sequence since w-register MOVZ/MOVK
+                // only supports shifts of 0 and 16. fmov s1, w0 reads the low 32 bits.
+                self.emit_load_imm64("x0", bits as i64);
                 self.state.emit("    fmov s1, w0");
             }
             _ => {

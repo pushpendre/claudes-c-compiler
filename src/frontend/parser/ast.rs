@@ -81,6 +81,10 @@ pub struct Declaration {
     /// The parser can't resolve typedef names, so when _Alignas takes a type argument,
     /// we store the type specifier here for proper resolution during lowering.
     pub alignas_type: Option<TypeSpecifier>,
+    /// Type from `__attribute__((aligned(sizeof(type))))`.  The parser can't compute
+    /// sizeof for struct/union types accurately, so we capture the type here and let
+    /// sema/lowerer recompute `sizeof(type)` with full layout information.
+    pub alignment_sizeof_type: Option<TypeSpecifier>,
     /// Address space qualifier on the variable itself (not on a pointer).
     /// E.g., `extern const struct pcpu_hot __seg_gs const_pcpu_hot;` has SegGs.
     /// Used for x86 per-CPU variable access with %gs:/%fs: segment prefixes.
@@ -103,6 +107,7 @@ impl Declaration {
             is_transparent_union: false,
             alignment: None,
             alignas_type: None,
+            alignment_sizeof_type: None,
             address_space: AddressSpace::Default,
             span: Span::dummy(),
         }

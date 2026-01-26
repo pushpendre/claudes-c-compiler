@@ -72,6 +72,10 @@ pub struct Driver {
     /// any SSE/SSE2/AVX instructions (movdqu, movss, movsd, etc.).
     /// The Linux kernel uses -mno-sse to avoid FPU state in kernel code.
     pub no_sse: bool,
+    /// Whether to use the kernel code model (-mcmodel=kernel). When true,
+    /// global symbol addresses use absolute 32-bit sign-extended addressing
+    /// instead of RIP-relative. Required for the Linux kernel.
+    pub code_model_kernel: bool,
     /// Explicit language override from -x flag.
     /// When set, overrides file extension detection for input language.
     /// Values: "c", "assembler", "assembler-with-cpp", "none" (reset).
@@ -122,6 +126,7 @@ impl Driver {
             patchable_function_entry: None,
             cf_protection_branch: false,
             no_sse: false,
+            code_model_kernel: false,
             explicit_language: None,
             assembler_extra_args: Vec::new(),
             dep_file: None,
@@ -201,6 +206,10 @@ impl Driver {
             Target::Riscv64 => preprocessor.set_target("riscv64"),
             Target::X86_64 => preprocessor.set_target("x86_64"),
         }
+        // Set PIC mode: defines __PIC__/__pic__ only when -fPIC is active.
+        // This is critical for kernel code where RIP_REL_REF() checks #ifndef __pic__
+        // to decide whether to use RIP-relative inline asm for early boot code.
+        preprocessor.set_pic(self.pic);
         for def in &self.defines {
             preprocessor.define_macro(&def.name, &def.value);
         }
@@ -659,6 +668,7 @@ impl Driver {
             patchable_function_entry: self.patchable_function_entry,
             cf_protection_branch: self.cf_protection_branch,
             no_sse: self.no_sse,
+            code_model_kernel: self.code_model_kernel,
         };
         let asm = self.target.generate_assembly_with_opts(&module, &opts);
         if time_phases { eprintln!("[TIME] codegen: {:.3}s ({} bytes asm)", t8.elapsed().as_secs_f64(), asm.len()); }

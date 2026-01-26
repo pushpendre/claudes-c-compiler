@@ -43,6 +43,14 @@ pub struct CodegenOptions {
     /// operations, casts, and other FP codegen paths. Currently only the
     /// variadic ABI path is gated, which is sufficient for the Linux kernel.
     pub no_sse: bool,
+    /// Whether to use the kernel code model (-mcmodel=kernel). When true,
+    /// global symbol addresses are loaded using absolute 32-bit sign-extended
+    /// addressing (movq $symbol, %reg) instead of RIP-relative (leaq symbol(%rip), %reg).
+    /// This is required for the Linux kernel because early boot code (e.g. __startup_64)
+    /// runs at physical addresses different from its linked virtual addresses, making
+    /// RIP-relative references resolve incorrectly. The kernel memory model assumes all
+    /// kernel symbols reside in the negative 2GB of the virtual address space.
+    pub code_model_kernel: bool,
 }
 
 /// Target architecture.
@@ -122,6 +130,7 @@ impl Target {
                 cg.set_patchable_function_entry(opts.patchable_function_entry);
                 cg.set_cf_protection_branch(opts.cf_protection_branch);
                 cg.set_no_sse(opts.no_sse);
+                cg.set_code_model_kernel(opts.code_model_kernel);
                 cg.generate(module)
             }
             Target::Aarch64 => arm::ArmCodegen::new().generate(module),
