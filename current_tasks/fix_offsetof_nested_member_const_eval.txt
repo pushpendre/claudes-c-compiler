@@ -1,0 +1,22 @@
+Task: fix_offsetof_nested_member_const_eval
+Status: in_progress
+Description: Fix offsetof with nested member access and array subscripts in global
+initializer constant evaluation.
+
+Bug: offsetof(struct outer, data.x) and offsetof(struct s, arr[0]) always evaluated
+to 0 in global initializer context. The constant evaluator's eval_offsetof_pattern only
+handled single-level pointer member access (((type*)0)->member) but not chained member
+access (((type*)0)->data.x) or array subscripts with non-I64 index values.
+
+Fix:
+1. Refactored eval_offsetof_pattern into eval_offsetof_pattern_with_type that returns
+   both offset and CType, enabling recursive resolution of chained member accesses.
+2. Added fallback in MemberAccess arm to recursively evaluate the base as an offsetof
+   sub-expression when it's not a simple Deref pattern.
+3. Fixed ArraySubscript arm to use to_i64() instead of pattern matching IrConst::I64,
+   since integer literals evaluate to IrConst::I32.
+
+Applied to both sema (const_eval.rs) and lowering (const_eval.rs) constant evaluators.
+
+Kernel impact: Fixes ACPI resource descriptor tables (rsirq.c) and crypto key restriction
+tables (restrict.c) that use offsetof with nested struct/union member paths.
