@@ -1,0 +1,20 @@
+Task: Fix anonymous struct member access type in statement expressions
+Status: in_progress
+
+Problem:
+Anonymous struct member access inside statement expressions (used by Linux kernel's
+get_unaligned() macro) was returning the wrong type (int/32-bit instead of the actual
+member type). This caused lib/string.c memcmp to use 32-bit comparisons for
+unsigned long values, breaking kernel boot.
+
+Root cause:
+The sema type checker's resolve_type_spec() returned CType::Int for anonymous structs
+because it couldn't generate unique struct keys. The lowerer's get_expr_type() for
+StmtExpr also couldn't resolve the type because the inner variables hadn't been
+lowered yet when pre-lowering type queries were made.
+
+Fix:
+1. Added anonymous struct/union layout computation to sema type checker's
+   resolve_type_spec(), using TypeContext::next_anon_struct_id() to generate keys
+2. Added CType-based fallback in lowerer's get_expr_type() for StmtExpr, so sema
+   annotations are used when direct IR type resolution fails
