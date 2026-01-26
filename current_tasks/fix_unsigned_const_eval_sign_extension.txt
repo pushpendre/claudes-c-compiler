@@ -1,0 +1,17 @@
+Fix: Unsigned 32-bit constant eval sign extension in comparisons
+
+Bug: (uint32_t)0x80000000 != 0x80000000 wrongly evaluates to 1 at compile-time.
+
+Root cause: bits_to_irconst() stores unsigned 32-bit values as IrConst::I32(bits as i32),
+which sign-extends values >= 0x80000000. When compared against IrConst::I64 values via
+to_i64(), the sign-extended negative value doesn't match the positive value.
+
+Also, Eq/Ne in const_arith didn't handle is_32bit/is_unsigned properly (unlike Lt/Gt/Le/Ge).
+
+Fix:
+1. bits_to_irconst: unsigned 32-bit types now return IrConst::I64 (like unsigned char/short)
+2. const_arith Eq/Ne: truncate to 32 bits when is_32bit, use unsigned comparison when is_unsigned
+
+This fixes mbedtls selftest failure "Type 'unsigned' has padding bits".
+
+Status: IN PROGRESS

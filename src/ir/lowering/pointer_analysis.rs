@@ -134,7 +134,14 @@ impl Lowerer {
                 false
             }
             Expr::Cast(ref type_spec, _, _) => {
-                matches!(type_spec, TypeSpecifier::Pointer(_, _))
+                match type_spec {
+                    TypeSpecifier::Pointer(_, _) => true,
+                    // Resolve typedef names to check if the resolved type is a pointer
+                    _ => {
+                        let ctype = self.type_spec_to_ctype(type_spec);
+                        matches!(ctype, CType::Pointer(_, _))
+                    }
+                }
             }
             Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
             Expr::BinaryOp(op, lhs, rhs, _) => {
@@ -337,7 +344,13 @@ impl Lowerer {
                 if let TypeSpecifier::Pointer(ref inner, _) = type_spec {
                     self.sizeof_type(inner)
                 } else {
-                    8
+                    // Resolve typedef names (e.g., typedef struct Foo *FooPtr)
+                    let ctype = self.type_spec_to_ctype(type_spec);
+                    if let CType::Pointer(ref pointee, _) = ctype {
+                        self.resolve_ctype_size(pointee).max(1)
+                    } else {
+                        8
+                    }
                 }
             }
             Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
@@ -399,6 +412,11 @@ impl Lowerer {
                 if let TypeSpecifier::Pointer(ref pointee_ts, _) = type_spec {
                     let pt = self.type_spec_to_ir(pointee_ts);
                     return Some(pt);
+                }
+                // Resolve typedef names (e.g., typedef struct Foo *FooPtr)
+                let ctype = self.type_spec_to_ctype(type_spec);
+                if let CType::Pointer(ref pointee, _) = ctype {
+                    return Some(IrType::from_ctype(pointee));
                 }
                 self.get_pointee_type_of_expr(inner)
             }

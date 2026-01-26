@@ -77,6 +77,7 @@ See `git log` for full history. Key milestones:
 - Performance: Rc<StructLayout> eliminates deep cloning in lowering (~18% compile speedup on sqlite3.c)
 - AArch64 inline asm: `"Q"` memory constraint (single base register, `[Xn]` syntax) and `"w"` FP/SIMD register constraint with `%d`/`%s`/`%q` modifiers (needed for musl atomic ops and math functions)
 - libffi fixes: `__builtin___clear_cache` support, tied FP register constraint propagation (RISC-V), alloca+indirect call frame addressing (ARM)
+- Fix typedef pointer cast arithmetic: `((TypedefPtr) p) - 1` now correctly scales by pointee size (fixes 132 postgres test failures)
 
 ### Project Build Status
 
@@ -97,7 +98,7 @@ See `git log` for full history. Key milestones:
 | mbedtls | PASS | All 7 tests pass (md5, sha256, sha512, aes, rsa, ecp, selftest including ARIA) |
 | jq | PASS | All 12 tests pass on x86/RISC-V; ARM 11/12 (regex crash in oniguruma regexec.c) |
 | liburing | FAIL | Builds but all 5 runtime tests fail (io_uring init returns -1) |
-| postgres | FAIL | Builds but initdb fails at runtime |
+| postgres | PARTIAL | 211/216 tests pass (5 remaining: strerror, stats, stack depth) |
 
 See `ideas/project_triage.txt` for detailed failure analysis and fix priorities.
 
