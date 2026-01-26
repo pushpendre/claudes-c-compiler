@@ -78,6 +78,10 @@ pub(super) struct LocalInfo {
     /// __attribute__((cleanup(func))): cleanup function to call with &var when scope exits.
     /// The function is called as func(&var) with a pointer to the variable.
     pub cleanup_fn: Option<String>,
+    /// Whether this variable was declared with `const` qualifier.
+    /// Used by _Generic matching to distinguish e.g. `const int *` from `int *`,
+    /// since CType does not track const/volatile qualifiers.
+    pub is_const: bool,
 }
 
 impl std::ops::Deref for LocalInfo {
@@ -315,7 +319,7 @@ impl GlobalInfo {
 
 impl LocalInfo {
     /// Construct a LocalInfo for a regular (non-static) local variable from DeclAnalysis.
-    pub(super) fn from_analysis(da: &DeclAnalysis, alloca: Value) -> Self {
+    pub(super) fn from_analysis(da: &DeclAnalysis, alloca: Value, is_const: bool) -> Self {
         LocalInfo {
             var: VarInfo::from_analysis(da),
             alloca,
@@ -326,11 +330,12 @@ impl LocalInfo {
             vla_size: None,
             asm_register: None,
             cleanup_fn: None,
+            is_const,
         }
     }
 
     /// Construct a LocalInfo for a static local variable from DeclAnalysis.
-    pub(super) fn for_static(da: &DeclAnalysis, static_name: String) -> Self {
+    pub(super) fn for_static(da: &DeclAnalysis, static_name: String, is_const: bool) -> Self {
         LocalInfo {
             var: VarInfo::from_analysis(da),
             alloca: Value(0), // placeholder; not used for static locals
@@ -341,6 +346,7 @@ impl LocalInfo {
             vla_size: None,
             asm_register: None,
             cleanup_fn: None,
+            is_const,
         }
     }
 }

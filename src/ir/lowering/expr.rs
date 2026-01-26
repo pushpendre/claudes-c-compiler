@@ -1058,6 +1058,21 @@ impl Lowerer {
     pub(super) fn resolve_generic_selection<'a>(&mut self, controlling: &Expr, associations: &'a [GenericAssociation]) -> &'a Expr {
         let controlling_ctype = self.get_expr_ctype(controlling);
         let controlling_ir_type = self.get_expr_type(controlling);
+        // Determine if the controlling expression's type has a const-qualified base type.
+        // For pointer types like `const int *p`, this checks if the pointee is const.
+        // For non-pointer types like `const int x`, this checks if the value is const.
+        let ctrl_is_const = self.expr_is_const_qualified(controlling);
+
+        // Check if any associations differ only in const-ness (i.e., there exist
+        // associations with the same CType but different is_const flags).
+        // Only use const-aware matching when this is the case, to avoid breaking
+        // existing code that doesn't use const-qualified _Generic associations.
+        let has_const_differentiated_assocs = {
+            let non_default: Vec<_> = associations.iter()
+                .filter(|a| a.type_spec.is_some())
+                .collect();
+            non_default.iter().any(|a| a.is_const) && non_default.iter().any(|a| !a.is_const)
+        };
 
         let mut default_expr: Option<&Expr> = None;
         let mut matched_expr: Option<&Expr> = None;
@@ -1069,12 +1084,20 @@ impl Lowerer {
                     let assoc_ctype = self.type_spec_to_ctype(type_spec);
                     if let Some(ref ctrl_ct) = controlling_ctype {
                         if self.ctype_matches_generic(ctrl_ct, &assoc_ctype) {
+                            // When associations differ by const-ness, also check
+                            // that the const qualification matches.
+                            if has_const_differentiated_assocs && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             matched_expr = Some(&assoc.expr);
                             break;
                         }
                     } else {
                         let assoc_ir_type = self.type_spec_to_ir(type_spec);
                         if assoc_ir_type == controlling_ir_type {
+                            if has_const_differentiated_assocs && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             matched_expr = Some(&assoc.expr);
                             break;
                         }
@@ -1089,9 +1112,32 @@ impl Lowerer {
     pub(super) fn ctype_matches_generic(&self, controlling: &CType, assoc: &CType) -> bool {
         // For _Generic, types must match exactly per C11 6.5.1.1.
         // CType derives PartialEq so direct comparison handles most cases.
-        // Note: CType does not track const/volatile qualifiers, so qualified
-        // pointer types (e.g. const int * vs int *) are not yet distinguished.
+        // Const/volatile qualification is checked separately via is_const flags
+        // on GenericAssociation and expr_is_const_qualified(), since CType does
+        // not track qualifiers.
         controlling == assoc
+    }
+
+    /// Check if an expression's type is const-qualified (for _Generic matching).
+    /// Only handles local variable identifiers and address-of expressions.
+    /// TODO: extend to global variables, casts, member access, subscripts
+    /// if _Generic const matching is needed for those expression forms.
+    pub(super) fn expr_is_const_qualified(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(ref fs) = self.func_state {
+                    if let Some(info) = fs.locals.get(name) {
+                        return info.is_const;
+                    }
+                }
+                false
+            }
+            // Address-of: &y where y is `const int` produces `const int *`.
+            Expr::AddressOf(inner, _) => {
+                self.expr_is_const_qualified(inner)
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------

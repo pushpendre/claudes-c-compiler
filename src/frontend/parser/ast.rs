@@ -57,6 +57,9 @@ pub struct ParamDecl {
     /// For function pointer parameters, the parameter types of the pointed-to function.
     /// E.g., for `float (*func)(float, float)`, this holds the two float param decls.
     pub fptr_params: Option<Vec<ParamDecl>>,
+    /// Whether this parameter's base type has a `const` qualifier.
+    /// Used by _Generic matching to distinguish e.g. `const int *` from `int *`.
+    pub is_const: bool,
 }
 
 /// A variable/type declaration.
@@ -364,6 +367,11 @@ pub enum Expr {
 pub struct GenericAssociation {
     pub type_spec: Option<TypeSpecifier>, // None for "default"
     pub expr: Expr,
+    /// Whether the association type has a const qualifier on the top-level type
+    /// (for non-pointer types) or on the pointee (for pointer types like `const int *`).
+    /// Used by _Generic matching to distinguish e.g. `const int *` from `int *`,
+    /// since CType does not track const/volatile qualifiers.
+    pub is_const: bool,
 }
 
 /// Sizeof argument can be a type or expression.

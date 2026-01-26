@@ -320,7 +320,13 @@ impl Parser {
 
             let span = self.peek_span();
             self.skip_gcc_extensions();
+            // Save and reset parsing_const to detect if this parameter's base type is const.
+            let saved_const = self.parsing_const;
+            self.parsing_const = false;
             if let Some(mut type_spec) = self.parse_type_specifier() {
+                // Capture whether the base type (before pointer declarators) was const.
+                // For `const int *p`, parsing_const is true here; the `*` is handled below.
+                let param_is_const = self.parsing_const;
                 let (name, pointer_depth, array_dims, is_func_ptr, ptr_to_array_dims, fptr_param_decls) =
                     self.parse_param_declarator_full();
                 self.skip_gcc_extensions();
@@ -351,7 +357,8 @@ impl Parser {
                     type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
-                params.push(ParamDecl { type_spec, name, span, fptr_params: fptr_param_decls });
+                self.parsing_const = saved_const;
+                params.push(ParamDecl { type_spec, name, span, fptr_params: fptr_param_decls, is_const: param_is_const });
             } else {
                 break;
             }
@@ -378,6 +385,7 @@ impl Parser {
                     name: Some(n),
                     span,
                     fptr_params: None,
+                    is_const: false,
                 });
             } else {
                 break;

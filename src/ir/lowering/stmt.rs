@@ -230,7 +230,7 @@ impl Lowerer {
                     decl.is_volatile,
                 );
             }
-            let mut local_info = LocalInfo::from_analysis(&da, alloca);
+            let mut local_info = LocalInfo::from_analysis(&da, alloca, decl.is_const);
             local_info.var.address_space = decl.address_space;
             local_info.vla_size = vla_size;
             // For local VLAs with multiple dimensions, compute runtime strides
@@ -363,7 +363,7 @@ impl Lowerer {
 
         // Store type info in locals (with static_global_name set so each use site
         // emits a fresh GlobalAddr in its own basic block, avoiding unreachable-block issues).
-        self.insert_local_scoped(declarator.name.clone(), LocalInfo::for_static(da, static_name));
+        self.insert_local_scoped(declarator.name.clone(), LocalInfo::for_static(da, static_name, decl.is_const));
         self.next_static_local += 1;
 
         // Track function pointer return and param types for static locals too,

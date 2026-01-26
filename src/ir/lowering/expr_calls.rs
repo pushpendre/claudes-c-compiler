@@ -48,6 +48,16 @@ impl Lowerer {
             }
         }
 
+        // Resolve _Generic selections to the selected expression.
+        // Without this, _Generic(expr, type1: func1, type2: func2)(args) would
+        // fall through to the catch-all indirect call path, which dereferences
+        // the function address instead of calling directly.
+        if let Expr::GenericSelection(controlling, associations, _) = stripped_func {
+            stripped_func = self.resolve_generic_selection(controlling, associations);
+        }
+        // Use the resolved expression for emit_call_instruction too
+        let effective_func = stripped_func;
+
         // Resolve __builtin_* functions first
         if let Expr::Identifier(name, _) = stripped_func {
             if let Some(result) = self.try_lower_builtin_call(name, args) {
@@ -75,7 +85,7 @@ impl Lowerer {
         let (sret_size, two_reg_size) = if let Expr::Identifier(name, _) = stripped_func {
             if self.is_func_ptr_variable(name) {
                 // Indirect call through function pointer variable
-                match self.get_call_return_struct_size(func) {
+                match self.get_call_return_struct_size(effective_func) {
                     Some(size) => Self::classify_struct_return(size),
                     None => (None, None),
                 }
@@ -89,14 +99,14 @@ impl Lowerer {
             }
         } else {
             // Non-identifier function expression (e.g., array[i]())
-            match self.get_call_return_struct_size(func) {
+            match self.get_call_return_struct_size(effective_func) {
                 Some(size) => Self::classify_struct_return(size),
                 None => (None, None),
             }
         };
 
         // Lower arguments with implicit casts
-        let (mut arg_vals, mut arg_types, mut struct_arg_sizes) = self.lower_call_arguments(func, args);
+        let (mut arg_vals, mut arg_types, mut struct_arg_sizes) = self.lower_call_arguments(effective_func, args);
 
         // Detect variadic status early (needed for complex arg decomposition)
         let call_is_variadic = if let Expr::Identifier(name, _) = stripped_func {
@@ -160,7 +170,7 @@ impl Lowerer {
         };
 
         // Dispatch: direct call, function pointer call, or indirect call
-        let call_ret_ty = self.emit_call_instruction(func, dest, arg_vals, arg_types, struct_arg_sizes, call_variadic, num_fixed_args, two_reg_size, sret_size);
+        let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, call_variadic, num_fixed_args, two_reg_size, sret_size);
 
         // For sret calls, the struct data is now in the alloca - return its address
         if let Some(alloca) = sret_alloca {

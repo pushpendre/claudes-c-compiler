@@ -429,6 +429,11 @@ impl Lowerer {
     fn resolve_generic_selection_ctype(&self, controlling: &Expr, associations: &[GenericAssociation]) -> Option<CType> {
         let controlling_ctype = self.get_expr_ctype(controlling);
         let controlling_ir_type = self.get_expr_type(controlling);
+        let ctrl_is_const = self.expr_is_const_qualified(controlling);
+        let has_const_diff = {
+            let non_default: Vec<_> = associations.iter().filter(|a| a.type_spec.is_some()).collect();
+            non_default.iter().any(|a| a.is_const) && non_default.iter().any(|a| !a.is_const)
+        };
         let mut default_expr: Option<&Expr> = None;
         for assoc in associations.iter() {
             match &assoc.type_spec {
@@ -437,11 +442,17 @@ impl Lowerer {
                     let assoc_ctype = self.type_spec_to_ctype(type_spec);
                     if let Some(ref ctrl_ct) = controlling_ctype {
                         if self.ctype_matches_generic(ctrl_ct, &assoc_ctype) {
+                            if has_const_diff && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             return self.get_expr_ctype(&assoc.expr);
                         }
                     } else {
                         let assoc_ir_type = self.type_spec_to_ir(type_spec);
                         if assoc_ir_type == controlling_ir_type {
+                            if has_const_diff && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             return self.get_expr_ctype(&assoc.expr);
                         }
                     }
@@ -458,6 +469,11 @@ impl Lowerer {
     fn resolve_generic_selection_type(&self, controlling: &Expr, associations: &[GenericAssociation]) -> IrType {
         let controlling_ctype = self.get_expr_ctype(controlling);
         let controlling_ir_type = self.get_expr_type(controlling);
+        let ctrl_is_const = self.expr_is_const_qualified(controlling);
+        let has_const_diff = {
+            let non_default: Vec<_> = associations.iter().filter(|a| a.type_spec.is_some()).collect();
+            non_default.iter().any(|a| a.is_const) && non_default.iter().any(|a| !a.is_const)
+        };
         let mut default_expr: Option<&Expr> = None;
         for assoc in associations.iter() {
             match &assoc.type_spec {
@@ -466,11 +482,17 @@ impl Lowerer {
                     let assoc_ctype = self.type_spec_to_ctype(type_spec);
                     if let Some(ref ctrl_ct) = controlling_ctype {
                         if self.ctype_matches_generic(ctrl_ct, &assoc_ctype) {
+                            if has_const_diff && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             return self.get_expr_type(&assoc.expr);
                         }
                     } else {
                         let assoc_ir_type = self.type_spec_to_ir(type_spec);
                         if assoc_ir_type == controlling_ir_type {
+                            if has_const_diff && assoc.is_const != ctrl_is_const {
+                                continue;
+                            }
                             return self.get_expr_type(&assoc.expr);
                         }
                     }
@@ -483,6 +505,7 @@ impl Lowerer {
         IrType::I64
     }
 
+    // expr_is_const_qualified is defined in expr.rs as pub(super)
     /// Get the IR type for an expression (best-effort, based on locals/globals info).
     pub(super) fn get_expr_type(&self, expr: &Expr) -> IrType {
         match expr {

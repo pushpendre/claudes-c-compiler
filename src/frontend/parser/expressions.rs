@@ -611,20 +611,30 @@ impl Parser {
             if matches!(self.peek(), TokenKind::RParen) {
                 break;
             }
-            let type_spec = if matches!(self.peek(), TokenKind::Default) {
+            // Save and reset parsing_const before parsing each association type,
+            // so we can detect whether `const` appeared in the type specifier.
+            let saved_const = self.parsing_const;
+            self.parsing_const = false;
+            let (type_spec, is_const) = if matches!(self.peek(), TokenKind::Default) {
                 self.advance();
-                None
+                (None, false)
             } else {
                 if let Some(ts) = self.parse_type_specifier() {
+                    // Capture whether the base type had `const` before pointer declarators.
+                    // For `const int *`, parsing_const is true after parse_type_specifier
+                    // (from the `const` keyword), and the `*` is applied in
+                    // parse_abstract_declarator_suffix. This means the pointee is const.
+                    let base_const = self.parsing_const;
                     let full_type = self.parse_abstract_declarator_suffix(ts);
-                    Some(full_type)
+                    (Some(full_type), base_const)
                 } else {
-                    None
+                    (None, false)
                 }
             };
+            self.parsing_const = saved_const;
             self.expect(&TokenKind::Colon);
             let expr = self.parse_assignment_expr();
-            associations.push(GenericAssociation { type_spec, expr });
+            associations.push(GenericAssociation { type_spec, expr, is_const });
             if !self.consume_if(&TokenKind::Comma) {
                 break;
             }
