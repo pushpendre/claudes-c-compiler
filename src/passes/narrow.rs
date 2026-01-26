@@ -271,6 +271,23 @@ fn narrow_function(func: &mut IrFunction) -> usize {
                     _ => continue,
                 };
 
+                // Phase 5 changes the BinOp's result type without inserting a
+                // widening Cast for consumers.  Narrowing to I32/U32 is safe on
+                // x86-64 because 32-bit register operations implicitly zero-extend
+                // to 64-bit, and codegen already handles I32/U32 results correctly.
+                // Sub-int types (I8/U8/I16/U16) are NOT safe: consumers still
+                // expect a 64-bit value, and without an explicit Cast the upper
+                // bits may carry stale sign-extended data.  For example, narrowing
+                // `(unsigned char)0xFF ^ 0` to U8 produces IrConst::I8(-1) after
+                // constant folding, which sign-extends to -1 instead of 255 when
+                // the consumer reads it as an i64.
+                // Phase 4 handles sub-int narrowing correctly because it replaces
+                // an existing narrowing Cast (so consumers already expect the
+                // narrow type).
+                if target_ty.size() < 4 {
+                    continue;
+                }
+
                 // Narrow the operands
                 let new_lhs = narrow_operand_by_type(lhs, target_ty, &load_type_map, &widen_map, &narrowed_map);
                 let new_rhs = narrow_operand_by_type(rhs, target_ty, &load_type_map, &widen_map, &narrowed_map);
