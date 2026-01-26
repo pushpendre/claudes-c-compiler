@@ -1,0 +1,19 @@
+Fix __asm__ label redirect on function declarations
+====================================================
+
+The compiler does not handle the __asm__("symbol_name") attribute on
+function declarations, which glibc uses to redirect function calls
+to different linker symbols.
+
+Example:
+  extern int strerror_r(...) __asm__("" "__xpg_strerror_r");
+
+GCC compiles calls to strerror_r() as calls to __xpg_strerror_r.
+Our compiler ignores the __asm__ label and calls strerror_r directly.
+
+This causes strerror_r to call the GNU version (returning char *)
+instead of the POSIX version (returning int), breaking postgres
+and likely other real-world programs.
+
+Impact: Fixes postgres strerror issue, and likely many other glibc
+function redirections (e.g., stat/fstat -> __xstat, etc.).
