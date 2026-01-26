@@ -1,0 +1,10 @@
+Fix ARM inline asm load_input_to_reg not checking is_alloca
+
+Bug: ARM backend's load_input_to_reg always emits "ldr" (load from memory)
+for Value operands, but when the value IS an alloca (e.g., a local array used
+as an inline asm input), it should emit "add" to compute the address instead.
+
+This caused musl's tmpfile() to fail on ARM because the openat syscall received
+the array contents instead of its address (EFAULT).
+
+Status: in_progress
