@@ -1,0 +1,19 @@
+Optimize ARM and RISC-V GEP constant offset codegen
+
+Problem:
+- The ARM and RISC-V backends use the default trait fallback for GEP with constant offsets
+- The default path does: load base to secondary, load constant offset to acc, add regs
+- This generates 3+ instructions when it could use immediate-add patterns
+- Both backends already have emit_add_imm_to_acc() that uses addi/add #imm efficiently
+- But the GEP constant-offset path doesn't call it
+
+Fix:
+- Override emit_gep_direct_const, emit_gep_indirect_const, emit_gep_add_const_to_acc
+  in both ARM and RISC-V backends
+- ARM: use add Xd, Xn, #imm (0..4095) or sub Xd, Xn, #imm for small offsets
+- RISC-V: use addi rd, rs, imm (-2048..2047) for small offsets
+- Fall back to load-imm + add for large offsets
+- This reduces code size and improves runtime performance for struct field access,
+  array element access, and other GEP-heavy patterns
+
+Status: in_progress

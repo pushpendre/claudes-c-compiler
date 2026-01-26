@@ -1492,12 +1492,36 @@ impl Lowerer {
             }
 
             // Handle tentative definitions and re-declarations
+            // When a global was previously declared with __weak and is now
+            // redefined with an initializer (without __weak), preserve the
+            // weak attribute from the earlier declaration. GCC keeps the weak
+            // binding in this case (e.g., Linux kernel's init/version.c uses
+            // `const char linux_banner[] __weak;` followed by a strong definition).
+            let mut prior_was_weak = false;
             if self.globals.contains_key(&declarator.name) {
                 if declarator.init.is_none() {
                     if self.emitted_global_names.contains(&declarator.name) {
+                        // Even though we skip re-emitting, propagate __weak
+                        // to the already-emitted global if this redeclaration
+                        // carries the weak attribute.
+                        if declarator.is_weak {
+                            for g in &mut self.module.globals {
+                                if g.name == declarator.name {
+                                    g.is_weak = true;
+                                    break;
+                                }
+                            }
+                        }
                         continue;
                     }
                 } else {
+                    // Save the is_weak flag from the previous tentative definition
+                    for g in &self.module.globals {
+                        if g.name == declarator.name {
+                            prior_was_weak = g.is_weak;
+                            break;
+                        }
+                    }
                     self.module.globals.retain(|g| g.name != declarator.name);
                     self.emitted_global_names.remove(&declarator.name);
                 }
@@ -1614,7 +1638,7 @@ impl Lowerer {
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
                 section: declarator.section.clone(),
-                is_weak: declarator.is_weak,
+                is_weak: declarator.is_weak || prior_was_weak,
                 visibility: declarator.visibility.clone(),
                 has_explicit_align,
                 is_const: var_is_const,
