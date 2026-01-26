@@ -1,0 +1,13 @@
+Task: Fix inline asm memory operand emitted as immediate ($symbol) instead of memory reference
+Status: in_progress
+
+Problem:
+In emit_operand_with_modifier(), the symbol-immediate check (emitting "$symbol") was
+tested before the memory operand check (emitting mem_addr). This caused "+m" constraint
+operands that also have imm_symbol set (from extract_mem_operand_symbol) to be emitted
+as "$pcpu_hot+8" instead of "%gs:pcpu_hot+8(%rip)", causing assembler errors on many
+kernel files (fs/ext4/file.c, arch/x86/mm/fault.c, kernel/signal.c, etc.).
+
+Fix:
+Reorder the checks in emit_operand_with_modifier() so memory operands are emitted
+via their mem_addr before the symbol/immediate fallbacks.
