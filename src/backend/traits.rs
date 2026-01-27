@@ -251,7 +251,37 @@ pub trait ArchCodegen {
     }
 
     /// Emit a comparison operation.
-    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
+    ///
+    /// Default dispatches i128 → f128 → float → integer to per-type primitives.
+    /// This mirrors the pattern used by emit_binop and emit_unaryop.
+    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_i128_cmp(dest, op, lhs, rhs);
+            return;
+        }
+        if ty == IrType::F128 {
+            self.emit_f128_cmp(dest, op, lhs, rhs);
+            return;
+        }
+        if ty.is_float() {
+            self.emit_float_cmp(dest, op, lhs, rhs, ty);
+            return;
+        }
+        self.emit_int_cmp(dest, op, lhs, rhs, ty);
+    }
+
+    /// Emit a floating-point comparison (F32/F64).
+    /// Called by the default emit_cmp for float types (not F128, not i128).
+    fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
+
+    /// Emit an F128 (long double / quad precision) comparison.
+    /// Called by the default emit_cmp for F128 types.
+    /// On x86, uses x87 fucomip; on ARM/RISC-V, uses soft-float libcalls.
+    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand);
+
+    /// Emit an integer comparison.
+    /// Called by the default emit_cmp for non-float, non-i128 types.
+    fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a function call (direct or indirect).
     ///

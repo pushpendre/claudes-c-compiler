@@ -225,13 +225,6 @@ impl X86Codegen {
         }
     }
 
-    /// Emit a cmpq instruction for two integer operands, choosing the best form
-    /// based on register allocation (register-direct, immediate, or accumulator fallback).
-    /// Used by both emit_cmp and emit_fused_cmp_branch.
-    fn emit_int_cmp_insn(&mut self, lhs: &Operand, rhs: &Operand) {
-        self.emit_int_cmp_insn_typed(lhs, rhs, false);
-    }
-
     /// Emit a comparison instruction, optionally using 32-bit form for I32/U32 types.
     /// When `use_32bit` is true, emits `cmpl` with 32-bit register names instead of `cmpq`.
     fn emit_int_cmp_insn_typed(&mut self, lhs: &Operand, rhs: &Operand, use_32bit: bool) {
@@ -2977,118 +2970,113 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
-    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        if is_i128_type(ty) {
-            self.emit_i128_cmp(dest, op, lhs, rhs);
-            return;
-        }
-        if ty == IrType::F128 {
-            // F128 (long double) comparison using x87 fucomip for full 80-bit precision.
-            // fucomip compares ST(0) with ST(1) and sets EFLAGS (CF, ZF, PF) just like ucomisd,
-            // then pops ST(0). We then fstp to clean the remaining ST(0).
-            //
-            // fucomip flag semantics (same as ucomisd):
-            //   ST(0) > ST(1): CF=0, ZF=0, PF=0
-            //   ST(0) < ST(1): CF=1, ZF=0, PF=0
-            //   ST(0) = ST(1): CF=0, ZF=1, PF=0
-            //   Unordered (NaN): CF=1, ZF=1, PF=1
-            //
-            // For Gt/Ge: load rhs first (→ST1), then lhs (→ST0).
-            //   fucomip compares ST(0)=lhs vs ST(1)=rhs. seta = lhs > rhs. ✓
-            // For Lt/Le: load lhs first (→ST1), then rhs (→ST0).
-            //   fucomip compares ST(0)=rhs vs ST(1)=lhs. seta = rhs > lhs = lhs < rhs. ✓
-            // For Eq/Ne: order doesn't matter, load lhs first then rhs.
-            let swap_x87 = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
-            let (first_x87, second_x87) = if swap_x87 { (lhs, rhs) } else { (rhs, lhs) };
-            // Load first operand → ST(0), then second → ST(0) (pushes first to ST(1))
-            self.emit_f128_load_to_x87(first_x87);
-            self.emit_f128_load_to_x87(second_x87);
-            // ST(0) = second, ST(1) = first
-            // fucomip compares ST(0) with ST(1), pops ST(0)
-            self.state.emit("    fucomip %st(1), %st");
-            // Clean up remaining x87 stack entry
-            self.state.emit("    fstp %st(0)");
-            match op {
-                IrCmpOp::Eq => {
-                    self.state.emit("    setnp %al");
-                    self.state.emit("    sete %cl");
-                    self.state.emit("    andb %cl, %al");
-                }
-                IrCmpOp::Ne => {
-                    self.state.emit("    setp %al");
-                    self.state.emit("    setne %cl");
-                    self.state.emit("    orb %cl, %al");
-                }
-                IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
-                    self.state.emit("    seta %al");
-                }
-                IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
-                    self.state.emit("    setae %al");
-                }
+    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        // F128 (long double) comparison using x87 fucomip for full 80-bit precision.
+        // fucomip compares ST(0) with ST(1) and sets EFLAGS (CF, ZF, PF) just like ucomisd,
+        // then pops ST(0). We then fstp to clean the remaining ST(0).
+        //
+        // fucomip flag semantics (same as ucomisd):
+        //   ST(0) > ST(1): CF=0, ZF=0, PF=0
+        //   ST(0) < ST(1): CF=1, ZF=0, PF=0
+        //   ST(0) = ST(1): CF=0, ZF=1, PF=0
+        //   Unordered (NaN): CF=1, ZF=1, PF=1
+        //
+        // For Gt/Ge: load rhs first (→ST1), then lhs (→ST0).
+        //   fucomip compares ST(0)=lhs vs ST(1)=rhs. seta = lhs > rhs. ✓
+        // For Lt/Le: load lhs first (→ST1), then rhs (→ST0).
+        //   fucomip compares ST(0)=rhs vs ST(1)=lhs. seta = rhs > lhs = lhs < rhs. ✓
+        // For Eq/Ne: order doesn't matter, load lhs first then rhs.
+        let swap_x87 = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
+        let (first_x87, second_x87) = if swap_x87 { (lhs, rhs) } else { (rhs, lhs) };
+        // Load first operand → ST(0), then second → ST(0) (pushes first to ST(1))
+        self.emit_f128_load_to_x87(first_x87);
+        self.emit_f128_load_to_x87(second_x87);
+        // ST(0) = second, ST(1) = first
+        // fucomip compares ST(0) with ST(1), pops ST(0)
+        self.state.emit("    fucomip %st(1), %st");
+        // Clean up remaining x87 stack entry
+        self.state.emit("    fstp %st(0)");
+        match op {
+            IrCmpOp::Eq => {
+                self.state.emit("    setnp %al");
+                self.state.emit("    sete %cl");
+                self.state.emit("    andb %cl, %al");
             }
-            self.state.emit("    movzbq %al, %rax");
-            self.state.reg_cache.invalidate_acc();
-            self.store_rax_to(dest);
-            return;
-        }
-        if ty.is_float() {
-            // Float comparison using SSE ucomisd/ucomiss.
-            // NaN handling: ucomisd sets CF=1, ZF=1, PF=1 for unordered (NaN) operands.
-            // C ordered comparisons must return false for NaN (except !=).
-            // Strategy:
-            //   Eq:  setnp + sete → AND (both ZF=1 and PF=0 required)
-            //   Ne:  setp + setne → OR (either ZF=0 or PF=1 sufficient)
-            //   Lt/Le: reverse operand order, use seta/setae (NaN → CF=1 → false)
-            //   Gt/Ge: seta/setae directly (NaN → CF=1 → false)
-            let (mov_to_xmm0, mov_to_xmm1_from_rcx) = if ty == IrType::F32 {
-                ("movd %eax, %xmm0", "movd %ecx, %xmm1")
-            } else {
-                ("movq %rax, %xmm0", "movq %rcx, %xmm1")
-            };
-            // For Lt/Le, we swap operand loading order so we can use seta/setae
-            let swap_operands = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
-            let (first, second) = if swap_operands { (rhs, lhs) } else { (lhs, rhs) };
-            // Load first operand to rax -> xmm0, second to rcx -> xmm1 (no push/pop)
-            self.operand_to_rax(first);
-            self.state.emit_fmt(format_args!("    {}", mov_to_xmm0));
-            self.operand_to_rcx(second);
-            self.state.emit_fmt(format_args!("    {}", mov_to_xmm1_from_rcx));
-            // ucomisd %xmm1, %xmm0 compares xmm0 vs xmm1 (AT&T: src, dst → compares dst to src)
-            if ty == IrType::F64 {
-                self.state.emit("    ucomisd %xmm1, %xmm0");
-            } else {
-                self.state.emit("    ucomiss %xmm1, %xmm0");
+            IrCmpOp::Ne => {
+                self.state.emit("    setp %al");
+                self.state.emit("    setne %cl");
+                self.state.emit("    orb %cl, %al");
             }
-            match op {
-                IrCmpOp::Eq => {
-                    // Ordered equal: ZF=1 AND PF=0 (not unordered)
-                    self.state.emit("    setnp %al");
-                    self.state.emit("    sete %cl");
-                    self.state.emit("    andb %cl, %al");
-                }
-                IrCmpOp::Ne => {
-                    // Unordered not-equal: ZF=0 OR PF=1 (NaN → true)
-                    self.state.emit("    setp %al");
-                    self.state.emit("    setne %cl");
-                    self.state.emit("    orb %cl, %al");
-                }
-                IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
-                    // With operands swapped for Lt, seta gives correct ordered result
-                    // seta: CF=0 AND ZF=0 (NaN sets CF=1, so returns false)
-                    self.state.emit("    seta %al");
-                }
-                IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
-                    // With operands swapped for Le, setae gives correct ordered result
-                    // setae: CF=0 (NaN sets CF=1, so returns false)
-                    self.state.emit("    setae %al");
-                }
+            IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                self.state.emit("    seta %al");
             }
-            self.state.emit("    movzbq %al, %rax");
-            self.state.reg_cache.invalidate_acc();
-            self.store_rax_to(dest);
-            return;
+            IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
+                self.state.emit("    setae %al");
+            }
         }
+        self.state.emit("    movzbq %al, %rax");
+        self.state.reg_cache.invalidate_acc();
+        self.store_rax_to(dest);
+    }
 
+    fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        // Float comparison using SSE ucomisd/ucomiss.
+        // NaN handling: ucomisd sets CF=1, ZF=1, PF=1 for unordered (NaN) operands.
+        // C ordered comparisons must return false for NaN (except !=).
+        // Strategy:
+        //   Eq:  setnp + sete → AND (both ZF=1 and PF=0 required)
+        //   Ne:  setp + setne → OR (either ZF=0 or PF=1 sufficient)
+        //   Lt/Le: reverse operand order, use seta/setae (NaN → CF=1 → false)
+        //   Gt/Ge: seta/setae directly (NaN → CF=1 → false)
+        let (mov_to_xmm0, mov_to_xmm1_from_rcx) = if ty == IrType::F32 {
+            ("movd %eax, %xmm0", "movd %ecx, %xmm1")
+        } else {
+            ("movq %rax, %xmm0", "movq %rcx, %xmm1")
+        };
+        // For Lt/Le, we swap operand loading order so we can use seta/setae
+        let swap_operands = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
+        let (first, second) = if swap_operands { (rhs, lhs) } else { (lhs, rhs) };
+        // Load first operand to rax -> xmm0, second to rcx -> xmm1 (no push/pop)
+        self.operand_to_rax(first);
+        self.state.emit_fmt(format_args!("    {}", mov_to_xmm0));
+        self.operand_to_rcx(second);
+        self.state.emit_fmt(format_args!("    {}", mov_to_xmm1_from_rcx));
+        // ucomisd %xmm1, %xmm0 compares xmm0 vs xmm1 (AT&T: src, dst → compares dst to src)
+        if ty == IrType::F64 {
+            self.state.emit("    ucomisd %xmm1, %xmm0");
+        } else {
+            self.state.emit("    ucomiss %xmm1, %xmm0");
+        }
+        match op {
+            IrCmpOp::Eq => {
+                // Ordered equal: ZF=1 AND PF=0 (not unordered)
+                self.state.emit("    setnp %al");
+                self.state.emit("    sete %cl");
+                self.state.emit("    andb %cl, %al");
+            }
+            IrCmpOp::Ne => {
+                // Unordered not-equal: ZF=0 OR PF=1 (NaN → true)
+                self.state.emit("    setp %al");
+                self.state.emit("    setne %cl");
+                self.state.emit("    orb %cl, %al");
+            }
+            IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                // With operands swapped for Lt, seta gives correct ordered result
+                // seta: CF=0 AND ZF=0 (NaN sets CF=1, so returns false)
+                self.state.emit("    seta %al");
+            }
+            IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
+                // With operands swapped for Le, setae gives correct ordered result
+                // setae: CF=0 (NaN sets CF=1, so returns false)
+                self.state.emit("    setae %al");
+            }
+        }
+        self.state.emit("    movzbq %al, %rax");
+        self.state.reg_cache.invalidate_acc();
+        self.store_rax_to(dest);
+    }
+
+    fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         // Integer comparison: use 32-bit compare for I32/U32 types
         let use_32bit = ty == IrType::I32 || ty == IrType::U32;
         self.emit_int_cmp_insn_typed(lhs, rhs, use_32bit);

@@ -1426,75 +1426,6 @@ impl ArmCodegen {
         self.state.emit("    bl __extenddftf2");
     }
 
-    /// Emit F128 comparison via soft-float libcalls.
-    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
-        // We need to load both LHS and RHS f128 values, but loading each may
-        // involve calls (e.g., __extenddftf2) that clobber Q registers.
-        // Strategy: sub sp for temp space, but force x29-relative slot access
-        // (since x29 = fp is stable) so sp changes don't break slot offsets.
-        let saved_dyn_alloca = self.state.has_dyn_alloca;
-        self.state.has_dyn_alloca = true; // Force x29-relative addressing
-
-        // Step 1: Load LHS f128 into Q0, save to stack temp (16 bytes).
-        self.emit_sub_sp(16);
-        self.emit_f128_operand_to_q0(lhs);
-        self.state.emit("    str q0, [sp]");
-
-        // Step 2: Load RHS f128 into Q0, move to Q1.
-        self.emit_f128_operand_to_q0(rhs);
-        self.state.emit("    mov v1.16b, v0.16b");
-
-        // Step 3: Load saved LHS f128 from stack temp into Q0.
-        self.state.emit("    ldr q0, [sp]");
-
-        // Free temp stack space and restore dyn_alloca flag.
-        self.emit_add_sp(16);
-        self.state.has_dyn_alloca = saved_dyn_alloca;
-
-        // Step 4: Call the appropriate comparison libcall and map result to boolean.
-        // All __*tf2 functions take f128 in Q0 (lhs) and Q1 (rhs), return int in W0.
-        match op {
-            IrCmpOp::Eq => {
-                // __eqtf2 returns 0 if equal
-                self.state.emit("    bl __eqtf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, eq");
-            }
-            IrCmpOp::Ne => {
-                // __eqtf2 returns 0 if equal, non-zero otherwise
-                self.state.emit("    bl __eqtf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, ne");
-            }
-            IrCmpOp::Slt | IrCmpOp::Ult => {
-                // __lttf2 returns <0 if a<b (1 if unordered)
-                self.state.emit("    bl __lttf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, lt");
-            }
-            IrCmpOp::Sle | IrCmpOp::Ule => {
-                // __letf2 returns <=0 if a<=b (1 if unordered)
-                self.state.emit("    bl __letf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, le");
-            }
-            IrCmpOp::Sgt | IrCmpOp::Ugt => {
-                // __gttf2 returns >0 if a>b (-1 if unordered)
-                self.state.emit("    bl __gttf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, gt");
-            }
-            IrCmpOp::Sge | IrCmpOp::Uge => {
-                // __getf2 returns >=0 if a>=b (-1 if unordered)
-                self.state.emit("    bl __getf2");
-                self.state.emit("    cmp w0, #0");
-                self.state.emit("    cset x0, ge");
-            }
-        }
-        self.state.reg_cache.invalidate_all();
-        self.store_x0_to(dest);
-    }
-
     /// Emit F128 arithmetic via soft-float libcalls.
     /// Called from emit_float_binop_impl when ty == F128.
     /// At entry: x1 = lhs f64 bits, x0 = rhs f64 bits (from shared float binop dispatch).
@@ -2547,49 +2478,102 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        if is_i128_type(ty) {
-            // Use shared i128 cmp dispatch
-            ArchCodegen::emit_i128_cmp(self, dest, op, lhs, rhs);
-            return;
+    fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
+        if ty == IrType::F32 {
+            self.state.emit("    fmov s0, w1");
+            self.state.emit("    fmov s1, w0");
+            self.state.emit("    fcmp s0, s1");
+        } else {
+            // F64: full 64-bit bit pattern, use d-registers
+            self.state.emit("    fmov d0, x1");
+            self.state.emit("    fmov d1, x0");
+            self.state.emit("    fcmp d0, d1");
         }
-        if ty == IrType::F128 {
-            // F128 comparison via soft-float libcalls.
-            // AArch64 has no hardware quad-precision; we must call __eqtf2/__letf2/etc.
-            self.emit_f128_cmp(dest, op, lhs, rhs);
-            return;
-        }
-        if ty.is_float() {
-            self.operand_to_x0(lhs);
-            self.state.emit("    mov x1, x0");
-            self.operand_to_x0(rhs);
-            if ty == IrType::F32 {
-                self.state.emit("    fmov s0, w1");
-                self.state.emit("    fmov s1, w0");
-                self.state.emit("    fcmp s0, s1");
-            } else {
-                // F64: full 64-bit bit pattern, use d-registers
-                self.state.emit("    fmov d0, x1");
-                self.state.emit("    fmov d1, x0");
-                self.state.emit("    fcmp d0, d1");
-            }
-            let cond = match op {
-                IrCmpOp::Eq => "eq",
-                IrCmpOp::Ne => "ne",
-                IrCmpOp::Slt | IrCmpOp::Ult => "mi",
-                IrCmpOp::Sle | IrCmpOp::Ule => "ls",
-                IrCmpOp::Sgt | IrCmpOp::Ugt => "gt",
-                IrCmpOp::Sge | IrCmpOp::Uge => "ge",
-            };
-            self.state.emit_fmt(format_args!("    cset x0, {}", cond));
-            self.store_x0_to(dest);
-            return;
-        }
+        let cond = match op {
+            IrCmpOp::Eq => "eq",
+            IrCmpOp::Ne => "ne",
+            IrCmpOp::Slt | IrCmpOp::Ult => "mi",
+            IrCmpOp::Sle | IrCmpOp::Ule => "ls",
+            IrCmpOp::Sgt | IrCmpOp::Ugt => "gt",
+            IrCmpOp::Sge | IrCmpOp::Uge => "ge",
+        };
+        self.state.emit_fmt(format_args!("    cset x0, {}", cond));
+        self.store_x0_to(dest);
+    }
 
+    fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         self.emit_int_cmp_insn(lhs, rhs, ty);
 
         let cond = arm_int_cond_code(op);
         self.state.emit_fmt(format_args!("    cset x0, {}", cond));
+        self.store_x0_to(dest);
+    }
+
+    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        // F128 comparison via soft-float libcalls.
+        // AArch64 has no hardware quad-precision; we must call __eqtf2/__letf2/etc.
+        //
+        // We need to load both LHS and RHS f128 values, but loading each may
+        // involve calls (e.g., __extenddftf2) that clobber Q registers.
+        // Strategy: sub sp for temp space, but force x29-relative slot access
+        // (since x29 = fp is stable) so sp changes don't break slot offsets.
+        let saved_dyn_alloca = self.state.has_dyn_alloca;
+        self.state.has_dyn_alloca = true; // Force x29-relative addressing
+
+        // Step 1: Load LHS f128 into Q0, save to stack temp (16 bytes).
+        self.emit_sub_sp(16);
+        self.emit_f128_operand_to_q0(lhs);
+        self.state.emit("    str q0, [sp]");
+
+        // Step 2: Load RHS f128 into Q0, move to Q1.
+        self.emit_f128_operand_to_q0(rhs);
+        self.state.emit("    mov v1.16b, v0.16b");
+
+        // Step 3: Load saved LHS f128 from stack temp into Q0.
+        self.state.emit("    ldr q0, [sp]");
+
+        // Free temp stack space and restore dyn_alloca flag.
+        self.emit_add_sp(16);
+        self.state.has_dyn_alloca = saved_dyn_alloca;
+
+        // Step 4: Call the appropriate comparison libcall and map result to boolean.
+        // All __*tf2 functions take f128 in Q0 (lhs) and Q1 (rhs), return int in W0.
+        match op {
+            IrCmpOp::Eq => {
+                self.state.emit("    bl __eqtf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, eq");
+            }
+            IrCmpOp::Ne => {
+                self.state.emit("    bl __eqtf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, ne");
+            }
+            IrCmpOp::Slt | IrCmpOp::Ult => {
+                self.state.emit("    bl __lttf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, lt");
+            }
+            IrCmpOp::Sle | IrCmpOp::Ule => {
+                self.state.emit("    bl __letf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, le");
+            }
+            IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                self.state.emit("    bl __gttf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, gt");
+            }
+            IrCmpOp::Sge | IrCmpOp::Uge => {
+                self.state.emit("    bl __getf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, ge");
+            }
+        }
+        self.state.reg_cache.invalidate_all();
         self.store_x0_to(dest);
     }
 
