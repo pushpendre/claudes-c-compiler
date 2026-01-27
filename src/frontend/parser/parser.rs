@@ -10,7 +10,7 @@
 // Each module adds methods to the Parser struct via `impl Parser` blocks.
 // Methods are pub(super) so they can be called across modules within the parser.
 
-use crate::common::fx_hash::FxHashMap;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::source::{Span, SourceManager};
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::{Token, TokenKind};
@@ -49,9 +49,9 @@ impl ModeKind {
 pub struct Parser {
     pub(super) tokens: Vec<Token>,
     pub(super) pos: usize,
-    pub(super) typedefs: Vec<String>,
+    pub(super) typedefs: FxHashSet<String>,
     /// Typedef names shadowed by local variable declarations in the current scope.
-    pub(super) shadowed_typedefs: Vec<String>,
+    pub(super) shadowed_typedefs: FxHashSet<String>,
     /// Set to true when parse_type_specifier encounters a `typedef` keyword.
     pub(super) parsing_typedef: bool,
     /// Set to true when parse_type_specifier encounters a `static` keyword.
@@ -146,7 +146,7 @@ impl Parser {
             tokens,
             pos: 0,
             typedefs: Self::builtin_typedefs(),
-            shadowed_typedefs: Vec::new(),
+            shadowed_typedefs: FxHashSet::default(),
             parsing_typedef: false,
             parsing_static: false,
             parsing_extern: false,
@@ -208,7 +208,7 @@ impl Parser {
 
     /// Standard C typedef names commonly provided by system headers.
     /// Since we don't actually include system headers, we pre-seed these.
-    fn builtin_typedefs() -> Vec<String> {
+    fn builtin_typedefs() -> FxHashSet<String> {
         [
             // <stddef.h>
             "size_t", "ssize_t", "ptrdiff_t", "wchar_t", "wint_t",

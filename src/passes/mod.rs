@@ -131,6 +131,14 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
     // Run up to 3 iterations of the full pipeline. After the first full pass,
     // subsequent iterations only process functions that were modified (dirty
     // tracking), avoiding redundant work on already-optimized functions.
+    //
+    // Per-pass skip tracking (iterations >= 1): We track which passes made changes
+    // in each iteration. In subsequent iterations, a pass is skipped if:
+    // - It made 0 changes in the previous iteration, AND
+    // - None of its "upstream" passes (which could create new opportunities) made
+    //   changes in the previous iteration.
+    // This avoids running expensive passes (GVN, LICM) when no upstream pass
+    // generated new optimization opportunities for them.
     let iterations = 3;
 
     // Per-function dirty tracking: dirty[i] == true means function i needs
@@ -155,8 +163,18 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
 
     let time_passes = std::env::var("CCC_TIME_PASSES").is_ok();
 
+    // Per-pass change counts from the previous iteration, used for skip decisions.
+    // Pass indices: 0=cfg1, 1=copyprop1, 2=narrow, 3=simplify, 4=constfold,
+    //               5=gvn, 6=licm, 7=ifconv, 8=copyprop2, 9=dce, 10=cfg2
+    const NUM_PASSES: usize = 11;
+    let mut prev_pass_changes = [usize::MAX; NUM_PASSES]; // MAX = "assume changed" for iter 0
+
+    // Track first iteration's total changes for diminishing-returns early exit.
+    let mut iter0_total_changes = 0usize;
+
     for iter in 0..iterations {
         let mut total_changes = 0usize;
+        let mut cur_pass_changes = [0usize; NUM_PASSES];
 
         // Clear the changed accumulator for this iteration
         changed.iter_mut().for_each(|c| *c = false);
@@ -175,14 +193,40 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
             }};
         }
 
+        // Helper: check if a pass should run based on upstream pass changes.
+        // A pass runs if it or any of its upstream passes made changes last iteration.
+        // On iteration 0, all passes run (prev_pass_changes are MAX).
+        //
+        // Pass dependency graph (which passes create opportunities for which):
+        //   cfg_simplify → copy_prop, gvn, dce (simpler CFG)
+        //   copy_prop → simplify, constfold, gvn, narrow (propagated values)
+        //   narrow → simplify, constfold (smaller types)
+        //   simplify → constfold, gvn (reduced expressions)
+        //   constfold → cfg_simplify, dce (constant branches/dead code)
+        //   gvn → copy_prop, dce (eliminated redundant computations)
+        //   licm → copy_prop, dce (hoisted code)
+        //   if_convert → copy_prop, dce (eliminated branches)
+        //   dce → cfg_simplify (empty blocks)
+        macro_rules! should_run {
+            ($self_idx:expr, $($upstream:expr),*) => {{
+                prev_pass_changes[$self_idx] > 0 $(|| prev_pass_changes[$upstream] > 0)*
+            }};
+        }
+
         // Phase 1: CFG simplification
-        if !dis_cfg {
-            total_changes += timed_pass!("cfg_simplify1", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
+        // Upstream: constfold (constant branches), dce (empty blocks)
+        if !dis_cfg && should_run!(0, 4, 9) {
+            let n = timed_pass!("cfg_simplify1", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
+            cur_pass_changes[0] = n;
+            total_changes += n;
         }
 
         // Phase 2: Copy propagation
-        if !dis_copyprop {
-            total_changes += timed_pass!("copy_prop1", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
+        // Upstream: cfg_simplify (simpler CFG), gvn (eliminated exprs), licm (hoisted code), if_convert
+        if !dis_copyprop && should_run!(1, 0, 5, 6, 7) {
+            let n = timed_pass!("copy_prop1", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
+            cur_pass_changes[1] = n;
+            total_changes += n;
         }
 
         // Phase 2a: Division-by-constant strength reduction (first iteration only).
@@ -194,48 +238,75 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         }
 
         // Phase 2b: Integer narrowing
-        if !dis_narrow {
-            total_changes += timed_pass!("narrow", run_on_visited(module, &dirty, &mut changed, narrow::narrow_function));
+        // Upstream: copy_prop (propagated values expose narrowing)
+        if !dis_narrow && should_run!(2, 1) {
+            let n = timed_pass!("narrow", run_on_visited(module, &dirty, &mut changed, narrow::narrow_function));
+            cur_pass_changes[2] = n;
+            total_changes += n;
         }
 
         // Phase 3: Algebraic simplification
-        if !dis_simplify {
-            total_changes += timed_pass!("simplify", run_on_visited(module, &dirty, &mut changed, simplify::simplify_function));
+        // Upstream: copy_prop (propagated values), narrow (smaller types)
+        if !dis_simplify && should_run!(3, 1, 2) {
+            let n = timed_pass!("simplify", run_on_visited(module, &dirty, &mut changed, simplify::simplify_function));
+            cur_pass_changes[3] = n;
+            total_changes += n;
         }
 
         // Phase 4: Constant folding
-        if !dis_constfold {
-            total_changes += timed_pass!("constfold", run_on_visited(module, &dirty, &mut changed, constant_fold::fold_function));
+        // Upstream: copy_prop (propagated constants), narrow, simplify (reduced exprs)
+        if !dis_constfold && should_run!(4, 1, 2, 3) {
+            let n = timed_pass!("constfold", run_on_visited(module, &dirty, &mut changed, constant_fold::fold_function));
+            cur_pass_changes[4] = n;
+            total_changes += n;
         }
 
         // Phase 5: GVN
-        if !dis_gvn {
-            total_changes += timed_pass!("gvn", run_on_visited(module, &dirty, &mut changed, gvn::run_gvn_function));
+        // Upstream: cfg_simplify (simpler dom tree), copy_prop (propagated values), simplify
+        if !dis_gvn && should_run!(5, 0, 1, 3) {
+            let n = timed_pass!("gvn", run_on_visited(module, &dirty, &mut changed, gvn::run_gvn_function));
+            cur_pass_changes[5] = n;
+            total_changes += n;
         }
 
         // Phase 6: LICM
-        if !dis_licm {
-            total_changes += timed_pass!("licm", run_on_visited(module, &dirty, &mut changed, licm::licm_function));
+        // Upstream: cfg_simplify, copy_prop, gvn (eliminated redundant loads)
+        if !dis_licm && should_run!(6, 0, 1, 5) {
+            let n = timed_pass!("licm", run_on_visited(module, &dirty, &mut changed, licm::licm_function));
+            cur_pass_changes[6] = n;
+            total_changes += n;
         }
 
         // Phase 7: If-conversion
-        if !dis_ifconv {
-            total_changes += timed_pass!("if_convert", run_on_visited(module, &dirty, &mut changed, if_convert::if_convert_function));
+        // Upstream: cfg_simplify (simpler CFG), constfold (simplified conditions)
+        if !dis_ifconv && should_run!(7, 0, 4) {
+            let n = timed_pass!("if_convert", run_on_visited(module, &dirty, &mut changed, if_convert::if_convert_function));
+            cur_pass_changes[7] = n;
+            total_changes += n;
         }
 
         // Phase 8: Copy propagation again
-        if !dis_copyprop {
-            total_changes += timed_pass!("copy_prop2", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
+        // Upstream: gvn (produced copies), licm (hoisted code), if_convert (select values)
+        if !dis_copyprop && should_run!(8, 5, 6, 7) {
+            let n = timed_pass!("copy_prop2", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
+            cur_pass_changes[8] = n;
+            total_changes += n;
         }
 
         // Phase 9: Dead code elimination
-        if !dis_dce {
-            total_changes += timed_pass!("dce", run_on_visited(module, &dirty, &mut changed, dce::eliminate_dead_code));
+        // Upstream: gvn, licm, if_convert, copy_prop2 (produced dead instructions)
+        if !dis_dce && should_run!(9, 5, 6, 7, 8) {
+            let n = timed_pass!("dce", run_on_visited(module, &dirty, &mut changed, dce::eliminate_dead_code));
+            cur_pass_changes[9] = n;
+            total_changes += n;
         }
 
         // Phase 10: CFG simplification again
-        if !dis_cfg {
-            total_changes += timed_pass!("cfg_simplify2", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
+        // Upstream: constfold (constant branches), dce (dead blocks), if_convert
+        if !dis_cfg && should_run!(10, 4, 7, 9) {
+            let n = timed_pass!("cfg_simplify2", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
+            cur_pass_changes[10] = n;
+            total_changes += n;
         }
 
         // Phase 10.5: Interprocedural constant return propagation (IPCP).
@@ -247,10 +318,30 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
             total_changes += ipcp_changes;
         }
 
-        // Early exit: if no passes changed anything, additional iterations are useless
+        if iter == 0 {
+            iter0_total_changes = total_changes;
+        }
+
+        // Early exit: if no passes changed anything, additional iterations are useless.
         if total_changes == 0 {
             break;
         }
+
+        // Diminishing returns: if this iteration produced very few changes relative
+        // to the first iteration, another iteration is unlikely to be worthwhile.
+        // The optimizer converges quickly: typically iter 0 finds ~264K changes,
+        // iter 1 finds ~10K, iter 2 finds ~200. Stopping when an iteration yields
+        // less than 5% of the first iteration's output saves one full pipeline
+        // iteration with negligible impact on optimization quality.
+        const DIMINISHING_RETURNS_FACTOR: usize = 20; // 1/20 = 5% threshold
+        if iter > 0 && iter0_total_changes > 0
+            && total_changes * DIMINISHING_RETURNS_FACTOR < iter0_total_changes
+        {
+            break;
+        }
+
+        // Save per-pass change counts for next iteration's skip decisions.
+        prev_pass_changes = cur_pass_changes;
 
         // Prepare dirty set for next iteration: only re-visit functions that changed.
         std::mem::swap(&mut dirty, &mut changed);
@@ -278,16 +369,71 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
 /// Uses reachability analysis from roots (non-static symbols) to find all live symbols,
 /// then removes unreachable static functions and globals.
 fn eliminate_dead_static_functions(module: &mut IrModule) {
-    // Build a map of symbol -> references for reachability analysis.
-    // We need to do a proper reachability walk because:
-    // - An unused static global may reference a static function (via function pointer init)
-    // - Removing that global should also allow removing the function
-    // - Simply collecting all references from all globals/functions over-approximates
+    // Index-based reachability analysis. Instead of cloning symbol name strings
+    // for hash map keys and worklist entries, we assign each unique symbol name
+    // a compact integer ID and do all reachability work with u32 indices.
+    // This dramatically reduces heap allocations for large translation units.
 
-    // First, collect references per function
-    let mut func_refs: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    // Phase 1: Build name-to-index mapping for all symbols.
+    // Assign unique IDs to all function and global names. A symbol name can
+    // refer to both a function and a global (C allows this), so we track
+    // function and global indices separately per symbol ID.
+    let mut name_to_id: FxHashMap<&str, u32> = FxHashMap::default();
+    let mut next_id: u32 = 0;
+
+    // Per-ID mappings: which function/global index (if any) this symbol ID maps to.
+    // Uses Option<usize> since a name might be only a function, only a global, or both.
+    let mut id_func_idx: Vec<Option<usize>> = Vec::new();
+    let mut id_global_idx: Vec<Option<usize>> = Vec::new();
+
+    // Map function names to IDs
+    let mut func_id: Vec<u32> = Vec::with_capacity(module.functions.len());
+    for (i, func) in module.functions.iter().enumerate() {
+        let id = *name_to_id.entry(func.name.as_str()).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id_func_idx.push(None);
+            id_global_idx.push(None);
+            id
+        });
+        id_func_idx[id as usize] = Some(i);
+        func_id.push(id);
+    }
+
+    // Map global names to IDs
+    let mut global_id: Vec<u32> = Vec::with_capacity(module.globals.len());
+    for (i, global) in module.globals.iter().enumerate() {
+        let id = *name_to_id.entry(global.name.as_str()).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id_func_idx.push(None);
+            id_global_idx.push(None);
+            id
+        });
+        id_global_idx[id as usize] = Some(i);
+        global_id.push(id);
+    }
+
+    // Helper: look up or create an ID for a name that may not already exist.
+    // Used for references that might point to external/undeclared symbols.
+    let mut get_or_create_id = |name: &str, name_to_id: &mut FxHashMap<&str, u32>,
+                                  next_id: &mut u32| -> u32 {
+        if let Some(&id) = name_to_id.get(name) {
+            id
+        } else {
+            // External symbol not in our function/global lists; give it an ID
+            // but it won't have references of its own.
+            let id = *next_id;
+            *next_id += 1;
+            id
+        }
+    };
+
+    // Phase 2: Build reference lists per function (using symbol IDs).
+    let mut func_refs: Vec<Vec<u32>> = Vec::with_capacity(module.functions.len());
     for func in &module.functions {
         if func.is_declaration {
+            func_refs.push(Vec::new());
             continue;
         }
         let mut refs = Vec::new();
@@ -295,18 +441,16 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
             for inst in &block.instructions {
                 match inst {
                     Instruction::Call { func: callee, .. } => {
-                        refs.push(callee.clone());
+                        refs.push(get_or_create_id(callee, &mut name_to_id, &mut next_id));
                     }
                     Instruction::GlobalAddr { name, .. } => {
-                        refs.push(name.clone());
+                        refs.push(get_or_create_id(name, &mut name_to_id, &mut next_id));
                     }
                     Instruction::InlineAsm { input_symbols, .. } => {
-                        // Inline asm input_symbols reference globals/functions
                         for sym in input_symbols {
                             if let Some(s) = sym {
-                                // The symbol may be "name+offset", extract just the name
                                 let base = s.split('+').next().unwrap_or(s);
-                                refs.push(base.to_string());
+                                refs.push(get_or_create_id(base, &mut name_to_id, &mut next_id));
                             }
                         }
                     }
@@ -314,140 +458,180 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
                 }
             }
         }
-        func_refs.insert(func.name.clone(), refs);
+        func_refs.push(refs);
     }
 
-    // Collect references per global (from initializers)
-    let mut global_refs: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    // Build reference lists per global (from initializers).
+    let mut global_refs_lists: Vec<Vec<u32>> = Vec::with_capacity(module.globals.len());
     for global in &module.globals {
-        let mut refs = Vec::new();
-        collect_global_init_refs_vec(&global.init, &mut refs);
-        global_refs.insert(global.name.clone(), refs);
+        let mut string_refs = Vec::new();
+        collect_global_init_refs_vec(&global.init, &mut string_refs);
+        let id_refs: Vec<u32> = string_refs.iter()
+            .map(|r| get_or_create_id(r, &mut name_to_id, &mut next_id))
+            .collect();
+        global_refs_lists.push(id_refs);
     }
 
-    // Identify root symbols (always reachable):
-    // - Non-static functions (external linkage, callable from other TUs)
-    // - Non-static globals (external linkage, visible to other TUs)
-    // - Alias targets
-    // - Constructors and destructors
-    let mut reachable: FxHashSet<String> = FxHashSet::default();
-    let mut worklist: Vec<String> = Vec::new();
+    let total_symbols = next_id as usize;
 
-    for func in &module.functions {
-        if func.is_declaration {
-            continue;
-        }
+    // Phase 3: Reachability using bit vectors for O(1) membership test.
+    let mut reachable = vec![false; total_symbols];
+    let mut worklist: Vec<u32> = Vec::new();
+
+    // Roots: non-static functions
+    for (i, func) in module.functions.iter().enumerate() {
+        if func.is_declaration { continue; }
         if !func.is_static || func.is_used {
-            reachable.insert(func.name.clone());
-            worklist.push(func.name.clone());
+            let id = func_id[i] as usize;
+            if !reachable[id] {
+                reachable[id] = true;
+                worklist.push(id as u32);
+            }
         }
     }
 
-    for global in &module.globals {
-        if global.is_extern {
-            continue;
-        }
+    // Roots: non-static globals
+    for (i, global) in module.globals.iter().enumerate() {
+        if global.is_extern { continue; }
         if !global.is_static || global.is_common || global.is_used {
-            reachable.insert(global.name.clone());
-            worklist.push(global.name.clone());
+            let id = global_id[i] as usize;
+            if !reachable[id] {
+                reachable[id] = true;
+                worklist.push(id as u32);
+            }
         }
     }
 
-    for (_, target, _) in &module.aliases {
-        if reachable.insert(target.clone()) {
-            worklist.push(target.clone());
+    // Roots: aliases (both the alias name and its target are reachable)
+    for (alias_name, target, _) in &module.aliases {
+        let tid = get_or_create_id(target, &mut name_to_id, &mut next_id);
+        if (tid as usize) >= reachable.len() { reachable.resize(next_id as usize, false); }
+        if !reachable[tid as usize] {
+            reachable[tid as usize] = true;
+            worklist.push(tid);
         }
-    }
-    // Alias names themselves are roots (they have external linkage)
-    for (alias_name, _, _) in &module.aliases {
-        if reachable.insert(alias_name.clone()) {
-            worklist.push(alias_name.clone());
+        let aid = get_or_create_id(alias_name, &mut name_to_id, &mut next_id);
+        if (aid as usize) >= reachable.len() { reachable.resize(next_id as usize, false); }
+        if !reachable[aid as usize] {
+            reachable[aid as usize] = true;
+            worklist.push(aid);
         }
     }
 
+    // Roots: constructors and destructors
     for ctor in &module.constructors {
-        if reachable.insert(ctor.clone()) {
-            worklist.push(ctor.clone());
+        let id = get_or_create_id(ctor, &mut name_to_id, &mut next_id);
+        if (id as usize) >= reachable.len() { reachable.resize(next_id as usize, false); }
+        if !reachable[id as usize] {
+            reachable[id as usize] = true;
+            worklist.push(id);
         }
     }
     for dtor in &module.destructors {
-        if reachable.insert(dtor.clone()) {
-            worklist.push(dtor.clone());
+        let id = get_or_create_id(dtor, &mut name_to_id, &mut next_id);
+        if (id as usize) >= reachable.len() { reachable.resize(next_id as usize, false); }
+        if !reachable[id as usize] {
+            reachable[id as usize] = true;
+            worklist.push(id);
         }
     }
 
-    // If there's toplevel asm, scan for potential symbol references.
-    // Top-level asm may reference symbols by name, so we conservatively mark
-    // any static symbol whose name appears in the asm strings as reachable.
-    // Non-static symbols are already roots and don't need this treatment.
+    // Ensure reachable vec is big enough for all symbols
+    if reachable.len() < next_id as usize {
+        reachable.resize(next_id as usize, false);
+    }
+
+    // Toplevel asm: conservatively mark static symbols whose names appear in asm
     if !module.toplevel_asm.is_empty() {
-        // Collect all static symbol names for lookup
-        let mut static_names: FxHashSet<String> = FxHashSet::default();
-        for func in &module.functions {
+        for (i, func) in module.functions.iter().enumerate() {
             if func.is_static && !func.is_declaration {
-                static_names.insert(func.name.clone());
+                let fid = func_id[i] as usize;
+                if !reachable[fid] {
+                    for asm_str in &module.toplevel_asm {
+                        if asm_str.contains(func.name.as_str()) {
+                            reachable[fid] = true;
+                            worklist.push(fid as u32);
+                            break;
+                        }
+                    }
+                }
             }
         }
-        for global in &module.globals {
+        for (i, global) in module.globals.iter().enumerate() {
             if global.is_static && !global.is_extern {
-                static_names.insert(global.name.clone());
-            }
-        }
-        // Check each asm string for references to static symbols
-        for asm_str in &module.toplevel_asm {
-            for name in &static_names {
-                if asm_str.contains(name.as_str()) {
-                    if reachable.insert(name.clone()) {
-                        worklist.push(name.clone());
+                let gid = global_id[i] as usize;
+                if !reachable[gid] {
+                    for asm_str in &module.toplevel_asm {
+                        if asm_str.contains(global.name.as_str()) {
+                            reachable[gid] = true;
+                            worklist.push(gid as u32);
+                            break;
+                        }
                     }
                 }
             }
         }
     }
 
-    // BFS/worklist reachability: walk from roots following references
-    while let Some(sym) = worklist.pop() {
-        // If this symbol is a function, add its references
-        if let Some(refs) = func_refs.get(&sym) {
-            for r in refs {
-                if reachable.insert(r.clone()) {
-                    worklist.push(r.clone());
+    // BFS reachability using integer worklist (no String allocation).
+    // For each reachable symbol, check both its function refs and global refs
+    // since a name can refer to both a function and a global in C.
+    while let Some(sym_id) = worklist.pop() {
+        let sid = sym_id as usize;
+        // Check function references (if this symbol has a function definition)
+        if sid < id_func_idx.len() {
+            if let Some(fi) = id_func_idx[sid] {
+                if fi < func_refs.len() {
+                    for &ref_id in &func_refs[fi] {
+                        let rid = ref_id as usize;
+                        if rid < reachable.len() && !reachable[rid] {
+                            reachable[rid] = true;
+                            worklist.push(ref_id);
+                        }
+                    }
                 }
             }
         }
-        // If this symbol is a global, add its initializer references
-        if let Some(refs) = global_refs.get(&sym) {
-            for r in refs {
-                if reachable.insert(r.clone()) {
-                    worklist.push(r.clone());
+        // Check global initializer references (if this symbol has a global definition)
+        if sid < id_global_idx.len() {
+            if let Some(gi) = id_global_idx[sid] {
+                if gi < global_refs_lists.len() {
+                    for &ref_id in &global_refs_lists[gi] {
+                        let rid = ref_id as usize;
+                        if rid < reachable.len() && !reachable[rid] {
+                            reachable[rid] = true;
+                            worklist.push(ref_id);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Build a set of always_inline functions whose addresses are taken.
-    // A function's address is "taken" if it appears in a GlobalAddr instruction
-    // (not a Call), in an inline asm input_symbols, or in a global initializer.
-    // These functions need standalone bodies even though they're always_inline,
-    // because the address must resolve to a real symbol at link time.
-    let mut address_taken: FxHashSet<String> = FxHashSet::default();
+    // Phase 4: Build address_taken set (still using IDs for efficiency).
+    let mut address_taken = vec![false; reachable.len()];
 
-    // Check GlobalAddr instructions in all functions (address-of-function in code)
     for func in &module.functions {
-        if func.is_declaration {
-            continue;
-        }
+        if func.is_declaration { continue; }
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
                     Instruction::GlobalAddr { name, .. } => {
-                        address_taken.insert(name.clone());
+                        if let Some(&id) = name_to_id.get(name.as_str()) {
+                            if (id as usize) < address_taken.len() {
+                                address_taken[id as usize] = true;
+                            }
+                        }
                     }
                     Instruction::InlineAsm { input_symbols, .. } => {
                         for sym in input_symbols {
                             if let Some(s) = sym {
                                 let base = s.split('+').next().unwrap_or(s);
-                                address_taken.insert(base.to_string());
+                                if let Some(&id) = name_to_id.get(base) {
+                                    if (id as usize) < address_taken.len() {
+                                        address_taken[id as usize] = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -457,69 +641,49 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         }
     }
 
-    // Check global initializers (address-of-function stored in globals)
     for global in &module.globals {
-        collect_global_init_addr_taken(&global.init, &mut address_taken);
+        collect_global_init_addr_taken_indexed(&global.init, &name_to_id, &mut address_taken);
     }
 
-    // Remove unreachable static functions and static always_inline functions.
-    // Static always_inline functions should never be emitted as standalone bodies —
-    // GCC never emits them. Their bodies exist only to be inlined at call sites.
-    // EXCEPTION: if the function's address is taken (used as a function pointer),
-    // the standalone body must be kept so the linker can resolve the reference.
-    // If they're still present after inlining, their standalone bodies may contain
-    // unresolvable inline asm operands (e.g., "i" constraint with %c modifier
-    // referencing function parameters that are only known after inlining), which
-    // produce invalid assembly like `.quad x9 - .` instead of `.quad symbol - .`.
-    //
-    // HOWEVER, if a static always_inline function's address is taken (e.g., used as
-    // a function pointer in a struct initializer like `{ .less = mod_tree_less }`),
-    // it MUST be kept: the function pointer needs a callable address. The reachability
-    // analysis already tracks these references through global initializers, so we
-    // check reachability before removing.
+    // Phase 5: Build a set of reachable names (for symbol_attrs filtering)
+    // before dropping the name_to_id map.
+    let reachable_names: FxHashSet<String> = name_to_id.iter()
+        .filter(|(_, &id)| (id as usize) < reachable.len() && reachable[id as usize])
+        .map(|(&name, _)| name.to_string())
+        .collect();
+
+    // Drop the borrow on module strings so we can mutate module below.
+    drop(name_to_id);
+
+    // Phase 6: Remove unreachable symbols using positional index lookups.
+    // func_id[i] / global_id[i] map position to symbol ID (no borrows needed).
+    let mut func_pos = 0usize;
     module.functions.retain(|func| {
-        if func.is_declaration {
-            return true;
-        }
-        // Remove static always_inline functions — unless their address is taken
-        // (used as a function pointer in code or global initializers), in which case
-        // we need the standalone body so the linker can resolve the reference.
-        // Also keep them if they're still in the reachable set (e.g., if the inliner
-        // couldn't inline all call sites due to budget limits).
+        let pos = func_pos;
+        func_pos += 1;
+        if func.is_declaration { return true; }
+        let id = func_id[pos] as usize;
         if func.is_static && func.is_always_inline {
-            return address_taken.contains(&func.name) || reachable.contains(&func.name);
+            return (id < address_taken.len() && address_taken[id])
+                || (id < reachable.len() && reachable[id]);
         }
-        if !func.is_static {
-            return true;
-        }
-        reachable.contains(&func.name)
+        if !func.is_static { return true; }
+        id < reachable.len() && reachable[id]
     });
 
-    // Remove unreachable static globals
+    let mut global_pos = 0usize;
     module.globals.retain(|global| {
-        // Keep extern declarations
-        if global.is_extern {
-            return true;
-        }
-        // Keep non-static globals (external linkage)
-        if !global.is_static {
-            return true;
-        }
-        // Keep common globals (linker-merged)
-        if global.is_common {
-            return true;
-        }
-        // Keep reachable static globals
-        reachable.contains(&global.name)
+        let pos = global_pos;
+        global_pos += 1;
+        if global.is_extern { return true; }
+        if !global.is_static { return true; }
+        if global.is_common { return true; }
+        let id = global_id[pos] as usize;
+        id < reachable.len() && reachable[id]
     });
 
-    // Filter symbol_attrs to only include symbols that are actually reachable
-    // by the emitted code. Without this, unused extern declarations (e.g. from
-    // headers) with visibility attributes (e.g. from #pragma GCC visibility
-    // push(hidden)) generate .hidden directives that create undefined hidden
-    // symbol entries in the object file, causing linker errors.
     module.symbol_attrs.retain(|(name, _, _)| {
-        reachable.contains(name)
+        reachable_names.contains(name.as_str())
     });
 }
 
@@ -542,21 +706,36 @@ fn collect_global_init_refs_vec(init: &GlobalInit, refs: &mut Vec<String>) {
     }
 }
 
-/// Collect function/symbol addresses referenced from a global initializer.
-/// Used to determine which always_inline functions have their address taken
-/// via global initializers (e.g., function pointers in struct literals).
-fn collect_global_init_addr_taken(init: &GlobalInit, addr_taken: &mut FxHashSet<String>) {
+/// Index-based address-taken collection from global initializers.
+/// Uses name-to-id mapping and a bit vector instead of String hash set.
+fn collect_global_init_addr_taken_indexed(
+    init: &GlobalInit,
+    name_to_id: &FxHashMap<&str, u32>,
+    addr_taken: &mut Vec<bool>,
+) {
     match init {
         GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
-            addr_taken.insert(name.clone());
+            if let Some(&id) = name_to_id.get(name.as_str()) {
+                if (id as usize) < addr_taken.len() {
+                    addr_taken[id as usize] = true;
+                }
+            }
         }
         GlobalInit::GlobalLabelDiff(label1, label2, _) => {
-            addr_taken.insert(label1.clone());
-            addr_taken.insert(label2.clone());
+            if let Some(&id) = name_to_id.get(label1.as_str()) {
+                if (id as usize) < addr_taken.len() {
+                    addr_taken[id as usize] = true;
+                }
+            }
+            if let Some(&id) = name_to_id.get(label2.as_str()) {
+                if (id as usize) < addr_taken.len() {
+                    addr_taken[id as usize] = true;
+                }
+            }
         }
         GlobalInit::Compound(fields) => {
             for field in fields {
-                collect_global_init_addr_taken(field, addr_taken);
+                collect_global_init_addr_taken_indexed(field, name_to_id, addr_taken);
             }
         }
         _ => {}

@@ -219,7 +219,7 @@ impl Parser {
         for param in &final_params {
             if let Some(ref pname) = param.name {
                 if self.typedefs.contains(pname) && !self.shadowed_typedefs.contains(pname) {
-                    self.shadowed_typedefs.push(pname.clone());
+                    self.shadowed_typedefs.insert(pname.clone());
                 }
             }
         }
@@ -656,17 +656,15 @@ impl Parser {
         if self.parsing_typedef {
             for decl in &declarators {
                 if !decl.name.is_empty() {
-                    self.typedefs.push(decl.name.clone());
-                    self.shadowed_typedefs.retain(|n| n != &decl.name);
+                    self.typedefs.insert(decl.name.clone());
+                    self.shadowed_typedefs.remove(&decl.name);
                 }
             }
             self.parsing_typedef = false;
         } else {
             for decl in &declarators {
                 if !decl.name.is_empty() && self.typedefs.contains(&decl.name) {
-                    if !self.shadowed_typedefs.contains(&decl.name) {
-                        self.shadowed_typedefs.push(decl.name.clone());
-                    }
+                    self.shadowed_typedefs.insert(decl.name.clone());
                 }
             }
         }
@@ -905,7 +903,7 @@ impl Parser {
         if self.parsing_typedef {
             for decl in declarators {
                 if !decl.name.is_empty() {
-                    self.typedefs.push(decl.name.clone());
+                    self.typedefs.insert(decl.name.clone());
                 }
             }
             self.parsing_typedef = false;

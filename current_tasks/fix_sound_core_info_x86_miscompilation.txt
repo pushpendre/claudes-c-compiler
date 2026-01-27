@@ -1,5 +1,0 @@
-Task: Fix x86 kernel miscompilation via delta debugging
-Status: in_progress
-
-Previous bug (kernel GEP store fold) was already fixed by someone else.
-Now running DD with different seeds to find additional miscompilation bugs.

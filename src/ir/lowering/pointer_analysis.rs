@@ -222,6 +222,13 @@ impl Lowerer {
                 }
                 false
             }
+            Expr::StmtExpr(_, _) => {
+                // GNU statement expression: type is the type of the last expression
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_, _));
+                }
+                false
+            }
             _ => false,
         }
     }
