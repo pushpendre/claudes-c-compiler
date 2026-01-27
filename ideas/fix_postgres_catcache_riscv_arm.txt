@@ -1,0 +1,43 @@
+Fix postgres catcache lookup failure on RISC-V and ARM
+======================================================
+
+Problem:
+  PostgreSQL builds and initdb succeeds on RISC-V and ARM, but "make check"
+  fails because postgres reports "cache lookup failed for database 5" when
+  connecting to the 'postgres' database. Connecting to 'template1' works fine.
+
+  In single-user mode, querying pg_database shows all 3 databases (template1,
+  template0, postgres) with correct OIDs. The pg_database heap file is byte-
+  identical to the x86 version.
+
+Key observations:
+  1. x86 postgres works fine (215/216 tests pass)
+  2. RISC-V/ARM build succeeds (after fixing -static vs -shared linker issue)
+  3. initdb creates correct catalog data (byte-identical to x86)
+  4. Single-user mode can query pg_database and find all databases
+  5. Multi-user mode connecting to template1 works
+  6. Multi-user mode connecting to postgres fails: "cache lookup failed for database 5"
+  7. The error is in CheckMyDatabase() -> SearchSysCache1(DATABASEOID, ObjectIdGetDatum(5))
+  8. Basic OID hashing and comparison tests pass on RISC-V
+
+Analysis:
+  The catcache (system cache) lookup for OID 5 fails despite the data being
+  present in the heap. The catcache is a hash table that lazily loads tuples
+  from the underlying catalog tables. Since template1 (OID 1) works, the
+  catcache mechanism is fundamentally functional. The issue is specific to
+  looking up OID 5 in the pg_database catalog cache.
+
+  Possible causes:
+  - Codegen bug in catcache hash bucket computation or comparison
+  - Index scan bug (pg_database has a unique index on OID)
+  - Memory alignment issue in hash table operations on RISC-V/ARM
+  - Struct padding difference affecting HeapTuple access
+
+Debugging approach:
+  1. Compile specific postgres files with GCC and our compiler, swap them
+     one at a time to isolate which source file contains the miscompilation
+  2. Focus on: catcache.c, dynahash.c, hashfunc.c, postinit.c, heapam.c
+  3. Use -g flag to enable debug info, then use gdb/qemu-riscv64 -g to
+     set breakpoints in SearchSysCache1 and trace the lookup
+  4. Compare assembly output of the catcache lookup functions between GCC
+     and our compiler

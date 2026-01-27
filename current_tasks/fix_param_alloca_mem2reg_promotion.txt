@@ -1,0 +1,18 @@
+Task: Fix parameter alloca promotion in mem2reg
+Status: in_progress
+Started: 2026-01-27
+
+Problem: Parameter allocas are unconditionally skipped by mem2reg because the
+backend stores register values into them at the machine-code level (not visible
+in the IR). This means when a parameter is reassigned (e.g., `x &= 0` or
+`ia32_frame &= (IS_ENABLED(CONFIG_X86_32) || IS_ENABLED(CONFIG_IA32_EMULATION))`),
+the constant value cannot be propagated through SSA, preventing dead code
+elimination of unreachable branches.
+
+Impact: Linux kernel x86 build fails at link time with "undefined reference to
+convert_to_fxsr" because the compiler doesn't eliminate dead code behind
+`ia32_frame &= 0; if (ia32_frame) { ... convert_to_fxsr() ... }`.
+
+Fix: Add explicit IR-level Store instructions for parameter values into their
+allocas during lowering (instead of letting the backend do it invisibly), then
+allow mem2reg to promote parameter allocas like any other alloca.

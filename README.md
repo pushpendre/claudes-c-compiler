@@ -64,7 +64,7 @@ all three architectures.
 | mbedTLS | AES, RSA, ECP, SHA, ARIA self-tests |
 | jq | All 12 tests on all architectures |
 | Linux kernel | Builds and boots on x86-64 and AArch64 |
-| PostgreSQL | 213/216 regression tests pass |
+| PostgreSQL | x86: 215/216; ARM/RISC-V: builds, runtime catcache issue |
 
 ### Known limitations
 

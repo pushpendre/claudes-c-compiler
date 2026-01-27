@@ -93,9 +93,12 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     let is_nostdlib = user_args.iter().any(|a| a == "-nostdlib");
 
     let mut cmd = Command::new(config.command);
-    // Skip -no-pie when building shared libraries (they conflict)
+    // Skip flags that conflict with -shared when building shared libraries:
+    // -no-pie/-pie conflict with -shared, and -static causes the linker to
+    // use static CRT objects (e.g. crtbeginT.o) whose absolute relocations
+    // (R_RISCV_HI20, R_AARCH64_ADR_PREL_PG_HI21) are incompatible with PIC.
     for arg in config.extra_args {
-        if is_shared && (*arg == "-no-pie" || *arg == "-pie") {
+        if is_shared && (*arg == "-no-pie" || *arg == "-pie" || *arg == "-static") {
             continue;
         }
         cmd.arg(arg);

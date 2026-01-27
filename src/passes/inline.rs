@@ -240,8 +240,16 @@ pub fn run(module: &mut IrModule) -> usize {
                     let callee_inst_count: usize = callee_data.blocks.iter()
                         .map(|b| b.instructions.len())
                         .sum();
+                    // When the caller has a section attribute (e.g., .init.text),
+                    // allow inlining small callees even into large callers to
+                    // prevent section mismatch errors. Example: cpu_select_mitigations
+                    // (.init.text) inlines ssb_select_mitigation which calls
+                    // __ssb_select_mitigation (.init.text). Without inlining the
+                    // wrapper, the .text -> .init.text reference triggers modpost errors.
                     if caller_too_large && !callee_data.is_always_inline {
-                        continue;
+                        if !caller_has_section || callee_inst_count > MAX_SMALL_INLINE_INSTRUCTIONS {
+                            continue;
+                        }
                     }
                     // Hard cap: when the caller is extremely large, stop normal
                     // inlining to prevent kernel stack overflow. CCC's codegen
@@ -259,13 +267,21 @@ pub fn run(module: &mut IrModule) -> usize {
                         continue;
                     }
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
-                    let effective_budget = if use_relaxed {
-                        always_inline_budget_remaining
-                    } else {
-                        budget_remaining
-                    };
-                    if callee_inst_count > effective_budget {
-                        continue;
+                    // always_inline callees MUST be inlined unconditionally — this
+                    // is a C semantic requirement (__attribute__((always_inline))).
+                    // Not inlining them causes section mismatch errors in the kernel
+                    // when a .init.text caller's always_inline helper references
+                    // .init.rodata data but gets emitted as a standalone .text function.
+                    // Budget limits only apply to normal (non-always_inline) inlining.
+                    if !callee_data.is_always_inline {
+                        let effective_budget = if use_relaxed {
+                            always_inline_budget_remaining
+                        } else {
+                            budget_remaining
+                        };
+                        if callee_inst_count > effective_budget {
+                            continue;
+                        }
                     }
                     found_site = Some((site.clone(), callee_inst_count, use_relaxed));
                     break;
@@ -814,7 +830,20 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
         let is_small_static = func.is_static && !func.is_inline
             && inst_count_for_static <= MAX_STATIC_NONINLINE_INSTRUCTIONS
             && func.blocks.len() <= MAX_STATIC_NONINLINE_BLOCKS;
-        if !is_always_inline && !is_trivially_empty && !is_small_static {
+        // Also consider medium-sized static non-inline functions for inlining.
+        // GCC at -O2/-Os inlines static functions up to a generous limit even without
+        // the `inline` keyword. This is critical for avoiding section mismatch errors
+        // in the kernel: e.g., ssb_select_mitigation (~6 blocks, ~21 IR instructions)
+        // is called from cpu_select_mitigations (.init.text) and calls
+        // __ssb_select_mitigation (.init.text). Without inlining the wrapper,
+        // modpost flags a .text -> .init.text section mismatch.
+        // These are treated as normal inline candidates (not exceeds_normal_limits)
+        // since they fit within MAX_INLINE_INSTRUCTIONS/MAX_INLINE_BLOCKS.
+        let is_medium_static = func.is_static && !func.is_inline
+            && !is_small_static
+            && inst_count_for_static <= MAX_INLINE_INSTRUCTIONS
+            && func.blocks.len() <= MAX_INLINE_BLOCKS;
+        if !is_always_inline && !is_trivially_empty && !is_small_static && !is_medium_static {
             if !func.is_static || !func.is_inline {
                 if debug_callee && func.name.contains("write16") {
                     eprintln!("[INLINE_DEBUG] {} skipped: is_static={}, is_inline={}, is_declaration={}",

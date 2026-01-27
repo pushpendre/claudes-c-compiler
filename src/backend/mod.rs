@@ -125,11 +125,15 @@ impl Target {
             },
             Target::Aarch64 => common::LinkerConfig {
                 command: "aarch64-linux-gnu-gcc",
-                extra_args: &["-static"],
+                // Use -no-pie to match non-PIC code generation.  The previous
+                // default of -static prevented dlopen() of shared libraries
+                // at runtime, breaking postgres extension loading.  The unit
+                // test harness passes -static explicitly for QEMU user-mode.
+                extra_args: &["-no-pie"],
             },
             Target::Riscv64 => common::LinkerConfig {
                 command: "riscv64-linux-gnu-gcc",
-                extra_args: &["-static"],
+                extra_args: &["-no-pie"],
             },
         }
     }

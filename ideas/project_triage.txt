@@ -55,19 +55,25 @@ FAILING:
             binary — if it also fails, this is an environment issue.
 
   postgres:
-    Status: MOSTLY FIXED (213/216 tests pass)
-    Notes: Fixed sizeof() on unsized arrays (declared with []) returning pointer
-           size (8) instead of actual array size. The bug was in fixup_unsized_array
-           which updated alloc_size but not c_type, leaving it as Array(elem, None).
-           sizeof_identifier for globals preferred c_type, and Array(_, None).size_ctx()
-           returned 8. This caused pg_char_to_encoding's lengthof(pg_encname_tbl) to
-           return 0, making all encoding lookups fail and initdb crash.
-           Previously also fixed typedef pointer cast arithmetic (132 failures).
-           Remaining 3 failures:
+    Status:
+      x86:    215/216 tests pass (1 remaining: stats_ext estimation diff)
+      ARM:    BUILD PASS, tests fail (runtime catcache lookup issue)
+      RISC-V: BUILD PASS, tests fail (runtime catcache lookup issue)
+    Notes: Fixed sizeof() on unsized arrays, typedef pointer cast arithmetic,
+           and ARM/RISC-V shared library linking (-static vs -shared conflict).
+           ARM/RISC-V builds now succeed but "make check" fails because
+           postgres reports "cache lookup failed for database 5" when
+           connecting to the postgres database. Connecting to template1
+           works fine. Single-user mode can query pg_database and sees all
+           3 databases. The issue is in the catcache lookup during
+           CheckMyDatabase() in InitPostgres(). This is a RISC-V/ARM
+           codegen bug affecting the postgres system cache, not a linker issue.
+    x86 remaining failures:
            1. stats_ext: statistics estimation difference (100 vs 1000)
-           2. plpgsql: stack depth exceeded (recurse test)
-           3. One test triggers segfault (signal 11)
-    Action: Investigate stats_ext estimation and stack depth issues.
+    Action: Debug catcache lookup failure on ARM/RISC-V.
+            The bug manifests as SearchSysCache1(DATABASEOID, 5) returning
+            NULL despite the data existing in the heap. Likely a codegen
+            issue in catcache hash table operations or index scan path.
 
 PRIORITY ORDER for fixing:
   1. Fix verify_kernel.py RISC-V boot (add CONFIG_FPU to required_opts)
