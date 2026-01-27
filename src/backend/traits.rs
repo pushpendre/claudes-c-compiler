@@ -13,6 +13,7 @@
 use crate::ir::ir::*;
 use crate::common::types::{AddressSpace, IrType};
 use super::common::PtrDirective;
+use super::regalloc::PhysReg;
 use super::state::{CodegenState, SlotAddr, StackSlot};
 use super::cast::{FloatOp, classify_float_binop};
 use super::generation::is_i128_type;
@@ -49,12 +50,65 @@ pub trait ArchCodegen {
     /// Store the primary accumulator to a value's stack slot.
     fn emit_store_result(&mut self, dest: &Value);
 
-    /// Copy a value from src to dest. Default implementation loads through the
-    /// accumulator. Backends with register allocation can override this to emit
-    /// direct register-to-register copies, avoiding the accumulator roundtrip.
+    /// Copy a value from src to dest.
+    ///
+    /// Default implementation is register-allocation-aware: when both src and dest
+    /// have physical register assignments, emits a direct reg-to-reg move. When only
+    /// dest has a register, loads through the accumulator then moves. Otherwise falls
+    /// back to the accumulator load/store path.
+    ///
+    /// Backends needing special handling (e.g., x86 F128 x87 copies) should override
+    /// this, handle their special case, then call the default for the rest.
     fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
-        self.emit_load_operand(src);
-        self.emit_store_result(dest);
+        let dest_phys = self.get_phys_reg_for_value(dest.0);
+        let src_phys = match src {
+            Operand::Value(v) => self.get_phys_reg_for_value(v.0),
+            _ => None,
+        };
+
+        match (dest_phys, src_phys) {
+            (Some(d), Some(s)) => {
+                // Direct register-to-register copy
+                if d.0 != s.0 {
+                    self.emit_reg_to_reg_move(s, d);
+                }
+                self.state().reg_cache.invalidate_acc();
+            }
+            (Some(d), None) => {
+                // Dest in register, src on stack/constant: load to acc then move
+                self.emit_load_operand(src);
+                self.emit_acc_to_phys_reg(d);
+                self.state().reg_cache.invalidate_acc();
+            }
+            _ => {
+                // No register assignment: use accumulator path
+                self.emit_load_operand(src);
+                self.emit_store_result(dest);
+            }
+        }
+    }
+
+    /// Get the physical register assigned to a value, if any.
+    /// Returns None when the value is stack-allocated or not register-assigned.
+    /// Backends with register allocation must implement this; the default returns
+    /// None which makes emit_copy_value fall through to the accumulator path.
+    fn get_phys_reg_for_value(&self, _val_id: u32) -> Option<PhysReg> { None }
+
+    /// Emit a register-to-register move between two physical registers.
+    /// Only called when get_phys_reg_for_value returns Some for both src and dest.
+    fn emit_reg_to_reg_move(&mut self, _src: PhysReg, _dest: PhysReg) {
+        panic!("backend must implement emit_reg_to_reg_move when get_phys_reg_for_value returns Some");
+    }
+
+    /// Move the accumulator value into a physical register.
+    /// Only called when get_phys_reg_for_value returns Some for the dest.
+    fn emit_acc_to_phys_reg(&mut self, _dest: PhysReg) {
+        panic!("backend must implement emit_acc_to_phys_reg when get_phys_reg_for_value returns Some");
+    }
+
+    /// Get the assembly name for a physical register.
+    fn phys_reg_name(&self, _reg: PhysReg) -> &'static str {
+        panic!("backend must implement phys_reg_name when using register allocation");
     }
 
     /// Compute the runtime-aligned address of an over-aligned alloca into the
@@ -380,7 +434,42 @@ pub trait ArchCodegen {
     fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, indirect: bool);
 
     /// Store the function's return value from ABI registers to the destination slot.
-    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType);
+    ///
+    /// Default implementation dispatches by return type to small primitives:
+    /// - i128: `emit_call_store_i128_result`
+    /// - F128: `emit_call_store_f128_result`
+    /// - F32: `emit_call_move_f32_to_acc` then store
+    /// - F64/float: `emit_call_move_f64_to_acc` then store
+    /// - integer: store directly (return value already in accumulator)
+    ///
+    /// Backends with special return handling (e.g., x86 F128 via x87) should override.
+    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
+        if is_i128_type(return_type) {
+            self.emit_call_store_i128_result(dest);
+        } else if return_type.is_long_double() {
+            self.emit_call_store_f128_result(dest);
+        } else if return_type == IrType::F32 {
+            self.emit_call_move_f32_to_acc();
+            self.emit_store_result(dest);
+        } else if return_type.is_float() {
+            self.emit_call_move_f64_to_acc();
+            self.emit_store_result(dest);
+        } else {
+            self.emit_store_result(dest);
+        }
+    }
+
+    /// Store i128 return value from ABI register pair to dest.
+    fn emit_call_store_i128_result(&mut self, dest: &Value);
+
+    /// Store F128 return value to dest (may involve libcall truncation).
+    fn emit_call_store_f128_result(&mut self, dest: &Value);
+
+    /// Move F32 return value from ABI float register to integer accumulator.
+    fn emit_call_move_f32_to_acc(&mut self);
+
+    /// Move F64 return value from ABI float register to integer accumulator.
+    fn emit_call_move_f64_to_acc(&mut self);
 
     /// Emit a global address load.
     fn emit_global_addr(&mut self, dest: &Value, name: &str);
@@ -914,8 +1003,12 @@ pub trait ArchCodegen {
     }
 
     /// Emit a jump table for a dense switch statement.
-    /// This is called by `emit_switch` when the cases are dense enough.
-    /// Backends should override this for architecture-specific jump table emission.
+    ///
+    /// Backends should use the shared helpers `build_jump_table()` (builds the table
+    /// mapping indices to BlockIds) and `emit_jump_table_rodata()` (emits the .rodata
+    /// section with pointer-sized absolute entries) to avoid duplicating the table
+    /// construction and data emission logic. x86 overrides this entirely to handle
+    /// PIC mode (relative .long entries).
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId);
 
     /// Emit a compare-and-branch for a single switch case:
@@ -1108,6 +1201,44 @@ pub trait ArchCodegen {
     /// Emit a target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
     /// Each backend must implement this to emit the appropriate native instructions.
     fn emit_intrinsic(&mut self, _dest: &Option<Value>, _op: &IntrinsicOp, _dest_ptr: &Option<Value>, _args: &[Operand]) {}
+}
+
+// ── Shared jump table helpers ─────────────────────────────────────────────────
+
+/// Build a jump table from switch cases: maps each index in [min..max] to a BlockId.
+/// Returns (table, min_val, range).
+pub fn build_jump_table(cases: &[(i64, BlockId)], default: &BlockId) -> (Vec<BlockId>, i64, usize) {
+    let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+    let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+    let range = (max_val - min_val + 1) as usize;
+
+    let mut table = vec![*default; range];
+    for &(case_val, target) in cases {
+        let idx = (case_val - min_val) as usize;
+        table[idx] = target;
+    }
+    (table, min_val, range)
+}
+
+/// Emit the .rodata section containing jump table entries, then restore the text section.
+///
+/// Each entry is a pointer-sized absolute address of the target label,
+/// using the architecture's pointer directive (.quad/.xword/.dword).
+pub fn emit_jump_table_rodata(cg: &mut (impl ArchCodegen + ?Sized), table_label: &str, table: &[BlockId]) {
+    let ptr_dir = cg.ptr_directive();
+    // x86: .align 8 (byte alignment), ARM/RISC-V: .align 3 (2^3 = 8-byte alignment)
+    let align = if ptr_dir.is_x86() { 8 } else { 3 };
+    cg.state().emit(".section .rodata");
+    cg.state().emit_fmt(format_args!(".align {}", align));
+    cg.state().emit_fmt(format_args!("{}:", table_label));
+    let directive = ptr_dir.as_str();
+    for target in table {
+        let target_label = target.as_label();
+        cg.state().emit_fmt(format_args!("    {} {}", directive, target_label));
+    }
+    // Restore the function's text section (may be custom, e.g. .init.text)
+    let sect = cg.state_ref().current_text_section.clone();
+    cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 }
 
 // ── Default store/load implementations as free functions ──────────────────────

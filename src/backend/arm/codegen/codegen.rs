@@ -1145,6 +1145,25 @@ impl ArchCodegen for ArmCodegen {
     fn state(&mut self) -> &mut CodegenState { &mut self.state }
     fn state_ref(&self) -> &CodegenState { &self.state }
 
+    fn get_phys_reg_for_value(&self, val_id: u32) -> Option<PhysReg> {
+        self.reg_assignments.get(&val_id).copied()
+    }
+
+    fn emit_reg_to_reg_move(&mut self, src: PhysReg, dest: PhysReg) {
+        let s_name = callee_saved_name(src);
+        let d_name = callee_saved_name(dest);
+        self.state.emit_fmt(format_args!("    mov {}, {}", d_name, s_name));
+    }
+
+    fn emit_acc_to_phys_reg(&mut self, dest: PhysReg) {
+        let d_name = callee_saved_name(dest);
+        self.state.emit_fmt(format_args!("    mov {}, x0", d_name));
+    }
+
+    fn phys_reg_name(&self, reg: PhysReg) -> &'static str {
+        callee_saved_name(reg)
+    }
+
     fn jump_mnemonic(&self) -> &'static str { "b" }
     fn trap_instruction(&self) -> &'static str { "brk #0" }
 
@@ -1171,25 +1190,15 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
-        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
-        let range = (max_val - min_val + 1) as usize;
-
-        // Build the table: for each index in [min..max], find the target or use default
-        let mut table = vec![*default; range];
-        for &(case_val, target) in cases {
-            let idx = (case_val - min_val) as usize;
-            table[idx] = target;
-        }
-
+        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
 
         // Load switch value into x0
         self.operand_to_x0(val);
 
-        // Range check: if val < min or val > max, branch to default.
-        // Use unsigned comparison: sub x0, x0, #min; cmp x0, #range -> branch if above
+        // Subtract min_val to normalize index
         if min_val != 0 {
             if min_val > 0 && min_val <= 4095 {
                 self.state.emit_fmt(format_args!("    sub x0, x0, #{}", min_val));
@@ -1200,7 +1209,7 @@ impl ArchCodegen for ArmCodegen {
                 self.state.emit("    sub x0, x0, x17");
             }
         }
-        // Now x0 = val - min_val. Compare unsigned against range.
+        // Range check (unsigned): branch to default if index >= range
         if range <= 4095 {
             self.state.emit_fmt(format_args!("    cmp x0, #{}", range));
         } else {
@@ -1209,27 +1218,14 @@ impl ArchCodegen for ArmCodegen {
         }
         self.state.emit_fmt(format_args!("    b.hs {}", default_label));
 
-        // Load jump table base address and compute target
-        // adrp x17, table_label; add x17, x17, :lo12:table_label
+        // Load jump table base, index, and indirect branch
         self.state.emit_fmt(format_args!("    adrp x17, {}", table_label));
         self.state.emit_fmt(format_args!("    add x17, x17, :lo12:{}", table_label));
-        // Load target address: ldr x17, [x17, x0, lsl #3]
         self.state.emit("    ldr x17, [x17, x0, lsl #3]");
-        // Branch to target
         self.state.emit("    br x17");
 
-        // Emit the jump table in .rodata
-        self.state.emit(".section .rodata");
-        self.state.emit_fmt(format_args!(".align 3"));
-        self.state.emit_fmt(format_args!("{}:", table_label));
-        for target in &table {
-            let target_label = target.as_label();
-            self.state.emit_fmt(format_args!("    .xword {}", target_label));
-        }
-        // Restore the function's text section (may be custom, e.g. .init.text)
-        let sect = self.state.current_text_section.clone();
-        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-
+        // Emit shared .rodata jump table entries and restore text section
+        emit_jump_table_rodata(self, &table_label, &table);
         self.state.reg_cache.invalidate_all();
     }
 
@@ -1956,34 +1952,6 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    cnt v0.8b, v0.8b");
         self.state.emit("    uaddlv h0, v0.8b");
         self.state.emit("    fmov w0, s0");
-    }
-
-    // emit_float_binop uses the shared default implementation
-
-    fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
-        let dest_phys = self.dest_reg(dest);
-        let src_phys = self.operand_reg(src);
-
-        match (dest_phys, src_phys) {
-            (Some(d), Some(s)) => {
-                if d.0 != s.0 {
-                    let d_name = callee_saved_name(d);
-                    let s_name = callee_saved_name(s);
-                    self.state.emit_fmt(format_args!("    mov {}, {}", d_name, s_name));
-                }
-                self.state.reg_cache.invalidate_acc();
-            }
-            (Some(d), None) => {
-                self.operand_to_x0(src);
-                let d_name = callee_saved_name(d);
-                self.state.emit_fmt(format_args!("    mov {}, x0", d_name));
-                self.state.reg_cache.invalidate_acc();
-            }
-            _ => {
-                self.operand_to_x0(src);
-                self.store_x0_to(dest);
-            }
-        }
     }
 
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
@@ -2777,22 +2745,22 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
-        if is_i128_type(return_type) {
-            self.store_x0_x1_to(dest);
-        } else if return_type.is_long_double() {
-            self.state.emit("    bl __trunctfdf2");
-            self.state.emit("    fmov x0, d0");
-            self.store_x0_to(dest);
-        } else if return_type == IrType::F32 {
-            self.state.emit("    fmov w0, s0");
-            self.store_x0_to(dest);
-        } else if return_type.is_float() {
-            self.state.emit("    fmov x0, d0");
-            self.store_x0_to(dest);
-        } else {
-            self.store_x0_to(dest);
-        }
+    fn emit_call_store_i128_result(&mut self, dest: &Value) {
+        self.store_x0_x1_to(dest);
+    }
+
+    fn emit_call_store_f128_result(&mut self, dest: &Value) {
+        self.state.emit("    bl __trunctfdf2");
+        self.state.emit("    fmov x0, d0");
+        self.store_x0_to(dest);
+    }
+
+    fn emit_call_move_f32_to_acc(&mut self) {
+        self.state.emit("    fmov w0, s0");
+    }
+
+    fn emit_call_move_f64_to_acc(&mut self) {
+        self.state.emit("    fmov x0, d0");
     }
 
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {

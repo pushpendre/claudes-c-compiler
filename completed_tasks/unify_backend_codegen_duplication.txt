@@ -1,0 +1,21 @@
+Unify duplicated code patterns across x86/ARM/RISC-V backend codegen files
+
+The three backend codegen files (x86: 3862 lines, ARM: 3678 lines, RISC-V: 3909 lines)
+contain significant code duplication. This task extracts shared patterns into the
+trait system or shared helper functions.
+
+Patterns unified in this task:
+- Switch jump table construction (build_jump_table + emit_jump_table_rodata)
+- Copy value logic (register-aware emit_copy_value default with 3-way dispatch)
+- Call result store logic (emit_call_store_result default with 4 arch primitives)
+
+Remaining patterns not yet addressed:
+- Value resolution (alloca/register/stack slot dispatch) - ~53 occurrences
+- Callee-save register save/restore loops in prologue/epilogue
+- Cast instruction dispatch (emit_cast_instrs structure)
+
+Net effect: ARM backend shrinks ~70 lines. Shared infrastructure adds ~100 lines
+to traits.rs. The value is in reducing semantic duplication (identical algorithms
+expressed 3 times) rather than raw line count reduction.
+
+Status: complete

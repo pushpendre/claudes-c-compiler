@@ -1037,6 +1037,25 @@ impl ArchCodegen for X86Codegen {
     fn state_ref(&self) -> &CodegenState { &self.state }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Quad }
 
+    fn get_phys_reg_for_value(&self, val_id: u32) -> Option<PhysReg> {
+        self.reg_assignments.get(&val_id).copied()
+    }
+
+    fn emit_reg_to_reg_move(&mut self, src: PhysReg, dest: PhysReg) {
+        let s_name = phys_reg_name(src);
+        let d_name = phys_reg_name(dest);
+        self.state.out.emit_instr_reg_reg("    movq", s_name, d_name);
+    }
+
+    fn emit_acc_to_phys_reg(&mut self, dest: PhysReg) {
+        let d_name = phys_reg_name(dest);
+        self.state.out.emit_instr_reg_reg("    movq", "rax", d_name);
+    }
+
+    fn phys_reg_name(&self, reg: PhysReg) -> &'static str {
+        phys_reg_name(reg)
+    }
+
     fn jump_mnemonic(&self) -> &'static str { "jmp" }
     fn trap_instruction(&self) -> &'static str { "ud2" }
 
@@ -1065,17 +1084,8 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
-        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
-        let range = (max_val - min_val + 1) as usize;
-
-        // Build the table
-        let mut table = vec![*default; range];
-        for &(case_val, target) in cases {
-            let idx = (case_val - min_val) as usize;
-            table[idx] = target;
-        }
-
+        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
 
@@ -1100,17 +1110,15 @@ impl ArchCodegen for X86Codegen {
         }
         self.state.emit_fmt(format_args!("    jae {}", default_label));
 
-        // Jump through the table
+        // Jump through the table (PIC uses relative offsets; non-PIC uses shared rodata)
         if self.state.pic_mode {
             // PIC mode: use relative 32-bit offsets to avoid R_X86_64_64 relocations.
-            // Table entries are .long (target - table_base), loaded with movslq and
-            // added to the base address.
             self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
             self.state.emit("    movslq (%rcx,%rax,4), %rdx");
             self.state.emit("    addq %rcx, %rdx");
             self.state.emit("    jmp *%rdx");
 
-            // Emit jump table in .rodata with relative offsets
+            // PIC jump table uses relative .long entries (can't use shared rodata helper)
             self.state.emit(".section .rodata");
             self.state.emit(".align 4");
             self.state.emit_fmt(format_args!("{}:", table_label));
@@ -1118,24 +1126,15 @@ impl ArchCodegen for X86Codegen {
                 let target_label = target.as_label();
                 self.state.emit_fmt(format_args!("    .long {} - {}", target_label, table_label));
             }
+            let sect = self.state.current_text_section.clone();
+            self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
         } else {
-            // Non-PIC: use absolute 64-bit addresses
+            // Non-PIC: absolute 64-bit addresses via shared rodata helper
             self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
             self.state.emit("    movq (%rcx,%rax,8), %rcx");
             self.state.emit("    jmp *%rcx");
-
-            // Emit jump table in .rodata with absolute addresses
-            self.state.emit(".section .rodata");
-            self.state.emit(".align 8");
-            self.state.emit_fmt(format_args!("{}:", table_label));
-            for target in &table {
-                let target_label = target.as_label();
-                self.state.emit_fmt(format_args!("    .quad {}", target_label));
-            }
+            emit_jump_table_rodata(self, &table_label, &table);
         }
-        // Restore the function's text section (may be custom, e.g. .init.text)
-        let sect = self.state.current_text_section.clone();
-        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 
         self.state.reg_cache.invalidate_all();
     }
@@ -2884,6 +2883,23 @@ impl ArchCodegen for X86Codegen {
         } else {
             self.store_rax_to(dest);
         }
+    }
+
+    fn emit_call_store_i128_result(&mut self, dest: &Value) {
+        self.store_rax_rdx_to(dest);
+    }
+
+    fn emit_call_store_f128_result(&mut self, _dest: &Value) {
+        // x86 F128 (x87 80-bit) handling is in the emit_call_store_result override
+        unreachable!("x86 uses custom emit_call_store_result for F128");
+    }
+
+    fn emit_call_move_f32_to_acc(&mut self) {
+        self.state.emit("    movd %xmm0, %eax");
+    }
+
+    fn emit_call_move_f64_to_acc(&mut self) {
+        self.state.emit("    movq %xmm0, %rax");
     }
 
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {

@@ -1,0 +1,21 @@
+Task: Fix mcmodel=kernel global address emission
+Status: completed
+Branch: fix-mcmodel-kernel-addressing
+
+Problem:
+  emit_global_addr used RIP-relative addressing (leaq symbol(%rip), %rax) for all code
+  models including -mcmodel=kernel. In the Linux kernel, expressions like
+  (_text - __START_KERNEL_map) require the link-time virtual address of _text,
+  not the RIP-relative runtime address. This caused arch/x86/kernel/head64.c to
+  be miscompiled, producing incorrect load_delta computation and boot failure.
+
+Fix:
+  Changed emit_global_addr to use absolute addressing (movq $symbol, %rax) when
+  code_model_kernel is true. This generates R_X86_64_32S relocations matching GCC
+  behavior. Kernel code that needs runtime physical addresses (early boot code)
+  uses RIP_REL_REF() with inline asm that bypasses emit_global_addr entirely.
+
+Files changed:
+  src/backend/x86/codegen/codegen.rs - emit_global_addr function
+  tests/mcmodel-kernel-rip-relative-x86/main.c - updated comment
+  tests/mcmodel-kernel-global-addr-arithmetic-x86/ - new regression test

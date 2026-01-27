@@ -518,6 +518,25 @@ impl ArchCodegen for RiscvCodegen {
     fn state_ref(&self) -> &CodegenState { &self.state }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Dword }
 
+    fn get_phys_reg_for_value(&self, val_id: u32) -> Option<PhysReg> {
+        self.reg_assignments.get(&val_id).copied()
+    }
+
+    fn emit_reg_to_reg_move(&mut self, src: PhysReg, dest: PhysReg) {
+        let s_name = callee_saved_name(src);
+        let d_name = callee_saved_name(dest);
+        self.state.emit_fmt(format_args!("    mv {}, {}", d_name, s_name));
+    }
+
+    fn emit_acc_to_phys_reg(&mut self, dest: PhysReg) {
+        let d_name = callee_saved_name(dest);
+        self.state.emit_fmt(format_args!("    mv {}, t0", d_name));
+    }
+
+    fn phys_reg_name(&self, reg: PhysReg) -> &'static str {
+        callee_saved_name(reg)
+    }
+
     fn jump_mnemonic(&self) -> &'static str { "j" }
     fn trap_instruction(&self) -> &'static str { "ebreak" }
 
@@ -564,24 +583,15 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
-        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
-        let range = (max_val - min_val + 1) as usize;
-
-        // Build the table
-        let mut table = vec![*default; range];
-        for &(case_val, target) in cases {
-            let idx = (case_val - min_val) as usize;
-            table[idx] = target;
-        }
-
+        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
 
         // Load switch value into t0
         self.operand_to_t0(val);
 
-        // Subtract min_val
+        // Subtract min_val to normalize index
         if min_val != 0 {
             let neg_min = -min_val;
             if neg_min >= -2048 && neg_min <= 2047 {
@@ -591,29 +601,19 @@ impl ArchCodegen for RiscvCodegen {
                 self.state.emit("    add t0, t0, t1");
             }
         }
-        // Range check: if index >= range, jump to default
+        // Range check (unsigned): branch to default if index >= range
         self.state.emit_fmt(format_args!("    li t1, {}", range));
         self.state.emit_fmt(format_args!("    bgeu t0, t1, {}", default_label));
 
-        // Compute table address and load target
+        // Load jump table base, index, and indirect branch
         self.state.emit_fmt(format_args!("    la t1, {}", table_label));
         self.state.emit("    slli t0, t0, 3");  // index * 8
         self.state.emit("    add t1, t1, t0");
         self.state.emit("    ld t1, 0(t1)");
         self.state.emit("    jr t1");
 
-        // Emit jump table in .rodata
-        self.state.emit(".section .rodata");
-        self.state.emit(".align 3");
-        self.state.emit_fmt(format_args!("{}:", table_label));
-        for target in &table {
-            let target_label = target.as_label();
-            self.state.emit_fmt(format_args!("    .dword {}", target_label));
-        }
-        // Restore the function's text section (may be custom, e.g. .init.text)
-        let sect = self.state.current_text_section.clone();
-        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-
+        // Emit shared .rodata jump table entries and restore text section
+        emit_jump_table_rodata(self, &table_label, &table);
         self.state.reg_cache.invalidate_all();
     }
 
@@ -1958,6 +1958,8 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
+        // RISC-V returns integers in a0 (not t0), so we need custom handling
+        // to store a0 directly without an unnecessary a0->t0 move.
         if let Some(slot) = self.state.get_slot(dest.0) {
             if is_i128_type(return_type) {
                 self.emit_store_to_s0("a0", slot.0, "sd");
@@ -1976,6 +1978,23 @@ impl ArchCodegen for RiscvCodegen {
                 self.emit_store_to_s0("a0", slot.0, "sd");
             }
         }
+    }
+
+    fn emit_call_store_i128_result(&mut self, _dest: &Value) {
+        // Handled by the override above
+        unreachable!("RISC-V uses custom emit_call_store_result");
+    }
+
+    fn emit_call_store_f128_result(&mut self, _dest: &Value) {
+        unreachable!("RISC-V uses custom emit_call_store_result");
+    }
+
+    fn emit_call_move_f32_to_acc(&mut self) {
+        self.state.emit("    fmv.x.w t0, fa0");
+    }
+
+    fn emit_call_move_f64_to_acc(&mut self) {
+        self.state.emit("    fmv.x.d t0, fa0");
     }
 
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {
