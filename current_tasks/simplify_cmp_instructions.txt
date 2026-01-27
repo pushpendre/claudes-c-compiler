@@ -1,0 +1,17 @@
+Task: Add Cmp instruction simplification to the optimizer
+
+Status: in_progress
+
+Goal: Add simplification patterns for Cmp instructions in simplify.rs to reduce
+redundant comparisons, especially the pattern Cmp(Ne, cmp_result, 0) which is
+a no-op when cmp_result is already a boolean 0/1 from another Cmp.
+
+Patterns to implement:
+1. Cmp(Ne, cmp_result, 0) -> Copy(cmp_result) when cmp_result defined by Cmp
+2. Cmp(Eq, cmp_result, 0) -> Cmp(inverted_op, original_lhs, original_rhs)
+3. Cmp(Ne, cmp_result, 1) -> Cmp(inverted_op, original_lhs, original_rhs)
+4. Cmp(Eq, cmp_result, 1) -> Copy(cmp_result)
+5. Cmp(op, x, x) for self-comparison patterns
+6. Cmp with constant operands that constant_fold might miss
+
+This is an IR-level optimization that benefits all 3 backends (x86, ARM, RISC-V).
