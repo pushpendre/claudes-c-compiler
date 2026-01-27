@@ -842,6 +842,13 @@ impl ArchCodegen for RiscvCodegen {
         self.state.num_params = func.params.len();
         self.state.func_is_variadic = func.is_variadic;
 
+        // Pre-compute param alloca slots for emit_param_ref
+        self.state.param_alloca_slots = (0..func.params.len()).map(|i| {
+            find_param_alloca(func, i).and_then(|(dest, ty)| {
+                self.state.get_slot(dest.0).map(|slot| (slot, ty))
+            })
+        }).collect();
+
         // Stack-passed params are at positive s0 offsets.
         // For variadic: register save area occupies s0+0..s0+56, stack params at s0+64+.
         let stack_base: i64 = if func.is_variadic { 64 } else { 0 };
@@ -1069,6 +1076,20 @@ impl ArchCodegen for RiscvCodegen {
         if param_idx >= self.state.param_classes.len() {
             return;
         }
+
+        // Prefer loading from the param alloca slot (where emit_store_params
+        // already saved the incoming register value). This avoids issues where
+        // ABI registers get clobbered during emit_store_params' processing.
+        if param_idx < self.state.param_alloca_slots.len() {
+            if let Some((slot, alloca_ty)) = self.state.param_alloca_slots[param_idx] {
+                let load_instr = Self::load_for_type(alloca_ty);
+                self.emit_load_from_s0("t0", slot.0, load_instr);
+                self.emit_store_result(dest);
+                return;
+            }
+        }
+
+        // Fallback: read directly from ABI location
         let class = self.state.param_classes[param_idx];
         let stack_base: i64 = if self.state.func_is_variadic { 64 } else { 0 };
 

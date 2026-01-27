@@ -1480,6 +1480,15 @@ impl ArchCodegen for ArmCodegen {
         self.state.num_params = func.params.len();
         self.state.func_is_variadic = func.is_variadic;
 
+        // Pre-compute param alloca slots for emit_param_ref: store (slot, type) for
+        // each parameter so ParamRef can load from the alloca instead of the ABI
+        // register (which may be clobbered by later phases of emit_store_params).
+        self.state.param_alloca_slots = (0..func.params.len()).map(|i| {
+            find_param_alloca(func, i).and_then(|(dest, ty)| {
+                self.state.get_slot(dest.0).map(|slot| (slot, ty))
+            })
+        }).collect();
+
         // Phase 1: Store all GP register params first (before x0 gets clobbered by float moves).
         for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
@@ -1691,16 +1700,33 @@ impl ArchCodegen for ArmCodegen {
         if param_idx >= self.state.param_classes.len() {
             return;
         }
+
+        // Read the parameter value from its alloca stack slot rather than
+        // directly from the ABI register/stack location. By the time this
+        // instruction executes, emit_store_params has already saved all
+        // incoming parameter registers to their alloca slots. Reading from
+        // the alloca avoids issues where ABI registers (especially x0) get
+        // clobbered during emit_store_params' float/stack parameter phases.
+        if param_idx < self.state.param_alloca_slots.len() {
+            if let Some((slot, alloca_ty)) = self.state.param_alloca_slots[param_idx] {
+                let ldr_instr = self.load_instr_for_type(alloca_ty);
+                let (actual_instr, reg) = Self::arm_parse_load(ldr_instr);
+                self.emit_load_from_sp(reg, slot.0, actual_instr);
+                self.emit_store_result(dest);
+                return;
+            }
+        }
+
+        // Fallback: read directly from ABI location (only reached when the
+        // param alloca has no stack slot, which shouldn't happen after the
+        // dead_param_allocas fix, but kept for safety).
         let class = self.state.param_classes[param_idx];
-        let stack_base: i64 = 16; // After saved fp + lr
+        let frame_size = self.current_frame_size;
 
         match class {
             ParamClass::IntReg { reg_idx } => {
                 let src = Self::reg_for_type(ARM_ARG_REGS[reg_idx], ty);
                 let dst = Self::reg_for_type("x0", ty);
-                // Both operands must be the same width on ARM64
-                // (mov wN, wM for 32-bit; mov xN, xM for 64-bit)
-                // Writing to wN implicitly zero-extends into xN.
                 if src != dst {
                     self.state.emit_fmt(format_args!("    mov {}, {}", dst, src));
                 }
@@ -1715,13 +1741,12 @@ impl ArchCodegen for ArmCodegen {
                 self.store_x0_to(dest);
             }
             ParamClass::StackScalar { offset } => {
-                let src = stack_base + offset;
+                let src = frame_size + offset;
                 let ldr_instr = self.load_instr_for_type(ty);
                 let (actual_instr, reg) = Self::arm_parse_load(ldr_instr);
                 self.emit_load_from_sp(reg, src, actual_instr);
                 self.emit_store_result(dest);
             }
-            // Struct/i128/F128 params remain in allocas
             _ => {}
         }
     }

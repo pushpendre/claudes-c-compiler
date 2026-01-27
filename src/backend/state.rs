@@ -164,6 +164,11 @@ pub struct CodegenState {
     pub num_params: usize,
     /// Whether the current function is variadic (for ParamRef ABI handling).
     pub func_is_variadic: bool,
+    /// Stack slots for parameter allocas, indexed by param_idx.
+    /// Populated by `emit_store_params` so that `emit_param_ref` can load the
+    /// parameter value from its alloca slot (where emit_store_params saved it)
+    /// instead of reading from ABI registers that may have been clobbered.
+    pub param_alloca_slots: Vec<Option<(StackSlot, IrType)>>,
 }
 
 impl CodegenState {
@@ -197,6 +202,7 @@ impl CodegenState {
             param_classes: Vec::new(),
             num_params: 0,
             func_is_variadic: false,
+            param_alloca_slots: Vec::new(),
         }
     }
 

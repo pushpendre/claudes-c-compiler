@@ -1534,6 +1534,14 @@ impl ArchCodegen for X86Codegen {
         self.state.param_classes = param_classes.clone();
         self.state.num_params = func.params.len();
         self.state.func_is_variadic = func.is_variadic;
+
+        // Pre-compute param alloca slots for emit_param_ref
+        self.state.param_alloca_slots = (0..func.params.len()).map(|i| {
+            find_param_alloca(func, i).and_then(|(dest, ty)| {
+                self.state.get_slot(dest.0).map(|slot| (slot, ty))
+            })
+        }).collect();
+
         // Stack-passed parameters start at 16(%rbp) (after saved rbp + return addr).
         let stack_base: i64 = 16;
 
@@ -1633,10 +1641,24 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
-        let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         if param_idx >= self.state.param_classes.len() {
             return;
         }
+
+        // Prefer loading from the param alloca slot (where emit_store_params
+        // already saved the incoming register value).
+        if param_idx < self.state.param_alloca_slots.len() {
+            if let Some((slot, alloca_ty)) = self.state.param_alloca_slots[param_idx] {
+                let load_instr = Self::mov_load_for_type(alloca_ty);
+                let reg = Self::load_dest_reg(alloca_ty);
+                self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, reg));
+                self.emit_store_result(dest);
+                return;
+            }
+        }
+
+        // Fallback: read directly from ABI location
+        let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         let class = self.state.param_classes[param_idx];
         let stack_base: i64 = 16; // After saved rbp + return addr
 

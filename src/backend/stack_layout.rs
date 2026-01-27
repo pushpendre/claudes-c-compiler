@@ -635,13 +635,29 @@ pub fn calculate_stack_space_common(
     // used in any instruction or terminator. These represent function parameters
     // that are completely unused in the function body, so we can skip allocating
     // stack space for them and skip storing incoming register values.
+    //
+    // However, if a ParamRef instruction exists for a given param index, the
+    // corresponding param alloca must NOT be marked dead: emit_store_params needs
+    // to save the incoming register to the alloca slot, because emit_param_ref
+    // may read from ABI registers that get clobbered during emit_store_params
+    // (e.g., x0 is used as scratch during float/stack param storage on ARM).
+    // Keeping the alloca alive ensures emit_store_params stores the register
+    // value safely before it can be clobbered.
     let dead_param_allocas: FxHashSet<u32> = {
         let mut dead = FxHashSet::default();
         if !func.param_alloca_values.is_empty() {
-            let param_set: FxHashSet<u32> = func.param_alloca_values.iter().map(|v| v.0).collect();
-            for &pv in &param_set {
-                if !used_values.contains(&pv) {
-                    dead.insert(pv);
+            // Collect param indices referenced by ParamRef instructions
+            let mut paramref_indices: FxHashSet<usize> = FxHashSet::default();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let Instruction::ParamRef { param_idx, .. } = inst {
+                        paramref_indices.insert(*param_idx);
+                    }
+                }
+            }
+            for (idx, pv) in func.param_alloca_values.iter().enumerate() {
+                if !used_values.contains(&pv.0) && !paramref_indices.contains(&idx) {
+                    dead.insert(pv.0);
                 }
             }
         }
