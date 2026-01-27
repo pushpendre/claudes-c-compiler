@@ -1,0 +1,16 @@
+Fix: DCE pass incorrectly drops .weak directives for extern declarations
+
+The dead-code elimination pass in passes/mod.rs filters symbol_attrs (which
+contain .weak and .hidden assembler directives for extern declarations) using
+a reachability set. However, extern-only symbols (symbols referenced but not
+defined in the current TU) were not being tracked in the reachability graph's
+name_to_id map, so they were always filtered out.
+
+This caused linker errors for kernel files like kernel/vmcore_info.c that use
+extern __weak declarations (e.g., kallsyms_names, kallsyms_token_table).
+
+Fix: Don't filter symbol_attrs by reachability at all. These are purely
+declarative assembler directives for extern symbols — emitting them for
+unreferenced symbols is harmless, but dropping them causes linker failures.
+
+Status: in_progress
