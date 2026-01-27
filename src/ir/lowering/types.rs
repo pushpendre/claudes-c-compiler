@@ -93,7 +93,13 @@ impl Lowerer {
     pub(super) fn resolve_typeof(&self, ts: &TypeSpecifier) -> TypeSpecifier {
         match ts {
             TypeSpecifier::Typeof(expr) => {
-                if let Some(ctype) = self.get_expr_ctype(expr) {
+                // For _Generic selections inside typeof(), resolve fresh to avoid stale cache.
+                let ctype = if let Expr::GenericSelection(controlling, associations, _) = expr.as_ref() {
+                    self.resolve_generic_selection_ctype(controlling, associations)
+                } else {
+                    self.get_expr_ctype(expr)
+                };
+                if let Some(ctype) = ctype {
                     Self::ctype_to_type_spec(&ctype)
                 } else {
                     TypeSpecifier::Int // fallback
@@ -191,7 +197,13 @@ impl Lowerer {
                 }
             }
             TypeSpecifier::Typeof(expr) => {
-                if let Some(ctype) = self.get_expr_ctype(expr) {
+                // For _Generic selections inside typeof(), resolve fresh to avoid stale cache.
+                let ctype = if let Expr::GenericSelection(controlling, associations, _) = expr.as_ref() {
+                    self.resolve_generic_selection_ctype(controlling, associations)
+                } else {
+                    self.get_expr_ctype(expr)
+                };
+                if let Some(ctype) = ctype {
                     IrType::from_ctype(&ctype)
                 } else {
                     IrType::I64

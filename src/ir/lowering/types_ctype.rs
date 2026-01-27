@@ -463,6 +463,17 @@ impl type_builder::TypeConvertContext for Lowerer {
     }
 
     fn resolve_typeof_expr(&self, expr: &Expr) -> CType {
+        // For _Generic selections inside typeof(), resolve directly to avoid
+        // stale cached None results from get_expr_ctype's memoization cache.
+        // The cache can hold None when the same _Generic AST node was
+        // first evaluated before local variable types were fully available
+        // (e.g., during earlier type resolution passes). By calling
+        // resolve_generic_selection_ctype directly we bypass the cache.
+        if let Expr::GenericSelection(controlling, associations, _) = expr {
+            if let Some(ctype) = self.resolve_generic_selection_ctype(controlling, associations) {
+                return ctype;
+            }
+        }
         self.get_expr_ctype(expr).unwrap_or(CType::Int)
     }
 

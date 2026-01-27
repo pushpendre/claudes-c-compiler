@@ -1,18 +1,32 @@
-Task: Fix sizeof(_Generic(...)) always returning 4 instead of correct type size
-Status: in_progress
+Task: Fix typeof(_Generic(...)) resolving to wrong type due to stale cache
+Status: completed
 Started: 2026-01-27
+Completed: 2026-01-27
 
-Problem: The IR lowerer's sizeof_expr() function in expr_types.rs has no
-explicit case for Expr::GenericSelection, so it falls through to the
-default catch-all arm which returns 4. This causes sizeof(_Generic(...))
-to always return 4 bytes regardless of the actual selected type.
+Problem: The IR lowerer's get_expr_ctype memoization cache could return a stale
+Int value for the controlling expression inside _Generic selections. When
+resolve_generic_selection_ctype called get_expr_ctype(controlling), it would get
+the cached (wrong) Int, causing _Generic to match the int association instead of
+falling through to 'default'. This made typeof(_Generic(ptr->field, ...)) resolve
+to int instead of the actual pointer type.
 
-Impact: Kernel READ_ONCE() macro uses _Generic to determine type for volatile
-loads. When sizeof is computed through typeof(_Generic(...)) paths, the wrong
-size (4 instead of 8 for pointers) causes 32-bit loads (movslq) instead of
-64-bit loads (movq) for pointer-typed fields, corrupting kernel pointers
-and causing boot hangs. Specifically fs/file.c fd_install() loads files->fdt
-(a pointer) with movslq, truncating the kernel virtual address.
+Impact: Kernel READ_ONCE() + rcu_dereference_sched() macros use _Generic + typeof
+for volatile pointer loads. The wrong type resolution caused casts to produce
+(const volatile int *) instead of (const volatile struct fdtable **), and
+dereferences emitted 32-bit sign-extending loads (movslq) instead of 64-bit loads
+(movq), corrupting kernel pointers and causing boot hangs in fs/file.c fd_install().
 
-Fix: Add GenericSelection arm to sizeof_expr() that resolves the selected
-association and returns the correct size.
+Fix: Modified resolve_generic_selection_ctype and resolve_generic_selection_type
+to bypass the memoization cache for the controlling expression by calling
+get_expr_ctype_lowerer directly. Also modified all typeof resolution paths
+(resolve_typeof, type_spec_to_ir, resolve_typeof_expr) to bypass cache for
+_Generic selections inside typeof(). Added sizeof_expr arms for GenericSelection
+and StmtExpr.
+
+Files changed:
+- src/ir/lowering/expr_types.rs: Cache bypass in resolve_generic_selection_*,
+  sizeof_expr arms, visibility change for resolve_generic_selection_ctype
+- src/ir/lowering/types.rs: typeof handling in resolve_typeof and type_spec_to_ir
+- src/ir/lowering/types_ctype.rs: typeof handling in resolve_typeof_expr
+
+Test: tests/typeof-generic-ptr-member-access

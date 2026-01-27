@@ -1,0 +1,23 @@
+Cache CFG/Dominator/Loop Analysis Across Optimization Passes
+============================================================
+Status: in_progress
+
+Problem:
+GVN, LICM, and IVSR each independently compute build_label_map + build_cfg +
+compute_dominators (and LICM/IVSR also compute find_natural_loops). These passes
+run sequentially within the same pipeline iteration. GVN does not modify the CFG
+(only replaces instruction operands), so the analysis results are still valid for
+LICM and IVSR.
+
+This results in 3 redundant build_cfg calls, 3 redundant compute_dominators calls,
+and 1 redundant find_natural_loops call per function per iteration.
+
+Solution:
+1. Create a shared CfgAnalysis struct holding label_to_idx, preds, succs, idom,
+   dom_children, and loops.
+2. Compute it once per function at the start of the GVN+LICM+IVSR sequence.
+3. Pass it into GVN, LICM, and IVSR so they reuse the same analysis.
+4. Benchmark to verify speedup.
+
+Expected improvement: ~15-20% reduction in analysis overhead for these passes,
+which represent ~3-5% of total compile time on large files.

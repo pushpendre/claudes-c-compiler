@@ -457,8 +457,12 @@ impl Lowerer {
 
     /// Resolve the CType of a _Generic selection expression.
     /// Used by get_expr_ctype_lowerer so that typeof(_Generic(...)) resolves correctly.
-    fn resolve_generic_selection_ctype(&self, controlling: &Expr, associations: &[GenericAssociation]) -> Option<CType> {
-        let controlling_ctype = self.get_expr_ctype(controlling);
+    pub(super) fn resolve_generic_selection_ctype(&self, controlling: &Expr, associations: &[GenericAssociation]) -> Option<CType> {
+        // For _Generic, compute the controlling expression's type fresh to avoid
+        // stale cached values that may have been computed before the controlling
+        // expression's dependencies were fully available.
+        let controlling_ctype = self.get_expr_ctype_lowerer(controlling)
+            .or_else(|| self.lookup_sema_expr_type(controlling));
         let controlling_ir_type = self.get_expr_type(controlling);
         // Per C11 6.5.1.1p2: lvalue conversion strips top-level qualifiers.
         // Only use ctrl_is_const for pointer types (where it reflects pointee constness).
@@ -505,7 +509,9 @@ impl Lowerer {
 
     /// Resolve the type of a _Generic selection expression.
     fn resolve_generic_selection_type(&self, controlling: &Expr, associations: &[GenericAssociation]) -> IrType {
-        let controlling_ctype = self.get_expr_ctype(controlling);
+        // Compute controlling type fresh, bypassing stale cache values.
+        let controlling_ctype = self.get_expr_ctype_lowerer(controlling)
+            .or_else(|| self.lookup_sema_expr_type(controlling));
         let controlling_ir_type = self.get_expr_type(controlling);
         // Per C11 6.5.1.1p2: lvalue conversion strips top-level qualifiers.
         // Only use ctrl_is_const for pointer types (where it reflects pointee constness).
@@ -1039,6 +1045,27 @@ impl Lowerer {
                 }
             }
 
+            // _Generic selection: resolve the matching association and compute its size
+            Expr::GenericSelection(controlling, associations, _) => {
+                if let Some(ctype) = self.resolve_generic_selection_ctype(controlling, associations) {
+                    self.ctype_size(&ctype)
+                } else {
+                    // Fallback to IrType-based sizing
+                    let ir_type = self.resolve_generic_selection_type(controlling, associations);
+                    ir_type.size()
+                }
+            }
+
+            // Statement expression: type of the last expression in the block
+            Expr::StmtExpr(_, _) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    self.ctype_size(&ctype)
+                } else {
+                    let ty = self.get_expr_type(expr);
+                    ty.size()
+                }
+            }
+
             // Default
             _ => 4,
         }
@@ -1210,16 +1237,17 @@ impl Lowerer {
     /// Recursively searches anonymous struct/union members to find the field,
     /// matching the behavior of StructLayout::field_offset().
     fn get_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
+        let raw_base_ctype = self.get_expr_ctype(base_expr);
         let base_ctype = if is_pointer_access {
             // For p->field, get CType of p, then dereference
             // Arrays decay to pointers, so arr->field is valid when arr is an array
-            match self.get_expr_ctype(base_expr)? {
+            match raw_base_ctype? {
                 CType::Pointer(inner, _) => *inner,
                 CType::Array(inner, _) => *inner,
                 _ => return None,
             }
         } else {
-            self.get_expr_ctype(base_expr)?
+            raw_base_ctype?
         };
         // Resolve forward-declared (incomplete) struct/union types that may have
         // been cached before the full definition was available.
