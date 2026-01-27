@@ -1,6 +1,0 @@
-Task: Split ir/lowering/stmt.rs into focused submodules
-Status: in_progress
-Started: 2026-01-27
-Description: Split the monolithic stmt.rs (2000 lines) into focused
-submodules for better organization and maintainability.
-Files: src/ir/lowering/stmt.rs
