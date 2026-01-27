@@ -11,7 +11,14 @@ use crate::backend::state::CodegenState;
 use super::codegen::ArmCodegen;
 
 impl ArmCodegen {
-    pub(super) fn substitute_asm_operands_static(line: &str, op_regs: &[String], op_names: &[Option<String>], gcc_to_internal: &[usize]) -> String {
+    pub(super) fn substitute_asm_operands_static(
+        line: &str,
+        op_regs: &[String],
+        op_names: &[Option<String>],
+        gcc_to_internal: &[usize],
+        op_imm_values: &[Option<i64>],
+        op_imm_symbols: &[Option<String>],
+    ) -> String {
         let mut result = String::new();
         let chars: Vec<char> = line.chars().collect();
         let mut i = 0;
@@ -24,10 +31,12 @@ impl ArmCodegen {
                     i += 1;
                     continue;
                 }
-                // Check for modifier: w, x, h, b, s, d, q
+                // Check for modifier: w, x, h, b, s, d, q, c
+                // 'c' = raw constant (no # prefix), used in ARM inline asm
                 let mut modifier = None;
                 if chars[i] == 'w' || chars[i] == 'x' || chars[i] == 'h' || chars[i] == 'b'
                     || chars[i] == 's' || chars[i] == 'd' || chars[i] == 'q'
+                    || chars[i] == 'c'
                 {
                     // Check if next char is digit or [, meaning this is a modifier
                     if i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '[') {
@@ -51,7 +60,9 @@ impl ArmCodegen {
                     for (idx, op_name) in op_names.iter().enumerate() {
                         if let Some(ref n) = op_name {
                             if n == &name {
-                                result.push_str(&Self::format_reg_static(&op_regs[idx], modifier));
+                                result.push_str(&Self::format_operand_static(
+                                    idx, modifier, op_regs, op_imm_values, op_imm_symbols,
+                                ));
                                 found = true;
                                 break;
                             }
@@ -81,7 +92,9 @@ impl ArmCodegen {
                         num
                     };
                     if internal_idx < op_regs.len() {
-                        result.push_str(&Self::format_reg_static(&op_regs[internal_idx], modifier));
+                        result.push_str(&Self::format_operand_static(
+                            internal_idx, modifier, op_regs, op_imm_values, op_imm_symbols,
+                        ));
                     } else {
                         result.push_str(&format!("x{}", num));
                     }
@@ -98,6 +111,30 @@ impl ArmCodegen {
             }
         }
         result
+    }
+
+    /// Format an operand for ARM inline assembly substitution.
+    /// For immediate operands (from "i"/"n" constraints), emit the raw value.
+    /// GCC on AArch64 emits raw integers for "i" constraints (no '#' prefix),
+    /// both in instruction and data directive contexts.
+    /// For register operands, apply the modifier and emit the register name.
+    fn format_operand_static(
+        idx: usize,
+        modifier: Option<char>,
+        op_regs: &[String],
+        op_imm_values: &[Option<i64>],
+        op_imm_symbols: &[Option<String>],
+    ) -> String {
+        // Check for immediate symbol first (e.g., function/variable name)
+        if let Some(Some(ref sym)) = op_imm_symbols.get(idx) {
+            return sym.clone();
+        }
+        // Check for immediate value - emit raw (GCC AArch64 behavior)
+        if let Some(Some(imm)) = op_imm_values.get(idx) {
+            return format!("{}", imm);
+        }
+        // Regular register operand
+        Self::format_reg_static(&op_regs[idx], modifier)
     }
 
     pub(super) fn format_reg_static(reg: &str, modifier: Option<char>) -> String {

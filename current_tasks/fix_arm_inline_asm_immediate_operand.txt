@@ -17,4 +17,4 @@ Fix: Update substitute_asm_operands_static() and substitute_template_line() in t
 ARM backend to pass and handle imm_value/imm_symbol for immediate operands, similar
 to how x86 and RISC-V backends already handle them.
 
-Status: in_progress
+Status: complete
