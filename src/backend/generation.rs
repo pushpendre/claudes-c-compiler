@@ -1207,6 +1207,7 @@ pub fn calculate_stack_space_common(
     initial_offset: i64,
     assign_slot: impl Fn(i64, i64, i64) -> (i64, i64),
     reg_assigned: &FxHashSet<u32>,
+    cached_liveness: Option<super::liveness::LivenessResult>,
 ) -> i64 {
     let num_blocks = func.blocks.len();
 
@@ -1597,10 +1598,12 @@ pub fn calculate_stack_space_common(
     // Tier 2: Liveness-based stack slot packing for multi-block values.
     // Use live intervals to identify non-overlapping values that can share
     // the same stack slot, reducing frame size significantly.
-    // Only enabled for large functions where the liveness analysis is well-tested.
     if !multi_block_values.is_empty() && enable_tier2 {
-        // Compute live intervals (reuses the same analysis as register allocation).
-        let liveness = compute_live_intervals(func);
+        // Reuse liveness data from register allocation when available, avoiding
+        // a redundant O(blocks * values * iterations) dataflow computation.
+        // For large functions (e.g., luaV_execute: 922 blocks, 99K instructions),
+        // this saves ~0.5s of compile time per function.
+        let liveness = cached_liveness.unwrap_or_else(|| compute_live_intervals(func));
 
         // Build map from value ID -> live interval.
         let mut interval_map: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
@@ -1645,34 +1648,38 @@ pub fn calculate_stack_space_common(
             // Sort by interval start point (ascending).
             values.sort_by_key(|&(_, start, _)| start);
 
-            // Each slot tracks: (stack_slot_offset, end_point_of_current_occupant).
-            // When a new value starts after the current occupant ends, it can reuse the slot.
-            let mut slots: Vec<(i64, u32)> = Vec::new();
+            // Use a min-heap of (end_point, slot_index) to efficiently find the
+            // slot whose current occupant ends earliest. If that slot's end < our
+            // start, we can reuse it. This gives O(N log S) instead of the previous
+            // O(N * S) linear scan, which is critical for large functions where
+            // both N (values) and S (slots) can be in the tens of thousands.
+            use std::collections::BinaryHeap;
+            use std::cmp::Reverse;
+
+            // Min-heap: (Reverse(end_point), slot_index)
+            let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
+            // Slot data: (stack_slot_offset,) indexed by slot_index
+            let mut slot_offsets: Vec<i64> = Vec::new();
 
             for &(dest_id, start, end) in values.iter() {
-                // Find a slot whose current occupant has ended (end_point < start).
-                // Pick the one with the latest end point (best-fit: minimize fragmentation).
-                let mut best_slot: Option<usize> = None;
-                let mut best_end: u32 = 0;
-                for (i, &(_, slot_end)) in slots.iter().enumerate() {
-                    if slot_end < start && (best_slot.is_none() || slot_end > best_end) {
-                        best_slot = Some(i);
-                        best_end = slot_end;
+                // Check if the earliest-ending slot is free (end < start).
+                if let Some(&Reverse((slot_end, slot_idx))) = heap.peek() {
+                    if slot_end < start {
+                        // Reuse this slot.
+                        heap.pop();
+                        let slot_offset = slot_offsets[slot_idx];
+                        heap.push(Reverse((end, slot_idx)));
+                        state.value_locations.insert(dest_id, StackSlot(slot_offset));
+                        continue;
                     }
                 }
-
-                if let Some(idx) = best_slot {
-                    // Reuse existing slot.
-                    let slot_offset = slots[idx].0;
-                    slots[idx].1 = end; // Update end point.
-                    state.value_locations.insert(dest_id, StackSlot(slot_offset));
-                } else {
-                    // Allocate a new slot.
-                    let (slot, new_space) = assign_slot(*non_local_space, slot_size, 0);
-                    state.value_locations.insert(dest_id, StackSlot(slot));
-                    *non_local_space = new_space;
-                    slots.push((slot, end));
-                }
+                // No free slot — allocate a new one.
+                let slot_idx = slot_offsets.len();
+                let (slot, new_space) = assign_slot(*non_local_space, slot_size, 0);
+                state.value_locations.insert(dest_id, StackSlot(slot));
+                *non_local_space = new_space;
+                slot_offsets.push(slot);
+                heap.push(Reverse((end, slot_idx)));
             }
         }
 

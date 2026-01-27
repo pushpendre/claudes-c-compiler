@@ -1431,6 +1431,7 @@ impl ArchCodegen for RiscvCodegen {
         let alloc_result = regalloc::allocate_registers(func, &config);
         self.reg_assignments = alloc_result.assignments;
         self.used_callee_saved = alloc_result.used_regs;
+        let cached_liveness = alloc_result.liveness;
         self.f128_load_sources.clear();
 
         // Add inline asm clobbered callee-saved registers to the save/restore list
@@ -1453,7 +1454,7 @@ impl ArchCodegen for RiscvCodegen {
             let alloc = ((alloc_size + 7) & !7).max(8);
             let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
             (-(new_space as i64), new_space)
-        }, &reg_assigned);
+        }, &reg_assigned, cached_liveness);
 
         // Add space for saving callee-saved registers.
         // Each callee-saved register needs 8 bytes on the stack.

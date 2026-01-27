@@ -1659,6 +1659,7 @@ impl ArchCodegen for ArmCodegen {
         let alloc_result = regalloc::allocate_registers(func, &config);
         self.reg_assignments = alloc_result.assignments;
         self.used_callee_saved = alloc_result.used_regs;
+        let cached_liveness = alloc_result.liveness;
 
         // Add inline asm clobbered callee-saved registers to the save/restore list
         // (they need to be preserved per the ABI even though we don't allocate
@@ -1680,7 +1681,7 @@ impl ArchCodegen for ArmCodegen {
             let slot = (space + effective_align - 1) & !(effective_align - 1);
             let new_space = slot + ((alloc_size + 7) & !7).max(8);
             (slot, new_space)
-        }, &reg_assigned);
+        }, &reg_assigned, cached_liveness);
 
         // For variadic functions, reserve space for register save areas:
         // - GP save area: x0-x7 = 64 bytes (8 regs * 8 bytes)

@@ -22,6 +22,12 @@ pub struct RegAllocResult {
     pub assignments: FxHashMap<u32, PhysReg>,
     /// Set of physical registers actually used (for prologue/epilogue save/restore).
     pub used_regs: Vec<PhysReg>,
+    /// The liveness analysis computed during register allocation, if any.
+    /// Cached here so that calculate_stack_space_common can reuse it for
+    /// Tier 2 liveness-based stack slot packing, avoiding a redundant
+    /// O(blocks * values * iterations) dataflow computation.
+    /// None when no registers were available (empty available_regs).
+    pub liveness: Option<super::liveness::LivenessResult>,
 }
 
 /// Configuration for the register allocator.
@@ -50,6 +56,7 @@ pub fn allocate_registers(
         return RegAllocResult {
             assignments: FxHashMap::default(),
             used_regs: Vec::new(),
+            liveness: None,
         };
     }
 
@@ -309,6 +316,7 @@ pub fn allocate_registers(
     RegAllocResult {
         assignments,
         used_regs,
+        liveness: Some(liveness),
     }
 }
 

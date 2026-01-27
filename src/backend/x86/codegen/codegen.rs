@@ -1903,6 +1903,9 @@ impl ArchCodegen for X86Codegen {
         let alloc_result = regalloc::allocate_registers(func, &config);
         self.reg_assignments = alloc_result.assignments;
         self.used_callee_saved = alloc_result.used_regs;
+        // Cache liveness data from regalloc to avoid recomputing it in
+        // calculate_stack_space_common for Tier 2 stack slot packing.
+        let cached_liveness = alloc_result.liveness;
 
         // Also add inline asm clobbered callee-saved registers to the save/restore
         // list (they need to be preserved per the ABI even though we don't allocate
@@ -1924,7 +1927,7 @@ impl ArchCodegen for X86Codegen {
             let alloc = (alloc_size + 7) & !7;
             let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
             (-new_space, new_space)
-        }, &reg_assigned);
+        }, &reg_assigned, cached_liveness);
 
         // For variadic functions, reserve space for the register save area:
         // 48 bytes for 6 integer registers (rdi, rsi, rdx, rcx, r8, r9)
