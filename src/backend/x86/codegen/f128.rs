@@ -21,14 +21,14 @@ impl X86Codegen {
             SlotAddr::OverAligned(slot, id) => {
                 self.emit_alloca_aligned_addr(*slot, *id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 None
             }
             SlotAddr::Indirect(slot) => {
                 self.emit_load_ptr_from_slot(*slot, ptr_id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 None
             }
@@ -58,18 +58,18 @@ impl X86Codegen {
             SlotAddr::Direct(slot) => {
                 let rbp_off = slot.0 + offset;
                 self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
-                self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", rbp_off));
+                self.state.out.emit_instr_reg_rbp("    movq", "rax", rbp_off);
                 if hi != 0 {
                     self.state.out.emit_instr_imm_reg("    movq", hi as i64, "rax");
                 } else {
                     self.state.emit("    xorq %rax, %rax");
                 }
-                self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", rbp_off + 8));
+                self.state.out.emit_instr_reg_rbp("    movq", "rax", rbp_off + 8);
             }
             SlotAddr::OverAligned(slot, id) => {
                 self.emit_alloca_aligned_addr(*slot, *id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                 self.state.emit("    movq %rax, (%rcx)");
@@ -83,7 +83,7 @@ impl X86Codegen {
             SlotAddr::Indirect(slot) => {
                 self.emit_load_ptr_from_slot(*slot, ptr_id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                 self.state.emit("    movq %rax, (%rcx)");
@@ -107,13 +107,13 @@ impl X86Codegen {
                 self.state.emit("    pushq %rax");
                 self.state.emit("    fldl (%rsp)");
                 self.state.emit("    addq $8, %rsp");
-                self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", rbp_off));
+                self.state.out.emit_instr_rbp("    fstpt", rbp_off);
             }
             SlotAddr::OverAligned(slot, id) => {
                 self.state.emit("    movq %rax, %rdx");
                 self.emit_alloca_aligned_addr(*slot, *id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 self.state.emit("    pushq %rdx");
                 self.state.emit("    fldl (%rsp)");
@@ -124,7 +124,7 @@ impl X86Codegen {
                 self.state.emit("    movq %rax, %rdx");
                 self.emit_load_ptr_from_slot(*slot, ptr_id);
                 if offset != 0 {
-                    self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                    self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
                 }
                 self.state.emit("    pushq %rdx");
                 self.state.emit("    fldl (%rsp)");
@@ -139,8 +139,8 @@ impl X86Codegen {
     /// a truncated f64 copy in %rax for backward compatibility.
     pub(super) fn emit_f128_load_finish(&mut self, dest: &Value) {
         if let Some(dest_slot) = self.state.get_slot(dest.0) {
-            self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", dest_slot.0));
-            self.state.emit_fmt(format_args!("    fldt {}(%rbp)", dest_slot.0));
+            self.state.out.emit_instr_rbp("    fstpt", dest_slot.0);
+            self.state.out.emit_instr_rbp("    fldt", dest_slot.0);
             self.state.emit("    subq $8, %rsp");
             self.state.emit("    fstpl (%rsp)");
             self.state.emit("    popq %rax");
@@ -161,7 +161,7 @@ impl X86Codegen {
         use crate::backend::state::SlotAddr;
         match addr {
             SlotAddr::Direct(slot) => {
-                self.state.emit_fmt(format_args!("    fldt {}(%rbp)", slot.0));
+                self.state.out.emit_instr_rbp("    fldt", slot.0);
             }
             SlotAddr::OverAligned(slot, id) => {
                 self.emit_alloca_aligned_addr(*slot, *id);
@@ -203,14 +203,14 @@ impl X86Codegen {
             self.state.emit("    movq %rcx, (%rsp)");
             self.state.emit("    fldl (%rsp)"); // ST0 = 2^63 (f64), ST1 = value (80-bit)
             self.state.emit("    fcomip %st(1), %st"); // compare and pop 2^63
-            self.state.emit_fmt(format_args!("    jbe {}", big_label));
+            self.state.out.emit_jcc_label("    jbe", &big_label);
             // Small case: value < 2^63
             self.state.emit("    fisttpq (%rsp)");
             self.state.emit("    movq (%rsp), %rax");
             self.state.emit("    addq $8, %rsp");
-            self.state.emit_fmt(format_args!("    jmp {}", done_label));
+            self.state.out.emit_jmp_label(&done_label);
             // Big case: value >= 2^63
-            self.state.emit_fmt(format_args!("{}:", big_label));
+            self.state.out.emit_named_label(&big_label);
             self.state.emit("    movabsq $4890909195324358656, %rcx");
             self.state.emit("    movq %rcx, (%rsp)");
             self.state.emit("    fldl (%rsp)"); // ST0 = 2^63, ST1 = value
@@ -220,7 +220,7 @@ impl X86Codegen {
             self.state.emit("    addq $8, %rsp");
             self.state.emit("    movabsq $9223372036854775808, %rcx");
             self.state.emit("    addq %rcx, %rax");
-            self.state.emit_fmt(format_args!("{}:", done_label));
+            self.state.out.emit_named_label(&done_label);
         } else {
             // Smaller unsigned types: fisttpq then truncate
             self.state.emit("    subq $8, %rsp");
@@ -280,7 +280,7 @@ impl X86Codegen {
                 let big_label = self.state.fresh_label("u2ld_big");
                 let done_label = self.state.fresh_label("u2ld_done");
                 self.state.emit("    testq %rax, %rax");
-                self.state.emit_fmt(format_args!("    js {}", big_label));
+                self.state.out.emit_jcc_label("    js", &big_label);
                 // Positive (< 2^63): FILD directly
                 self.state.emit("    subq $8, %rsp");
                 self.state.emit("    movq %rax, (%rsp)");
@@ -288,8 +288,8 @@ impl X86Codegen {
                 self.state.emit("    fstpl (%rsp)");
                 self.state.emit("    movq (%rsp), %rax");
                 self.state.emit("    addq $8, %rsp");
-                self.state.emit_fmt(format_args!("    jmp {}", done_label));
-                self.state.emit_fmt(format_args!("{}:", big_label));
+                self.state.out.emit_jmp_label(&done_label);
+                self.state.out.emit_named_label(&big_label);
                 // High bit set: split into halved value + rounding bit, then double
                 self.state.emit("    movq %rax, %rcx");
                 self.state.emit("    shrq $1, %rax");
@@ -303,7 +303,7 @@ impl X86Codegen {
                 self.state.emit("    fstpl (%rsp)");
                 self.state.emit("    movq (%rsp), %rax");
                 self.state.emit("    addq $8, %rsp");
-                self.state.emit_fmt(format_args!("{}:", done_label));
+                self.state.out.emit_named_label(&done_label);
             }
             return;
         }
@@ -342,14 +342,14 @@ impl X86Codegen {
                     self.state.emit("    movq %rcx, (%rsp)");
                     self.state.emit("    fldl (%rsp)");   // ST0 = 2^63, ST1 = value
                     self.state.emit("    fcomip %st(1), %st");  // compare and pop 2^63
-                    self.state.emit_fmt(format_args!("    jbe {}", big_label)); // if 2^63 <= value
+                    self.state.out.emit_jcc_label("    jbe", &big_label); // if 2^63 <= value
                     // Small case: value < 2^63
                     self.state.emit("    fisttpq (%rsp)");
                     self.state.emit("    movq (%rsp), %rax");
                     self.state.emit("    addq $8, %rsp");
-                    self.state.emit_fmt(format_args!("    jmp {}", done_label));
+                    self.state.out.emit_jmp_label(&done_label);
                     // Big case: value >= 2^63
-                    self.state.emit_fmt(format_args!("{}:", big_label));
+                    self.state.out.emit_named_label(&big_label);
                     self.state.emit("    movabsq $4890909195324358656, %rcx");
                     self.state.emit("    movq %rcx, (%rsp)");
                     self.state.emit("    fldl (%rsp)");   // ST0 = 2^63, ST1 = value
@@ -359,7 +359,7 @@ impl X86Codegen {
                     self.state.emit("    addq $8, %rsp");
                     self.state.emit("    movabsq $9223372036854775808, %rcx");
                     self.state.emit("    addq %rcx, %rax");
-                    self.state.emit_fmt(format_args!("{}:", done_label));
+                    self.state.out.emit_named_label(&done_label);
                 } else {
                     // Smaller unsigned types: FISTTP then truncate
                     self.state.emit("    subq $8, %rsp");
@@ -420,15 +420,15 @@ impl X86Codegen {
                         self.state.emit("    movabsq $4890909195324358656, %rcx"); // 2^63 as f64 bits
                         self.state.emit("    movq %rcx, %xmm1");
                         self.state.emit("    ucomisd %xmm1, %xmm0");
-                        self.state.emit_fmt(format_args!("    jae {}", big_label));
+                        self.state.out.emit_jcc_label("    jae", &big_label);
                         self.state.emit("    cvttsd2siq %xmm0, %rax");
-                        self.state.emit_fmt(format_args!("    jmp {}", done_label));
-                        self.state.emit_fmt(format_args!("{}:", big_label));
+                        self.state.out.emit_jmp_label(&done_label);
+                        self.state.out.emit_named_label(&big_label);
                         self.state.emit("    subsd %xmm1, %xmm0");
                         self.state.emit("    cvttsd2siq %xmm0, %rax");
                         self.state.emit("    movabsq $9223372036854775808, %rcx"); // 2^63 as int
                         self.state.emit("    addq %rcx, %rax");
-                        self.state.emit_fmt(format_args!("{}:", done_label));
+                        self.state.out.emit_named_label(&done_label);
                     } else {
                         self.state.emit("    cvttsd2siq %xmm0, %rax");
                     }
@@ -463,14 +463,14 @@ impl X86Codegen {
                     let big_label = self.state.fresh_label("u2f_big");
                     let done_label = self.state.fresh_label("u2f_done");
                     self.state.emit("    testq %rax, %rax");
-                    self.state.emit_fmt(format_args!("    js {}", big_label));
+                    self.state.out.emit_jcc_label("    js", &big_label);
                     if to_f64 {
                         self.state.emit("    cvtsi2sdq %rax, %xmm0");
                     } else {
                         self.state.emit("    cvtsi2ssq %rax, %xmm0");
                     }
-                    self.state.emit_fmt(format_args!("    jmp {}", done_label));
-                    self.state.emit_fmt(format_args!("{}:", big_label));
+                    self.state.out.emit_jmp_label(&done_label);
+                    self.state.out.emit_named_label(&big_label);
                     self.state.emit("    movq %rax, %rcx");
                     self.state.emit("    shrq $1, %rax");
                     self.state.emit("    andq $1, %rcx");
@@ -482,7 +482,7 @@ impl X86Codegen {
                         self.state.emit("    cvtsi2ssq %rax, %xmm0");
                         self.state.emit("    addss %xmm0, %xmm0");
                     }
-                    self.state.emit_fmt(format_args!("{}:", done_label));
+                    self.state.out.emit_named_label(&done_label);
                     if to_f64 {
                         self.state.emit("    movq %xmm0, %rax");
                     } else {
@@ -583,9 +583,9 @@ impl X86Codegen {
                         let lo = u64::from_le_bytes(raw[0..8].try_into().unwrap());
                         let hi = u16::from_le_bytes(raw[8..10].try_into().unwrap());
                         self.state.emit("    subq $16, %rsp");
-                        self.state.emit_fmt(format_args!("    movabsq ${}, %rax", lo as i64));
+                        self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                         self.state.emit("    movq %rax, (%rsp)");
-                        self.state.emit_fmt(format_args!("    movq ${}, %rax", hi as i64));
+                        self.state.out.emit_instr_imm_reg("    movq", hi as i64, "rax");
                         self.state.emit("    movq %rax, 8(%rsp)");
                         self.state.emit("    fldt (%rsp)");
                         self.state.emit("    addq $16, %rsp");
@@ -596,7 +596,7 @@ impl X86Codegen {
                         let f64_val = c.to_f64().unwrap_or(0.0);
                         let bits = f64_val.to_bits();
                         self.state.emit("    subq $8, %rsp");
-                        self.state.emit_fmt(format_args!("    movabsq ${}, %rax", bits as i64));
+                        self.state.out.emit_instr_imm_reg("    movabsq", bits as i64, "rax");
                         self.state.emit("    movq %rax, (%rsp)");
                         self.state.emit("    fldl (%rsp)");
                         self.state.emit("    addq $8, %rsp");
@@ -608,7 +608,7 @@ impl X86Codegen {
                 if self.state.f128_direct_slots.contains(&v.0) {
                     // Full 80-bit x87 precision in the slot; use fldt
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        self.state.emit_fmt(format_args!("    fldt {}(%rbp)", slot.0));
+                        self.state.out.emit_instr_rbp("    fldt", slot.0);
                     } else {
                         // Fallback: load f64 from rax
                         self.operand_to_rax(operand);
@@ -620,10 +620,10 @@ impl X86Codegen {
                 } else if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
                         // Alloca containing a long double; use fldt from alloca
-                        self.state.emit_fmt(format_args!("    fldt {}(%rbp)", slot.0));
+                        self.state.out.emit_instr_rbp("    fldt", slot.0);
                     } else {
                         // Regular f64 value in slot; push and fldl
-                        self.state.emit_fmt(format_args!("    movq {}(%rbp), %rax", slot.0));
+                        self.state.out.emit_instr_rbp_reg("    movq", slot.0, "rax");
                         self.state.emit("    subq $8, %rsp");
                         self.state.emit("    movq %rax, (%rsp)");
                         self.state.emit("    fldl (%rsp)");

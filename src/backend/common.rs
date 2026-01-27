@@ -344,6 +344,122 @@ impl AsmOutput {
         write_u64_fast(&mut self.buf, val);
     }
 
+    /// Emit: `    {mnemonic} {offset}(%rbp)` (single rbp-offset operand, e.g. fldt/fstpt)
+    #[inline]
+    pub fn emit_instr_rbp(&mut self, mnemonic: &str, offset: i64) {
+        self.buf.push_str(mnemonic);
+        self.buf.push(' ');
+        write_i64_fast(&mut self.buf, offset);
+        self.buf.push_str("(%rbp)");
+        self.buf.push('\n');
+    }
+
+    /// Emit a named label definition: `{label}:`
+    #[inline]
+    pub fn emit_named_label(&mut self, label: &str) {
+        self.buf.push_str(label);
+        self.buf.push(':');
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    jmp {label}` (jump to named label)
+    #[inline]
+    pub fn emit_jmp_label(&mut self, label: &str) {
+        self.buf.push_str("    jmp ");
+        self.buf.push_str(label);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {jcc} {label}` (conditional jump to named label)
+    #[inline]
+    pub fn emit_jcc_label(&mut self, jcc: &str, label: &str) {
+        self.buf.push_str(jcc);
+        self.buf.push(' ');
+        self.buf.push_str(label);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    call {target}` (direct call to named function/label)
+    #[inline]
+    pub fn emit_call(&mut self, target: &str) {
+        self.buf.push_str("    call ");
+        self.buf.push_str(target);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} {offset}(%{base}), %{reg}` (memory to register with arbitrary base)
+    #[inline]
+    pub fn emit_instr_mem_reg(&mut self, mnemonic: &str, offset: i64, base: &str, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push(' ');
+        if offset != 0 {
+            write_i64_fast(&mut self.buf, offset);
+        }
+        self.buf.push_str("(%");
+        self.buf.push_str(base);
+        self.buf.push_str("), %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} %{reg}, {offset}(%{base})` (register to memory with arbitrary base)
+    #[inline]
+    pub fn emit_instr_reg_mem(&mut self, mnemonic: &str, reg: &str, offset: i64, base: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" %");
+        self.buf.push_str(reg);
+        self.buf.push_str(", ");
+        if offset != 0 {
+            write_i64_fast(&mut self.buf, offset);
+        }
+        self.buf.push_str("(%");
+        self.buf.push_str(base);
+        self.buf.push(')');
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} ${imm}, {offset}(%{base})` (immediate to memory with arbitrary base)
+    #[inline]
+    pub fn emit_instr_imm_mem(&mut self, mnemonic: &str, imm: i64, offset: i64, base: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" $");
+        write_i64_fast(&mut self.buf, imm);
+        self.buf.push_str(", ");
+        if offset != 0 {
+            write_i64_fast(&mut self.buf, offset);
+        }
+        self.buf.push_str("(%");
+        self.buf.push_str(base);
+        self.buf.push(')');
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} {symbol}(%{base}), %{reg}` (symbol-relative addressing)
+    /// Used for RIP-relative loads like `leaq table_label(%rip), %rcx`.
+    #[inline]
+    pub fn emit_instr_sym_base_reg(&mut self, mnemonic: &str, symbol: &str, base: &str, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push(' ');
+        self.buf.push_str(symbol);
+        self.buf.push_str("(%");
+        self.buf.push_str(base);
+        self.buf.push_str("), %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
+    /// Emit: `    {mnemonic} ${symbol}, %{reg}` (symbol as immediate)
+    /// Used for absolute symbol addressing like `movq $name, %rax`.
+    #[inline]
+    pub fn emit_instr_sym_imm_reg(&mut self, mnemonic: &str, symbol: &str, reg: &str) {
+        self.buf.push_str(mnemonic);
+        self.buf.push_str(" $");
+        self.buf.push_str(symbol);
+        self.buf.push_str(", %");
+        self.buf.push_str(reg);
+        self.buf.push('\n');
+    }
+
     /// Push a string slice without newline.
     #[inline]
     pub fn write_str(&mut self, s: &str) {
