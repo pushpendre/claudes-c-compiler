@@ -7,4 +7,4 @@ Clean up passes/simplify.rs: reduce duplication and code bloat
 - Normalize commutative patterns (mul power-of-2, cmp with zero)
 - Target: reduce from ~2039 lines to ~1400-1500 lines
 
-Status: in progress
+Status: completed
