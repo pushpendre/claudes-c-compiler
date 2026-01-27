@@ -1,0 +1,18 @@
+Task: Fix RISC-V codegen for large stack offsets (>2047 bytes)
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+RISC-V load/store instructions have 12-bit signed immediate offsets (-2048 to +2047).
+When struct members or stack frames exceed 2048 bytes, the codegen generates invalid
+instructions like `ld t0, 2048(t1)` which fail assembly.
+
+Tests affected:
+- compiler_suite_0010_0023 (struct with int m[1003] = 4012 bytes)
+- compiler_suite_0011_0094 (struct with long int t1_lia1[1500] = 12000 bytes)
+- compiler_suite_0129_0027 (struct with large members)
+
+Fix approach:
+When generating RISC-V load/store instructions with offsets that exceed the 12-bit
+signed range, split the offset: compute the base + large offset in a temp register,
+then use a zero or small offset for the actual load/store instruction.
