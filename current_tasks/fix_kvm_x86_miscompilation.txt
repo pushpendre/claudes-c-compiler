@@ -1,0 +1,7 @@
+Task: Fix x86 kernel miscompilation in arch/x86/kernel/kvm.c
+
+The delta debugging tool identified that arch/x86/kernel/kvm.c compiled with
+our compiler causes a boot failure. Investigating the miscompilation to find
+and fix the underlying compiler bug.
+
+Status: in_progress
