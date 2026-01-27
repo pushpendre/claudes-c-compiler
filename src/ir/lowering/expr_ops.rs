@@ -393,6 +393,30 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     pub(super) fn lower_conditional(&mut self, cond: &Expr, then_expr: &Expr, else_expr: &Expr) -> Operand {
+        // Constant-fold the condition at lowering time. If the condition is a
+        // compile-time constant (e.g., sizeof(x)==4, __builtin_constant_p(v)),
+        // skip generating code for the dead branch entirely. This is critical
+        // for kernel patterns like hweight_long() where __builtin_constant_p
+        // and sizeof checks gate large macro expansions — without folding, the
+        // dead branches bloat the IR beyond inlining limits and cause linker
+        // errors when always_inline functions can't be inlined.
+        if let Some(const_val) = self.eval_const_expr(cond) {
+            let is_true = const_val.is_nonzero();
+            if is_true {
+                let then_ty = if self.expr_is_pointer(then_expr) { IrType::I64 } else { self.get_expr_type(then_expr) };
+                let else_ty = if self.expr_is_pointer(else_expr) { IrType::I64 } else { self.get_expr_type(else_expr) };
+                let common_ty = Self::common_type(then_ty, else_ty);
+                let then_val = self.lower_expr(then_expr);
+                return self.emit_implicit_cast(then_val, then_ty, common_ty);
+            } else {
+                let then_ty = if self.expr_is_pointer(then_expr) { IrType::I64 } else { self.get_expr_type(then_expr) };
+                let else_ty = if self.expr_is_pointer(else_expr) { IrType::I64 } else { self.get_expr_type(else_expr) };
+                let common_ty = Self::common_type(then_ty, else_ty);
+                let else_val = self.lower_expr(else_expr);
+                return self.emit_implicit_cast(else_val, else_ty, common_ty);
+            }
+        }
+
         let cond_val = self.lower_condition_expr(cond);
 
         let mut then_ty = self.get_expr_type(then_expr);

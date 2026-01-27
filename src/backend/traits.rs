@@ -295,7 +295,7 @@ pub trait ArchCodegen {
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a unary operation.
-    /// Default dispatches i128/float/int to arch-specific primitives.
+    /// Default dispatches i128 → F128 neg → float → int to arch-specific primitives.
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
         if is_i128_type(ty) {
             self.emit_load_acc_pair(src);
@@ -305,6 +305,14 @@ pub trait ArchCodegen {
                 _ => {}
             }
             self.emit_store_acc_pair(dest);
+            return;
+        }
+        // F128 negation needs special handling: the f64 approximation in the
+        // accumulator doesn't capture the full 128-bit precision. Dispatch to
+        // emit_f128_neg which handles loading, negation, full-precision slot
+        // storage, and store_result internally.
+        if ty == IrType::F128 && op == IrUnaryOp::Neg {
+            self.emit_f128_neg(dest, src);
             return;
         }
         self.emit_load_operand(src);
@@ -848,6 +856,20 @@ pub trait ArchCodegen {
     // --- Unary operation primitives ---
 
     fn emit_float_neg(&mut self, ty: IrType);
+    /// Negate an F128 (long double) value with full precision.
+    /// This method must handle loading, negation, and storing the result
+    /// (including emit_store_result). It is NOT followed by emit_store_result
+    /// in the caller.
+    /// Default falls back to emit_float_neg + emit_store_result, which only
+    /// operates on the f64 approximation. ARM and RISC-V override this to flip
+    /// the IEEE 754 sign bit of the full 128-bit representation.
+    fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) {
+        // Default: use the f64-based emit_float_neg (loses precision on non-x86).
+        // ARM and RISC-V override this with full-precision implementations.
+        self.emit_load_operand(src);
+        self.emit_float_neg(IrType::F128);
+        self.emit_store_result(dest);
+    }
     fn emit_int_neg(&mut self, ty: IrType);
     fn emit_int_not(&mut self, ty: IrType);
     fn emit_int_clz(&mut self, ty: IrType);
@@ -1409,7 +1431,8 @@ pub fn emit_cast_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, src
     cg.emit_store_result(dest);
 }
 
-/// Default unary operation implementation: dispatches i128/float/int to arch-specific primitives.
+/// Default unary operation implementation: dispatches i128 → F128 neg → float → int
+/// to arch-specific primitives.
 /// Backends that override `emit_unaryop` should call this for types they don't handle specially.
 pub fn emit_unaryop_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
     if is_i128_type(ty) {
@@ -1420,6 +1443,10 @@ pub fn emit_unaryop_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, 
             _ => {}
         }
         cg.emit_store_acc_pair(dest);
+        return;
+    }
+    if ty == IrType::F128 && op == IrUnaryOp::Neg {
+        cg.emit_f128_neg(dest, src);
         return;
     }
     cg.emit_load_operand(src);

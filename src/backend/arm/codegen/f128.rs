@@ -317,4 +317,34 @@ impl ArmCodegen {
         self.store_x0_to(dest);
     }
 
+    /// Negate an F128 value with full precision by flipping the IEEE 754 sign bit.
+    /// Loads the full 128-bit value into Q0, XORs bit 127 (sign bit), stores the
+    /// full f128 result back to dest's slot, and produces an f64 approximation in x0.
+    /// This method handles its own store_result (caller must NOT call emit_store_result).
+    pub(super) fn emit_f128_neg_full(&mut self, dest: &Value, src: &Operand) {
+        // Step 1: Load full-precision f128 into Q0.
+        self.emit_f128_operand_to_q0_full(src);
+        // Step 2: Flip the sign bit (bit 127 = MSB of high 64-bit lane).
+        // Extract high 64 bits, XOR with sign bit mask, reinsert.
+        self.state.emit("    mov x0, v0.d[1]");
+        self.state.emit("    eor x0, x0, #0x8000000000000000");
+        self.state.emit("    mov v0.d[1], x0");
+        // Step 3: Store full f128 result to dest slot (if available) so that
+        // subsequent reads preserve full precision.
+        if let Some(dest_slot) = self.state.get_slot(dest.0) {
+            self.emit_f128_store_q0_to_slot(dest_slot);
+            // Track dest as having full f128 data for subsequent operations.
+            self.f128_load_sources.insert(dest.0, (dest.0, 0, false));
+        }
+        // Step 4: Convert full f128 result to f64 approximation in x0.
+        // This is needed for the register-based data flow (x0 = accumulator).
+        self.state.emit("    bl __trunctfdf2");
+        self.state.emit("    fmov x0, d0");
+        // Invalidate all cached register state (bl clobbers caller-saved regs),
+        // then mark accumulator as holding dest's f64 approximation without
+        // writing back to the slot (which would overwrite the full f128).
+        self.state.reg_cache.invalidate_all();
+        self.state.reg_cache.set_acc(dest.0, false);
+    }
+
 }

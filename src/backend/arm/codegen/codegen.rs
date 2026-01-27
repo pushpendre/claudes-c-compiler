@@ -1953,6 +1953,10 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
+    fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) {
+        self.emit_f128_neg_full(dest, src);
+    }
+
     fn emit_int_neg(&mut self, _ty: IrType) {
         self.state.emit("    neg x0, x0");
     }

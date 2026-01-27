@@ -297,4 +297,34 @@ impl RiscvCodegen {
         self.state.emit("    fmv.x.d t0, fa0");
         self.state.reg_cache.invalidate_all();
     }
+
+    /// Negate an F128 value with full precision by flipping the IEEE 754 sign bit.
+    /// Loads the full 128-bit value into a0:a1, XORs bit 63 of a1 (which is
+    /// bit 127 of the IEEE 754 binary128 representation), stores the full f128
+    /// result back to dest's slot, then converts to an f64 approximation in t0.
+    pub(super) fn emit_f128_neg_full(&mut self, dest: &Value, src: &Operand) {
+        // Step 1: Load full-precision f128 into a0:a1.
+        self.emit_f128_operand_to_a0_a1(src);
+        // Step 2: Flip the sign bit (bit 127 = bit 63 of a1, the high word).
+        // Use li + xor since RISC-V andi/xori only supports 12-bit immediates.
+        self.state.emit("    li t0, 1");
+        self.state.emit("    slli t0, t0, 63");
+        self.state.emit("    xor a1, a1, t0");
+        // Step 3: Store full f128 result to dest slot (if available) so that
+        // subsequent reads preserve full precision.
+        if let Some(dest_slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_s0("a0", dest_slot.0, "sd");
+            self.emit_store_to_s0("a1", dest_slot.0 + 8, "sd");
+            // Track dest as having full f128 data.
+            self.f128_load_sources.insert(dest.0, (dest.0, 0, false));
+        }
+        // Step 4: Convert full f128 result (a0:a1) to f64 approximation in t0.
+        self.state.emit("    call __trunctfdf2");
+        self.state.emit("    fmv.x.d t0, fa0");
+        // Invalidate all cached register state (call clobbers caller-saved regs),
+        // then mark accumulator as holding dest's f64 approximation without
+        // writing back to the slot (which would overwrite the full f128).
+        self.state.reg_cache.invalidate_all();
+        self.state.reg_cache.set_acc(dest.0, false);
+    }
 }

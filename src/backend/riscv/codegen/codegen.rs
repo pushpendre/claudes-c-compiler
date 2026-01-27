@@ -1484,7 +1484,7 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_float_neg(&mut self, ty: IrType) {
-        if ty == IrType::F64 || ty == IrType::F128 {
+        if ty == IrType::F64 {
             self.state.emit("    fmv.d.x ft0, t0");
             self.state.emit("    fneg.d ft0, ft0");
             self.state.emit("    fmv.x.d t0, ft0");
@@ -1493,6 +1493,10 @@ impl ArchCodegen for RiscvCodegen {
             self.state.emit("    fneg.s ft0, ft0");
             self.state.emit("    fmv.x.w t0, ft0");
         }
+    }
+
+    fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) {
+        self.emit_f128_neg_full(dest, src);
     }
 
     fn emit_int_neg(&mut self, _ty: IrType) {
