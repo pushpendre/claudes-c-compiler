@@ -1,0 +1,20 @@
+Task: Fix ARM inline asm immediate operand substitution
+
+The ARM backend's inline asm template substitution doesn't handle "i" (immediate)
+constraint operands. When %[name] references an immediate operand, the ARM backend
+only looks at the register name (which is empty for immediates), resulting in empty
+substitution.
+
+This causes the kernel's alternative_has_cap_unlikely() asm goto to emit:
+    .hword
+instead of:
+    .hword 31
+
+The empty .hword emits 0 bytes, corrupting the .altinstructions section layout
+and causing boot failures on ARM.
+
+Fix: Update substitute_asm_operands_static() and substitute_template_line() in the
+ARM backend to pass and handle imm_value/imm_symbol for immediate operands, similar
+to how x86 and RISC-V backends already handle them.
+
+Status: in_progress

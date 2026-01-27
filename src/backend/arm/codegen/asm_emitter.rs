@@ -6,7 +6,7 @@ use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand};
 use crate::backend::regalloc::PhysReg;
-use super::codegen::ArmCodegen;
+use super::codegen::{ArmCodegen, is_arm_fp_reg};
 
 /// AArch64 scratch registers for inline asm (caller-saved temporaries).
 pub(super) const ARM_GP_SCRATCH: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];
@@ -135,7 +135,8 @@ impl InlineAsmEmitter for ArmCodegen {
 
     fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, _constraint: &str) {
         let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
+        let is_fp = is_arm_fp_reg(reg);
+        let is_sp = reg == "sp";
         match val {
             Operand::Const(c) => {
                 if is_fp {
@@ -149,6 +150,11 @@ impl InlineAsmEmitter for ArmCodegen {
                     } else {
                         self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
                     }
+                } else if is_sp {
+                    // ARM64: can't use ldr/mov imm to sp directly in most cases.
+                    // Load to scratch first, then mov to sp.
+                    self.emit_load_imm64("x9", c.to_i64().unwrap_or(0));
+                    self.state.emit("    mov sp, x9");
                 } else {
                     self.emit_load_imm64(reg, c.to_i64().unwrap_or(0));
                 }
@@ -165,6 +171,11 @@ impl InlineAsmEmitter for ArmCodegen {
                             self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
                             self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
                         }
+                    } else if is_sp {
+                        // ARM64: can't use ldr to load directly into sp.
+                        // Load to scratch first, then mov to sp.
+                        self.emit_load_from_sp("x9", slot.0, "ldr");
+                        self.state.emit("    mov sp, x9");
                     } else if self.state.is_alloca(v.0) {
                         // Alloca: the stack slot IS the variable's memory;
                         // compute its address instead of loading from it.
@@ -179,7 +190,7 @@ impl InlineAsmEmitter for ArmCodegen {
 
     fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
         let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
+        let is_fp = is_arm_fp_reg(reg);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_fp {
                 // Load current FP value for read-write constraint
@@ -191,6 +202,10 @@ impl InlineAsmEmitter for ArmCodegen {
                     self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
                     self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
                 }
+            } else if reg == "sp" {
+                // ARM64: can't use ldr to load directly into sp.
+                self.emit_load_from_sp("x9", slot.0, "ldr");
+                self.state.emit("    mov sp, x9");
             } else {
                 self.emit_load_from_sp(reg, slot.0, "ldr");
             }
@@ -233,7 +248,7 @@ impl InlineAsmEmitter for ArmCodegen {
             return;
         }
         let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
+        let is_fp = is_arm_fp_reg(reg);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_fp {
                 // Store FP register output: fmov to GP reg, then store to stack
@@ -245,6 +260,11 @@ impl InlineAsmEmitter for ArmCodegen {
                     self.state.emit_fmt(format_args!("    fmov x9, {}", reg));
                     self.state.emit_fmt(format_args!("    str x9, [sp, #{}]", slot.0));
                 }
+            } else if reg == "sp" {
+                // ARM64: sp (register 31) can't be used as str source operand directly.
+                // Move to a scratch register first, then store.
+                self.state.emit("    mov x9, sp");
+                self.emit_store_to_sp("x9", slot.0, "str");
             } else if self.state.is_alloca(ptr.0) {
                 self.emit_store_to_sp(reg, slot.0, "str");
             } else {

@@ -35,6 +35,16 @@ fn callee_saved_name_32(reg: PhysReg) -> &'static str {
     }
 }
 
+/// Check if a register name is an AArch64 floating-point/SIMD register (s0-s31, d0-d31).
+/// This avoids false positives for "sp" (stack pointer) which starts with 's'.
+pub(super) fn is_arm_fp_reg(reg: &str) -> bool {
+    if let Some(suffix) = reg.strip_prefix('d').or_else(|| reg.strip_prefix('s')) {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
 /// Map IrBinOp to AArch64 mnemonic for simple ALU ops.
 fn arm_alu_mnemonic(op: IrBinOp) -> &'static str {
     match op {
