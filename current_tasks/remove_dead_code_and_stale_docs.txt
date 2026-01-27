@@ -1,0 +1,31 @@
+Task: Remove dead code, unused functions, and clean up stale documentation
+Status: in_progress
+Started: 2026-01-27
+
+Plan:
+1. Remove 6 functions marked #[allow(dead_code)] that are never called:
+   - long_double.rs: div_u32, has_bits_below
+   - arm/codegen.rs: emit_store_to_reg
+   - x86/peephole/passes.rs: reg_family_patterns, line_references_reg
+   - x86/peephole/types.rs: LineStore::is_empty
+2. Remove genuinely unused public functions:
+   - types.rs: is_ptr_to_function_pointer
+   - symbol_table.rs: lookup_current_scope
+3. Deduplicate f128_const_halves between ARM and RISC-V backends
+4. Narrow overly-public function visibility in const_arith.rs and type_builder.rs
+5. Clean up stale/outdated ideas files (register_allocator.txt done items, etc.)
+6. Clean up redundant completed_tasks entries
+
+Files affected:
+- src/common/long_double.rs
+- src/common/types.rs
+- src/common/symbol_table.rs
+- src/common/const_arith.rs
+- src/common/type_builder.rs
+- src/backend/arm/codegen/codegen.rs
+- src/backend/arm/codegen/f128.rs
+- src/backend/riscv/codegen/f128.rs
+- src/backend/x86/codegen/peephole/passes.rs
+- src/backend/x86/codegen/peephole/types.rs
+- ideas/*.txt
+- completed_tasks/*.txt
