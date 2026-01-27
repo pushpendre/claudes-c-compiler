@@ -1259,6 +1259,26 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                 // Use cached has_indirect_mem flag instead of re-scanning the line.
                 if infos[i].has_indirect_mem {
                     invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
+                } else {
+                    // Instructions like inline asm (e.g. `movntiq %rcx, -8(%rbp)`)
+                    // may write to a stack slot via %rbp without being classified as
+                    // StoreRbp. If the line has a known rbp_offset, conservatively
+                    // invalidate any slot mapping at that offset so we don't forward
+                    // a stale register value through a subsequent load.
+                    let rbp_off = infos[i].rbp_offset;
+                    if rbp_off != RBP_OFFSET_NONE {
+                        for entry in slot_entries.iter_mut().filter(|e| e.active) {
+                            // We don't know the access size for Other instructions,
+                            // so conservatively check if this offset falls anywhere
+                            // in the mapped slot's byte range.
+                            let e_bytes = entry.mapping.size.byte_size();
+                            if ranges_overlap(rbp_off, 1, entry.offset, e_bytes) {
+                                let old_reg = entry.mapping.reg_id;
+                                entry.active = false;
+                                reg_offsets[old_reg as usize].remove_val(entry.offset);
+                            }
+                        }
+                    }
                 }
                 // Unrecognized instructions (e.g. inline asm) that reference a
                 // %rbp-relative slot may write to it.  Invalidate any mapping

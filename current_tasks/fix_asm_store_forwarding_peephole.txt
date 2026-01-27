@@ -8,4 +8,4 @@ mappings, not memory slot mappings. This caused subsequent loads from the same s
 to be incorrectly eliminated, reading a stale register value instead of the value
 written by the inline asm.
 
-Status: in_progress
+Status: completed
