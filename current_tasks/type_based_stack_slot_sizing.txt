@@ -1,0 +1,25 @@
+Type-Based Stack Slot Sizing
+============================
+Status: in_progress
+Started: 2026-01-27
+
+Goal: Reduce stack frame sizes by using 4-byte stack slots for i32/u32 values
+instead of the current 8-byte slots for all non-i128 values.
+
+Approach:
+1. Track value result types in CodegenState (value_types map)
+2. During stack layout, assign 4-byte slots for sub-8-byte values
+3. Update store_rax_to / operand_to_rax in all 3 backends to use
+   appropriately-sized move instructions (movl for 4-byte slots)
+
+Expected impact:
+- ~40% reduction in stack frame size for integer-heavy functions
+- Should fix PostgreSQL plpgsql recursion test (stack depth exceeded)
+- Improves cache utilization for recursive functions
+
+Files to modify:
+- src/backend/state.rs (add value_types field)
+- src/backend/stack_layout.rs (type-based slot sizing)
+- src/backend/x86/codegen/codegen.rs (store_rax_to, operand_to_rax)
+- src/backend/arm/codegen/codegen.rs (emit_store_result, operand loads)
+- src/backend/riscv/codegen/codegen.rs (emit_store_result, operand loads)
