@@ -1,0 +1,9 @@
+Fix: kernel code model store GEP fold missing register-assigned base handling
+
+The kernel code model store path only folded GEP offsets for alloca bases,
+but the GEP skip logic also skips GEPs with register-assigned bases.
+This caused stores through non-alloca GEP results to use uninitialized
+registers, corrupting memory (e.g., INIT_LIST_HEAD writing to garbage).
+
+Fix: add || cg.get_phys_reg_for_value() check to the kernel store path,
+matching the non-kernel store path and the load path.
