@@ -32,7 +32,7 @@ use crate::ir::ir::{Instruction, IrModule, IrFunction, GlobalInit, Operand, Valu
 /// 3. Algebraic simplification (strength reduction)
 /// 4. Constant folding (evaluate const exprs at compile time)
 /// 5. GVN / CSE (dominator-based value numbering, eliminates redundant
-///    BinOp, UnaryOp, Cmp, Cast, and GetElementPtr across all dominated blocks)
+///    BinOp, UnaryOp, Cmp, Cast, GetElementPtr, and Load across dominated blocks)
 /// 6. LICM (hoist loop-invariant code to preheaders)
 /// 7. If-conversion (convert branch+phi diamonds to Select)
 /// 8. Copy propagation (clean up copies from GVN/simplify/LICM)

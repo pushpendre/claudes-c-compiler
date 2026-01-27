@@ -14,9 +14,11 @@
 //! - Cmp
 //! - Cast (type-to-type conversions)
 //! - GetElementPtr (base + offset address computation)
+//! - Load (redundant load elimination within dominator scope, invalidated
+//!   by stores, calls, and other memory-clobbering instructions)
 
 use crate::common::fx_hash::FxHashMap;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use crate::ir::ir::*;
 use crate::ir::analysis;
 
@@ -29,6 +31,16 @@ enum ExprKey {
     Cmp { op: IrCmpOp, lhs: VNOperand, rhs: VNOperand },
     Cast { src: VNOperand, from_ty: IrType, to_ty: IrType },
     Gep { base: VNOperand, offset: VNOperand, ty: IrType },
+    /// Load CSE key: two loads from the same pointer with the same type
+    /// produce the same value if no intervening memory modification occurs.
+    Load { ptr: VNOperand, ty: IrType },
+}
+
+/// Returns true if the ExprKey represents a Load (memory-dependent expression).
+impl ExprKey {
+    fn is_load(&self) -> bool {
+        matches!(self, ExprKey::Load { .. })
+    }
 }
 
 /// A value-numbered operand: either a constant or a value number.
@@ -68,6 +80,8 @@ fn run_gvn_function(func: &mut IrFunction) -> usize {
     let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
     // Track value_numbers slots assigned, for rollback
     let mut vn_log: Vec<(usize, u32)> = Vec::new();
+    // Track Load CSE entries for cross-block propagation with invalidation.
+    let mut load_keys: Vec<ExprKey> = Vec::new();
 
     let mut total_eliminated = 0;
 
@@ -76,11 +90,13 @@ fn run_gvn_function(func: &mut IrFunction) -> usize {
         0, // start from entry block
         func,
         &dom_children,
+        &preds,
         &mut value_numbers,
         &mut next_vn,
         &mut expr_to_value,
         &mut rollback_log,
         &mut vn_log,
+        &mut load_keys,
         &mut total_eliminated,
     );
 
@@ -94,16 +110,57 @@ fn gvn_dfs(
     block_idx: usize,
     func: &mut IrFunction,
     dom_children: &[Vec<usize>],
+    preds: &[Vec<usize>],
     value_numbers: &mut Vec<u32>,
     next_vn: &mut u32,
     expr_to_value: &mut FxHashMap<ExprKey, Value>,
     rollback_log: &mut Vec<(ExprKey, Option<Value>)>,
     vn_log: &mut Vec<(usize, u32)>,
+    load_keys: &mut Vec<ExprKey>,
     total_eliminated: &mut usize,
 ) {
     // Save state for rollback
     let rollback_start = rollback_log.len();
     let vn_log_start = vn_log.len();
+    let load_keys_start = load_keys.len();
+
+    // At block entry, decide whether to invalidate inherited Load CSE entries.
+    // Load CSE across blocks is safe when:
+    // 1. This block has exactly one CFG predecessor (straight-line code), OR
+    // 2. This block has multiple predecessors BUT all non-dominator predecessors
+    //    are free of memory-clobbering instructions.
+    //
+    // Conservative approach: invalidate all Load entries when entering a block
+    // that has any CFG predecessor containing memory-clobbering instructions
+    // (other than the immediate dominator path we came from). This handles
+    // diamond CFGs where one branch stores and the other doesn't.
+    //
+    // For the entry block (block_idx == 0), no inherited entries to worry about.
+    if block_idx != 0 {
+        let block_preds = &preds[block_idx];
+        let should_invalidate = if block_preds.len() <= 1 {
+            // Single predecessor: safe (all paths go through the dominator).
+            // But check if the dominator itself clobbered - that's handled by
+            // the within-block invalidation in process_block.
+            false
+        } else {
+            // Multiple predecessors (merge point): conservatively invalidate
+            // Load entries. A non-dominating predecessor may have stored to
+            // memory, making cached loads stale.
+            true
+        };
+
+        if should_invalidate {
+            // Remove all Load entries from expr_to_value.
+            // Don't clear load_keys - entries are a log for rollback. Stale
+            // entries (pointing to keys no longer in expr_to_value) are harmless.
+            for key in load_keys.iter() {
+                if let Some(old_val) = expr_to_value.remove(key) {
+                    rollback_log.push((key.clone(), Some(old_val)));
+                }
+            }
+        }
+    }
 
     // Process instructions in this block
     let eliminated = process_block(
@@ -114,6 +171,7 @@ fn gvn_dfs(
         expr_to_value,
         rollback_log,
         vn_log,
+        load_keys,
     );
     *total_eliminated += eliminated;
 
@@ -124,11 +182,13 @@ fn gvn_dfs(
             child,
             func,
             dom_children,
+            preds,
             value_numbers,
             next_vn,
             expr_to_value,
             rollback_log,
             vn_log,
+            load_keys,
             total_eliminated,
         );
     }
@@ -148,10 +208,39 @@ fn gvn_dfs(
         let (idx, old_vn) = vn_log.pop().unwrap();
         value_numbers[idx] = old_vn;
     }
+
+    // Rollback: restore load_keys to state before this block
+    load_keys.truncate(load_keys_start);
+}
+
+/// Check if an instruction may modify memory, invalidating cached load values.
+/// This is conservative: any instruction that could write to memory or call
+/// external code (which could write to memory) returns true.
+fn clobbers_memory(inst: &Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::Store { .. }
+            | Instruction::Call { .. }
+            | Instruction::CallIndirect { .. }
+            | Instruction::Memcpy { .. }
+            | Instruction::AtomicRmw { .. }
+            | Instruction::AtomicCmpxchg { .. }
+            | Instruction::AtomicStore { .. }
+            | Instruction::Fence { .. }
+            | Instruction::InlineAsm { .. }
+            | Instruction::VaStart { .. }
+            | Instruction::VaEnd { .. }
+            | Instruction::VaCopy { .. }
+    )
 }
 
 /// Process a single basic block for GVN.
 /// Returns the number of instructions eliminated.
+///
+/// Load CSE entries are stored in `expr_to_value` alongside pure CSE entries,
+/// and tracked in `load_keys` for selective invalidation. Cross-block Load CSE
+/// propagation is controlled by `gvn_dfs` which invalidates Load entries at
+/// merge points (blocks with multiple CFG predecessors).
 fn process_block(
     block_idx: usize,
     func: &mut IrFunction,
@@ -160,21 +249,34 @@ fn process_block(
     expr_to_value: &mut FxHashMap<ExprKey, Value>,
     rollback_log: &mut Vec<(ExprKey, Option<Value>)>,
     vn_log: &mut Vec<(usize, u32)>,
+    load_keys: &mut Vec<ExprKey>,
 ) -> usize {
     let mut eliminated = 0;
     let mut new_instructions = Vec::with_capacity(func.blocks[block_idx].instructions.len());
 
     for inst in func.blocks[block_idx].instructions.drain(..) {
+        // Before processing the instruction, check if it clobbers memory.
+        // If so, invalidate all cached Load CSE entries since the memory
+        // state has changed and previously loaded values may be stale.
+        // Note: we iterate load_keys without draining it because the entries
+        // serve as a log for rollback. Stale entries (pointing to keys no
+        // longer in expr_to_value) are harmless - subsequent removes are no-ops.
+        if clobbers_memory(&inst) {
+            for key in load_keys.iter() {
+                if let Some(old_val) = expr_to_value.remove(key) {
+                    rollback_log.push((key.clone(), Some(old_val)));
+                }
+            }
+        }
+
         match make_expr_key(&inst, value_numbers, next_vn, vn_log) {
             Some((expr_key, dest)) => {
                 if let Some(&existing_value) = expr_to_value.get(&expr_key) {
-                    // This expression was already computed in a dominating block/instruction
+                    // This expression was already computed
                     let idx = existing_value.0 as usize;
                     let existing_vn = if idx < value_numbers.len() && value_numbers[idx] != u32::MAX {
                         value_numbers[idx]
                     } else {
-                        // Existing value has no VN -- should not happen since we
-                        // assigned one when we first recorded it, but be safe.
                         let vn = *next_vn;
                         *next_vn += 1;
                         vn
@@ -201,8 +303,13 @@ fn process_block(
                         value_numbers[dest_idx] = vn;
                     }
                     // Record in expr_to_value with rollback
+                    let is_load = expr_key.is_load();
                     let old_val = expr_to_value.insert(expr_key.clone(), dest);
-                    rollback_log.push((expr_key, old_val));
+                    rollback_log.push((expr_key.clone(), old_val));
+                    // Track load keys for memory invalidation
+                    if is_load {
+                        load_keys.push(expr_key);
+                    }
                     new_instructions.push(inst);
                 }
             }
@@ -272,7 +379,29 @@ fn make_expr_key(
             let offset_vn = operand_to_vn(offset, value_numbers, next_vn, vn_log);
             Some((ExprKey::Gep { base: base_vn, offset: offset_vn, ty: *ty }, *dest))
         }
-        // Other instructions are not eligible for value numbering
+        // Load CSE: two loads from the same pointer with the same type can be
+        // CSE'd if no intervening memory modification occurred. The caller
+        // (process_block) handles invalidating Load entries on memory clobbers.
+        //
+        // Excluded from CSE:
+        // - Segment-overridden loads: access thread-local or CPU-local storage
+        //   that may differ between accesses even without visible stores
+        // - Float, long double, i128 types: use different register paths in
+        //   codegen that complicate Copy instruction handling
+        // - AtomicLoad: has ordering semantics (falls through to _ => None)
+        Instruction::Load { dest, ptr, ty, seg_override } => {
+            if *seg_override != AddressSpace::Default {
+                return None;
+            }
+            if ty.is_float() || ty.is_long_double() || ty.is_128bit() {
+                return None;
+            }
+            let ptr_vn = operand_to_vn(&Operand::Value(*ptr), value_numbers, next_vn, vn_log);
+            Some((ExprKey::Load { ptr: ptr_vn, ty: *ty }, *dest))
+        }
+        // Other instructions (Store, Call, AtomicLoad, etc.) are not eligible.
+        // AtomicLoad is excluded because it has memory ordering semantics that
+        // require the load to actually execute.
         _ => None,
     }
 }
@@ -827,6 +956,264 @@ mod tests {
         assert!(matches!(
             &module.functions[0].blocks[2].instructions[0],
             Instruction::BinOp { op: IrBinOp::Add, .. }
+        ));
+    }
+
+    /// Helper to create a minimal IrFunction with given blocks.
+    fn make_func(blocks: Vec<BasicBlock>, next_value_id: u32) -> IrFunction {
+        IrFunction {
+            name: "test".to_string(),
+            params: vec![],
+            return_type: IrType::I32,
+            blocks,
+            is_variadic: false,
+            is_static: false,
+            is_inline: false,
+            is_always_inline: false,
+            is_noinline: false,
+            is_declaration: false,
+            stack_size: 0,
+            next_value_id,
+            section: None,
+            visibility: None,
+            is_weak: false,
+            has_inlined_calls: false,
+            param_alloca_values: Vec::new(),
+        }
+    }
+
+    fn make_module(func: IrFunction) -> IrModule {
+        IrModule {
+            functions: vec![func],
+            globals: vec![],
+            string_literals: vec![],
+            wide_string_literals: vec![],
+            constructors: vec![],
+            destructors: vec![],
+            aliases: vec![],
+            toplevel_asm: vec![],
+            symbol_attrs: vec![],
+            char16_string_literals: vec![],
+        }
+    }
+
+    #[test]
+    fn test_load_cse_same_block() {
+        // Two loads from the same pointer in the same block should be CSE'd
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(2),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+        }], 3);
+
+        let mut module = make_module(func);
+        let eliminated = run(&mut module);
+        assert_eq!(eliminated, 1);
+
+        // Second load should be replaced with Copy
+        match &module.functions[0].blocks[0].instructions[1] {
+            Instruction::Copy { dest, src: Operand::Value(v) } => {
+                assert_eq!(dest.0, 2);
+                assert_eq!(v.0, 1);
+            }
+            other => panic!("Expected Copy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_load_cse_invalidated_by_store() {
+        // A store between two loads should prevent CSE
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(2),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+        }], 3);
+
+        let mut module = make_module(func);
+        let eliminated = run(&mut module);
+        assert_eq!(eliminated, 0); // No CSE: store invalidates the load
+    }
+
+    #[test]
+    fn test_load_cse_invalidated_by_call() {
+        // A call between two loads should prevent CSE
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Call {
+                    dest: Some(Value(2)),
+                    func: "side_effect".to_string(),
+                    args: vec![],
+                    arg_types: vec![],
+                    return_type: IrType::Void,
+                    is_variadic: false,
+                    num_fixed_args: 0,
+                    struct_arg_sizes: vec![],
+                    struct_arg_classes: vec![],
+                },
+                Instruction::Load {
+                    dest: Value(3),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
+        }], 4);
+
+        let mut module = make_module(func);
+        let eliminated = run(&mut module);
+        assert_eq!(eliminated, 0); // No CSE: call may modify memory
+    }
+
+    #[test]
+    fn test_load_cse_across_dominating_block() {
+        // Load in block0 should CSE with load in block1 (block0 dominates block1,
+        // single predecessor, no memory clobber)
+        let func = make_func(vec![
+            BasicBlock {
+                label: BlockId(0),
+                instructions: vec![
+                    Instruction::Load {
+                        dest: Value(1),
+                        ptr: Value(0),
+                        ty: IrType::I32,
+                        seg_override: AddressSpace::Default,
+                    },
+                ],
+                terminator: Terminator::Branch(BlockId(1)),
+            },
+            BasicBlock {
+                label: BlockId(1),
+                instructions: vec![
+                    Instruction::Load {
+                        dest: Value(2),
+                        ptr: Value(0),
+                        ty: IrType::I32,
+                        seg_override: AddressSpace::Default,
+                    },
+                ],
+                terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            },
+        ], 3);
+
+        let mut module = make_module(func);
+        let eliminated = run(&mut module);
+        assert_eq!(eliminated, 1);
+
+        match &module.functions[0].blocks[1].instructions[0] {
+            Instruction::Copy { dest, src: Operand::Value(v) } => {
+                assert_eq!(dest.0, 2);
+                assert_eq!(v.0, 1);
+            }
+            other => panic!("Expected Copy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_load_cse_invalidated_at_merge_point() {
+        // Diamond CFG: block0 -> {block1, block2} -> block3
+        // block1 stores to memory, so Load CSE should be invalidated at block3
+        let func = make_func(vec![
+            // block0: entry, load and branch
+            BasicBlock {
+                label: BlockId(0),
+                instructions: vec![
+                    Instruction::Load {
+                        dest: Value(2),
+                        ptr: Value(0),
+                        ty: IrType::I32,
+                        seg_override: AddressSpace::Default,
+                    },
+                ],
+                terminator: Terminator::CondBranch {
+                    cond: Operand::Value(Value(1)),
+                    true_label: BlockId(1),
+                    false_label: BlockId(2),
+                },
+            },
+            // block1: stores to memory
+            BasicBlock {
+                label: BlockId(1),
+                instructions: vec![
+                    Instruction::Store {
+                        val: Operand::Const(IrConst::I32(42)),
+                        ptr: Value(0),
+                        ty: IrType::I32,
+                        seg_override: AddressSpace::Default,
+                    },
+                ],
+                terminator: Terminator::Branch(BlockId(3)),
+            },
+            // block2: no memory modification
+            BasicBlock {
+                label: BlockId(2),
+                instructions: vec![],
+                terminator: Terminator::Branch(BlockId(3)),
+            },
+            // block3: merge point - loads from same pointer
+            BasicBlock {
+                label: BlockId(3),
+                instructions: vec![
+                    Instruction::Load {
+                        dest: Value(3),
+                        ptr: Value(0),
+                        ty: IrType::I32,
+                        seg_override: AddressSpace::Default,
+                    },
+                ],
+                terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
+            },
+        ], 4);
+
+        let mut module = make_module(func);
+        let eliminated = run(&mut module);
+        // Load in block3 should NOT be CSE'd because block3 is a merge point
+        // and block1 (a predecessor) stores to memory.
+        assert_eq!(eliminated, 0);
+
+        // block3's load should remain as-is
+        assert!(matches!(
+            &module.functions[0].blocks[3].instructions[0],
+            Instruction::Load { .. }
         ));
     }
 }
