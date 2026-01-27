@@ -1246,6 +1246,19 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                 if infos[i].has_indirect_mem {
                     invalidate_all_mappings(&mut slot_entries, &mut reg_offsets);
                 }
+                // Unrecognized instructions (e.g. inline asm) that reference a
+                // %rbp-relative slot may write to it.  Invalidate any mapping
+                // for that slot so later loads are not incorrectly eliminated.
+                let rbp_off = infos[i].rbp_offset;
+                if rbp_off != RBP_OFFSET_NONE {
+                    for entry in slot_entries.iter_mut().filter(|e| e.active) {
+                        if entry.offset == rbp_off {
+                            let old_reg = entry.mapping.reg_id;
+                            entry.active = false;
+                            reg_offsets[old_reg as usize].remove_val(rbp_off);
+                        }
+                    }
+                }
                 prev_was_unconditional_jump = false;
             }
 
@@ -1691,6 +1704,19 @@ mod tests {
             "should forward callee-saved reg across call: {}", result);
     }
 
+    #[test]
+    fn test_global_store_forward_invalidated_by_unrecognized_rbp_write() {
+        // Unrecognized instructions (e.g. inline asm) writing to a %rbp-relative
+        // slot must invalidate the mapping so the subsequent load is kept.
+        let asm = [
+            "    movl %eax, -8(%rbp)",
+            "    movntil %ecx, -8(%rbp)",    // inline asm: unrecognized write to slot
+            "    movl -8(%rbp), %eax",       // must NOT be eliminated
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("-8(%rbp), %eax"),
+            "must not eliminate load after unrecognized write to same slot: {}", result);
+    }
 
     #[test]
     fn test_classify_line() {
