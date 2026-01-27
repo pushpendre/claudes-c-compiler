@@ -1,0 +1,10 @@
+Task: Fix x86 kernel miscompilation in fs/file.c
+
+The delta debugging tool identified that fs/file.c compiled with our compiler
+causes an x86 boot failure (timeout - kernel hangs during boot).
+
+fs/file.c manages the file descriptor table. It implements alloc_fdtable,
+expand_fdtable, dup_fd, and related fd operations. Miscompilation here would
+affect process creation (fork/clone/exec) and file descriptor handling.
+
+Status: in_progress
