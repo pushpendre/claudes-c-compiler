@@ -1765,87 +1765,23 @@ impl ArchCodegen for X86Codegen {
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // Track variadic function info
         self.is_variadic = func.is_variadic;
-        // Count named params by classification, matching classify_params() logic.
-        // On x86-64 System V ABI:
-        //   - large structs (>16 bytes) are ALWAYS passed on stack
-        //   - small structs (<=16 bytes) consume 1-2 GP register slots
-        //   - long double (F128/x87) is ALWAYS passed on stack (16 bytes each)
-        //   - float/double passed in XMM registers (up to 8)
-        //   - integer/pointer passed in GP registers (up to 6)
+        // Count named params using the shared ABI classification, so this
+        // stays in sync with classify_call_args (caller side) automatically.
         {
-            let mut gp_count = 0usize;
-            let mut fp_count = 0usize;
-            // First pass: count total GP/FP register usage to know classification
-            for p in &func.params {
-                if let Some(size) = p.struct_size {
-                    if size <= 16 {
-                        let regs_needed = if size <= 8 { 1 } else { 2 };
-                        gp_count += regs_needed;
-                    }
-                    // Large structs don't consume registers
-                } else if p.ty.is_long_double() {
-                    // Long double always on stack, no register
-                } else if p.ty.is_float() {
-                    fp_count += 1;
-                } else {
-                    gp_count += 1;
+            let config = self.call_abi_config();
+            let classification = crate::backend::call_emit::classify_params_full(func, &config);
+            let mut named_gp = 0usize;
+            let mut named_fp = 0usize;
+            for class in &classification.classes {
+                named_gp += class.gp_reg_count();
+                if matches!(class, crate::backend::call_emit::ParamClass::FloatReg { .. }) {
+                    named_fp += 1;
                 }
             }
-            self.num_named_int_params = gp_count;
-            self.num_named_fp_params = fp_count;
-
-            // Second pass: simulate forward stack layout of all stack-passed named params,
-            // including alignment padding for F128/I128 (matches compute_stack_arg_padding).
-            // This is necessary because the caller inserts alignment padding before 16-byte
-            // aligned args, and we must account for it in overflow_arg_area.
-            let mut stack_offset = 0usize;
-            let mut gp_idx = 0usize;
-            let mut fp_idx = 0usize;
-            for p in &func.params {
-                if let Some(size) = p.struct_size {
-                    if size <= 16 {
-                        let regs_needed = if size <= 8 { 1 } else { 2 };
-                        if gp_idx + regs_needed <= 6 {
-                            gp_idx += regs_needed;
-                        } else {
-                            // Overflows to stack
-                            stack_offset += (size + 7) & !7;
-                            gp_idx = 6; // All remaining GP go to stack
-                        }
-                    } else {
-                        // Large struct always on stack (8-byte aligned)
-                        stack_offset += (size + 7) & !7;
-                    }
-                } else if p.ty.is_long_double() {
-                    // F128: always on stack, 16-byte aligned
-                    let align_pad = (16 - (stack_offset % 16)) % 16;
-                    stack_offset += align_pad;
-                    stack_offset += 16;
-                } else if p.ty.is_128bit() {
-                    // I128: check if fits in GP regs, else stack with 16-byte alignment
-                    if gp_idx + 2 <= 6 {
-                        gp_idx += 2;
-                    } else {
-                        let align_pad = (16 - (stack_offset % 16)) % 16;
-                        stack_offset += align_pad;
-                        stack_offset += 16;
-                        gp_idx = 6;
-                    }
-                } else if p.ty.is_float() {
-                    if fp_idx < 8 {
-                        fp_idx += 1;
-                    } else {
-                        stack_offset += 8;
-                    }
-                } else {
-                    if gp_idx < 6 {
-                        gp_idx += 1;
-                    } else {
-                        stack_offset += 8;
-                    }
-                }
-            }
-            self.num_named_stack_bytes = stack_offset;
+            self.num_named_int_params = named_gp;
+            self.num_named_fp_params = named_fp;
+            self.num_named_stack_bytes =
+                crate::backend::call_emit::named_params_stack_bytes(&classification.classes);
         }
 
         // Run register allocator BEFORE stack space computation so we can

@@ -330,7 +330,7 @@ pub fn named_params_stack_bytes(param_classes: &[ParamClass]) -> usize {
     let mut total: usize = 0;
     for class in param_classes {
         // Align for 16-byte types before adding their size
-        if matches!(class, ParamClass::F128Stack { .. } | ParamClass::I128Stack { .. }) {
+        if matches!(class, ParamClass::F128Stack { .. } | ParamClass::I128Stack { .. } | ParamClass::F128AlwaysStack { .. }) {
             total = (total + 15) & !15;
         }
         total += class.stack_bytes();
