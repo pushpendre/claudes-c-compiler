@@ -1697,7 +1697,13 @@ impl ArchCodegen for ArmCodegen {
         match class {
             ParamClass::IntReg { reg_idx } => {
                 let src = Self::reg_for_type(ARM_ARG_REGS[reg_idx], ty);
-                self.state.emit_fmt(format_args!("    mov x0, {}", src));
+                let dst = Self::reg_for_type("x0", ty);
+                // Both operands must be the same width on ARM64
+                // (mov wN, wM for 32-bit; mov xN, xM for 64-bit)
+                // Writing to wN implicitly zero-extends into xN.
+                if src != dst {
+                    self.state.emit_fmt(format_args!("    mov {}, {}", dst, src));
+                }
                 self.emit_store_result(dest);
             }
             ParamClass::FloatReg { reg_idx } => {
@@ -1711,8 +1717,8 @@ impl ArchCodegen for ArmCodegen {
             ParamClass::StackScalar { offset } => {
                 let src = stack_base + offset;
                 let ldr_instr = self.load_instr_for_type(ty);
-                let reg = Self::reg_for_type("x0", ty);
-                self.emit_load_from_sp(reg, src, ldr_instr);
+                let (actual_instr, reg) = Self::arm_parse_load(ldr_instr);
+                self.emit_load_from_sp(reg, src, actual_instr);
                 self.emit_store_result(dest);
             }
             // Struct/i128/F128 params remain in allocas
