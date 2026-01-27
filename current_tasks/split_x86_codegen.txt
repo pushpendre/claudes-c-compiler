@@ -1,0 +1,7 @@
+Task: Split x86 codegen.rs into focused submodules
+
+x86/codegen/codegen.rs is ~4,934 lines. Extract:
+1. InlineAsmEmitter impl -> asm_emitter.rs (~500 lines)
+2. F128/x87 operations -> f128.rs (~560 lines)
+
+Target: reduce codegen.rs to ~3,800 lines.
