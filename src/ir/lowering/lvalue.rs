@@ -268,7 +268,8 @@ impl Lowerer {
                     if let Some(ref global_name) = info.static_global_name {
                         let addr = self.fresh_value();
                         self.emit(Instruction::GlobalAddr { dest: addr, name: global_name.clone() });
-                        if info.is_array {
+                        let is_inline_data = info.is_array || info.c_type.as_ref().map_or(false, |ct| ct.is_vector());
+                        if is_inline_data {
                             return Operand::Value(addr);
                         } else {
                             let loaded = self.fresh_value();
@@ -276,7 +277,8 @@ impl Lowerer {
                             return Operand::Value(loaded);
                         }
                     }
-                    if info.is_array {
+                    let is_inline_data = info.is_array || info.c_type.as_ref().map_or(false, |ct| ct.is_vector());
+                    if is_inline_data {
                         return Operand::Value(info.alloca);
                     } else {
                         let loaded = self.fresh_value();
@@ -289,7 +291,8 @@ impl Lowerer {
                     if let Some(ginfo) = self.globals.get(&mangled).cloned() {
                         let addr = self.fresh_value();
                         self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
-                        if ginfo.is_array {
+                        let is_inline_data = ginfo.is_array || ginfo.c_type.as_ref().map_or(false, |ct| ct.is_vector());
+                        if is_inline_data {
                             return Operand::Value(addr);
                         } else {
                             let loaded = self.fresh_value();
@@ -301,7 +304,8 @@ impl Lowerer {
                 if let Some(ginfo) = self.globals.get(name).cloned() {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
-                    if ginfo.is_array {
+                    let is_inline_data = ginfo.is_array || ginfo.c_type.as_ref().map_or(false, |ct| ct.is_vector());
+                    if is_inline_data {
                         return Operand::Value(addr);
                     } else {
                         let loaded = self.fresh_value();
@@ -422,6 +426,12 @@ impl Lowerer {
 
         if let Some(name) = root_name {
             if let Some(vi) = self.lookup_var_info(&name) {
+                // Vector types: element size is derived from the vector element type
+                if let Some(ref ctype) = vi.c_type {
+                    if let CType::Vector(ref elem_ty, _) = ctype {
+                        return self.resolve_ctype_size(elem_ty).max(1);
+                    }
+                }
                 if !vi.array_dim_strides.is_empty() {
                     // depth 0 means base is the array name, so use strides[0]
                     // depth 1 means base is a[i], so use strides[1]

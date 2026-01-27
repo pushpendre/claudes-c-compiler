@@ -244,15 +244,27 @@ impl InlineAsmEmitter for X86Codegen {
         let is_xmm = reg.starts_with("xmm");
 
         if is_xmm {
-            // XMM register: use SSE load instructions
+            // XMM register: use SSE/AVX load instructions
             match val {
                 Operand::Value(v) => {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        let load_instr = match ty {
-                            IrType::F32 => "movss",
-                            _ => "movsd",
-                        };
-                        self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+                        if self.state.is_alloca(v.0) {
+                            // Alloca: data lives directly in the stack slot.
+                            // Use movdqu (128-bit, unaligned-safe) for vector types,
+                            // movss/movsd for scalar floats.
+                            let load_instr = match ty {
+                                IrType::F32 => "movss",
+                                IrType::F64 => "movsd",
+                                _ => "movdqu",
+                            };
+                            self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+                        } else {
+                            let load_instr = match ty {
+                                IrType::F32 => "movss",
+                                _ => "movsd",
+                            };
+                            self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+                        }
                     }
                 }
                 Operand::Const(_) => {
@@ -277,13 +289,20 @@ impl InlineAsmEmitter for X86Codegen {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
-                        // Alloca: the IR value represents the ADDRESS of the
-                        // allocated memory. Use leaq to compute the address,
-                        // not movq which would load the contents.
-                        self.state.out.emit_instr_rbp_reg("    leaq", slot.0, reg);
+                        // Alloca values represent the stack address of the variable.
+                        // Use LEA to compute the address, not MOV which would
+                        // load the contents stored at that address.
+                        if let Some(align) = self.state.alloca_over_align(v.0) {
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, reg);
+                            self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, reg);
+                            self.state.out.emit_instr_imm_reg("    andq", -(align as i64), reg);
+                        } else {
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, reg);
+                        }
                     } else {
-                        // Non-alloca: use type-appropriate load to avoid reading
-                        // garbage from stack slots of smaller-than-8-byte variables.
+                        // Non-alloca values: load the value from the stack slot.
+                        // Use type-appropriate load to avoid reading garbage from
+                        // stack slots of smaller-than-8-byte variables.
                         let load_instr = Self::mov_load_for_type(ty);
                         let dest_reg = match ty {
                             IrType::U32 | IrType::F32 => Self::reg_to_32(reg),
@@ -330,9 +349,12 @@ impl InlineAsmEmitter for X86Codegen {
             if self.state.is_alloca(ptr.0) {
                 // Alloca: stack slot IS the variable's storage — load directly
                 if is_xmm {
+                    // Use movdqu for vector types (full 128-bit, unaligned-safe),
+                    // movss/movsd for scalar floats.
                     let load_instr = match ty {
                         IrType::F32 => "movss",
-                        _ => "movsd",
+                        IrType::F64 => "movsd",
+                        _ => "movdqu",
                     };
                     self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
                 } else {
@@ -468,14 +490,23 @@ impl InlineAsmEmitter for X86Codegen {
         let is_xmm = reg.starts_with("xmm");
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_xmm {
-                // XMM register: use SSE store instructions
-                let store_instr = match ty {
-                    IrType::F32 => "movss",
-                    _ => "movsd",
-                };
+                // XMM register: use SSE/AVX store instructions
                 if self.state.is_alloca(ptr.0) {
+                    // Alloca: vector data lives directly in the stack slot.
+                    // Use movdqu for a full 128-bit store for vector types
+                    // (unaligned-safe since stack allocas may not be 16-byte aligned).
+                    // Scalar floats use movss/movsd.
+                    let store_instr = match ty {
+                        IrType::F32 => "movss",
+                        IrType::F64 => "movsd",
+                        _ => "movdqu",
+                    };
                     self.state.emit_fmt(format_args!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
                 } else {
+                    let store_instr = match ty {
+                        IrType::F32 => "movss",
+                        _ => "movsd",
+                    };
                     let scratch = "rcx";
                     self.state.out.emit_instr_reg("    pushq", scratch);
                     self.state.out.emit_instr_rbp_reg("    movq", slot.0, scratch);

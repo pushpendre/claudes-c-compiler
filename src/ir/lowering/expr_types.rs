@@ -353,6 +353,7 @@ impl Lowerer {
             match base_ctype {
                 CType::Array(elem, _) => return IrType::from_ctype(&elem),
                 CType::Pointer(pointee, _) => return IrType::from_ctype(&pointee),
+                CType::Vector(elem, _) => return IrType::from_ctype(&elem),
                 _ => {}
             }
         }
@@ -360,6 +361,7 @@ impl Lowerer {
             match idx_ctype {
                 CType::Array(elem, _) => return IrType::from_ctype(&elem),
                 CType::Pointer(pointee, _) => return IrType::from_ctype(&pointee),
+                CType::Vector(elem, _) => return IrType::from_ctype(&elem),
                 _ => {}
             }
         }
@@ -812,11 +814,12 @@ impl Lowerer {
 
     /// Get the sizeof for an array subscript expression.
     fn sizeof_subscript(&self, base: &Expr, index: &Expr) -> usize {
-        // Use CType-based resolution first (handles string literals, typed pointers)
+        // Use CType-based resolution first (handles string literals, typed pointers, vectors)
         if let Some(base_ctype) = self.get_expr_ctype(base) {
             match &base_ctype {
                 CType::Array(elem, _) => return self.resolve_ctype_size(elem).max(1),
                 CType::Pointer(pointee, _) => return self.resolve_ctype_size(pointee).max(1),
+                CType::Vector(elem, _) => return self.resolve_ctype_size(elem).max(1),
                 _ => {}
             }
         }
@@ -825,6 +828,7 @@ impl Lowerer {
             match &idx_ctype {
                 CType::Array(elem, _) => return self.resolve_ctype_size(elem).max(1),
                 CType::Pointer(pointee, _) => return self.resolve_ctype_size(pointee).max(1),
+                CType::Vector(elem, _) => return self.resolve_ctype_size(elem).max(1),
                 _ => {}
             }
         }
@@ -1380,11 +1384,12 @@ impl Lowerer {
                 None
             }
             Expr::ArraySubscript(base, index, _) => {
-                // Subscript peels off one Array/Pointer layer
+                // Subscript peels off one Array/Pointer/Vector layer
                 if let Some(base_ct) = self.get_expr_ctype(base) {
                     match base_ct {
                         CType::Array(elem, _) => return Some(*elem),
                         CType::Pointer(pointee, _) => return Some(*pointee),
+                        CType::Vector(elem, _) => return Some(*elem),
                         _ => {}
                     }
                 }
@@ -1393,6 +1398,7 @@ impl Lowerer {
                     match idx_ct {
                         CType::Array(elem, _) => return Some(*elem),
                         CType::Pointer(pointee, _) => return Some(*pointee),
+                        CType::Vector(elem, _) => return Some(*elem),
                         _ => {}
                     }
                 }
