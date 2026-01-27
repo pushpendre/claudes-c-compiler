@@ -1,0 +1,19 @@
+Task: Increase always_inline block limit for kernel mutex functions
+Status: in_progress
+
+Problem:
+  kernel/locking/mutex.c has __mutex_lock_common marked __always_inline, but
+  the function generates 215 IR basic blocks (312 instructions), exceeding our
+  MAX_ALWAYS_INLINE_BLOCKS limit of 200. This causes the inliner to skip it,
+  leaving an undefined reference to __mutex_lock_common in the object file.
+
+  GCC has no block count limit for __always_inline functions — it always
+  inlines them regardless of size.
+
+Fix:
+  Increase MAX_ALWAYS_INLINE_BLOCKS from 200 to accommodate large always_inline
+  kernel functions like __mutex_lock_common. Since __always_inline is a programmer
+  directive, we should respect it without arbitrary limits.
+
+  Also need to make sure the caller budget (MAX_ALWAYS_INLINE_BUDGET_PER_CALLER)
+  is sufficient, since large inlined functions consume a lot of budget.
