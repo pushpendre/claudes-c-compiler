@@ -1705,61 +1705,7 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
-        // F128 comparison via soft-float libcalls.
-        // RISC-V has no hardware quad-precision; we must call __eqtf2/__letf2/__gttf2/etc.
-        // Convention: f128 args passed in GP register pairs a0:a1 and a2:a3,
-        // integer result returned in a0.
-        //
-        // Libcall result semantics:
-        //   __eqtf2(a,b): returns 0 if a==b, non-zero otherwise
-        //   __lttf2(a,b): returns <0 if a<b, 0 if a==b, >0 if a>b, 1 if unordered
-        //   __letf2(a,b): returns <=0 if a<=b, >0 if a>b, 1 if unordered
-        //   __gttf2(a,b): returns >0 if a>b, 0 if a==b, <0 if a<b, -1 if unordered
-        //   __getf2(a,b): returns >=0 if a>=b, <0 if a<b, -1 if unordered
-
-        // Step 1: Load LHS f128 into a0:a1, save to stack temp.
-        self.emit_addi_sp(-16);
-        self.emit_f128_operand_to_a0_a1(lhs);
-        self.state.emit("    sd a0, 0(sp)");
-        self.state.emit("    sd a1, 8(sp)");
-
-        // Step 2: Load RHS f128 into a0:a1, then move to a2:a3.
-        self.emit_f128_operand_to_a0_a1(rhs);
-        self.state.emit("    mv a2, a0");
-        self.state.emit("    mv a3, a1");
-
-        // Step 3: Load saved LHS f128 from stack temp into a0:a1 (first arg).
-        self.state.emit("    ld a0, 0(sp)");
-        self.state.emit("    ld a1, 8(sp)");
-
-        // Free temp stack space.
-        self.emit_addi_sp(16);
-
-        // Step 4: Call the appropriate comparison libcall and map result to boolean.
-        use crate::backend::cast::{f128_cmp_libcall, F128CmpKind};
-        let (libcall, kind) = f128_cmp_libcall(op);
-        self.state.emit_fmt(format_args!("    call {}", libcall));
-        match kind {
-            F128CmpKind::EqZero => self.state.emit("    seqz t0, a0"),
-            F128CmpKind::NeZero => self.state.emit("    snez t0, a0"),
-            F128CmpKind::LtZero => self.state.emit("    slti t0, a0, 0"),
-            F128CmpKind::LeZero => {
-                // t0 = (a0 <= 0) = (a0 < 1)
-                self.state.emit("    slti t0, a0, 1");
-            }
-            F128CmpKind::GtZero => {
-                // t0 = (a0 > 0): 0 < a0
-                self.state.emit("    li t0, 0");
-                self.state.emit("    slt t0, t0, a0");
-            }
-            F128CmpKind::GeZero => {
-                // t0 = (a0 >= 0) = !(a0 < 0)
-                self.state.emit("    slti t0, a0, 0");
-                self.state.emit("    xori t0, t0, 1");
-            }
-        }
-        self.state.reg_cache.invalidate_all();
-        self.store_t0_to(dest);
+        crate::backend::f128_softfloat::f128_cmp(self, dest, op, lhs, rhs);
     }
 
     fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {

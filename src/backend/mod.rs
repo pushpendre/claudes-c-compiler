@@ -8,6 +8,7 @@ pub mod stack_layout;  // Stack layout: slot assignment, alloca coalescing, rega
 pub mod call_abi;    // Call argument classification and stack computation
 pub mod call_emit;   // Callee-side parameter classification (shared by emit_store_params)
 pub mod cast;        // Cast and float operation classification
+pub mod f128_softfloat; // Shared F128 soft-float orchestration (ARM + RISC-V)
 pub mod inline_asm;  // InlineAsmEmitter trait and shared framework
 
 // Register allocation and liveness analysis

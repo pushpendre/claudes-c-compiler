@@ -598,7 +598,7 @@ impl ArmCodegen {
     // --- AArch64 large-offset helpers ---
 
     /// Emit a large immediate subtraction from sp. Uses x17 (IP1) as scratch.
-    fn emit_sub_sp(&mut self, n: i64) {
+    pub(super) fn emit_sub_sp(&mut self, n: i64) {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit_fmt(format_args!("    sub sp, sp, #{}", n));
@@ -609,7 +609,7 @@ impl ArmCodegen {
     }
 
     /// Emit a large immediate addition to sp. Uses x17 (IP1) as scratch.
-    fn emit_add_sp(&mut self, n: i64) {
+    pub(super) fn emit_add_sp(&mut self, n: i64) {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit_fmt(format_args!("    add sp, sp, #{}", n));
@@ -2268,43 +2268,7 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
-        // F128 comparison via soft-float libcalls with full precision.
-        // Uses emit_f128_operand_to_q0_full for full 16-byte f128 operands.
-        let saved_dyn_alloca = self.state.has_dyn_alloca;
-        self.state.has_dyn_alloca = true; // Force x29-relative addressing
-
-        // Step 1: Load LHS f128 into Q0, save to stack temp (16 bytes).
-        self.emit_sub_sp(16);
-        self.emit_f128_operand_to_q0_full(lhs);
-        self.state.emit("    str q0, [sp]");
-
-        // Step 2: Load RHS f128 into Q0, move to Q1.
-        self.emit_f128_operand_to_q0_full(rhs);
-        self.state.emit("    mov v1.16b, v0.16b");
-
-        // Step 3: Load saved LHS f128 from stack temp into Q0.
-        self.state.emit("    ldr q0, [sp]");
-
-        // Free temp stack space and restore dyn_alloca flag.
-        self.emit_add_sp(16);
-        self.state.has_dyn_alloca = saved_dyn_alloca;
-
-        // Step 4: Call the appropriate comparison libcall and map result to boolean.
-        use crate::backend::cast::{f128_cmp_libcall, F128CmpKind};
-        let (libcall, kind) = f128_cmp_libcall(op);
-        self.state.emit_fmt(format_args!("    bl {}", libcall));
-        self.state.emit("    cmp w0, #0");
-        let cond = match kind {
-            F128CmpKind::EqZero => "eq",
-            F128CmpKind::NeZero => "ne",
-            F128CmpKind::LtZero => "lt",
-            F128CmpKind::LeZero => "le",
-            F128CmpKind::GtZero => "gt",
-            F128CmpKind::GeZero => "ge",
-        };
-        self.state.emit_fmt(format_args!("    cset x0, {}", cond));
-        self.state.reg_cache.invalidate_all();
-        self.store_x0_to(dest);
+        crate::backend::f128_softfloat::f128_cmp(self, dest, op, lhs, rhs);
     }
 
     /// Fused compare-and-branch for ARM: emit cmp + relaxed conditional branch.
