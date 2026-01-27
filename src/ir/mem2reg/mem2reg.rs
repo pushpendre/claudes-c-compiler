@@ -88,7 +88,7 @@ fn promote_function(func: &mut IrFunction) {
         .map(|(alloca_idx, _)| {
             phi_locations.iter().enumerate()
                 .filter(|(_, phi_set)| phi_set.contains(&alloca_idx))
-                .map(|(block_idx, _)| preds[block_idx].len())
+                .map(|(block_idx, _)| preds.len(block_idx))
                 .sum::<usize>()
         })
         .sum();
@@ -99,7 +99,7 @@ fn promote_function(func: &mut IrFunction) {
             .map(|(alloca_idx, _)| {
                 let cost: usize = phi_locations.iter().enumerate()
                     .filter(|(_, phi_set)| phi_set.contains(&alloca_idx))
-                    .map(|(block_idx, _)| preds[block_idx].len())
+                    .map(|(block_idx, _)| preds.len(block_idx))
                     .sum();
                 (alloca_idx, cost)
             })
@@ -450,7 +450,7 @@ fn rename_variables(
     alloca_infos: &[AllocaInfo],
     phi_locations: &[FxHashSet<usize>],
     dom_children: &[Vec<usize>],
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
     label_to_idx: &FxHashMap<BlockId, usize>,
 ) {
     let num_allocas = alloca_infos.len();
@@ -542,7 +542,7 @@ fn rename_block(
     next_value: &mut u32,
     phi_dests: &[FxHashMap<usize, Value>],
     dom_children: &[Vec<usize>],
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
     label_to_idx: &FxHashMap<BlockId, usize>,
 ) {
     // Record stack depths so we can pop on exit
@@ -1053,18 +1053,18 @@ mod tests {
     #[test]
     fn test_dominator_computation() {
         // Simple diamond CFG: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
-        let succs = vec![
+        let succs = analysis::FlatAdj::from_vecs_usize(&[
             vec![1, 2], // 0
             vec![3],    // 1
             vec![3],    // 2
             vec![],     // 3
-        ];
-        let preds = vec![
+        ]);
+        let preds = analysis::FlatAdj::from_vecs_usize(&[
             vec![],     // 0
             vec![0],    // 1
             vec![0],    // 2
             vec![1, 2], // 3
-        ];
+        ]);
         let idom = analysis::compute_dominators(4, &preds, &succs);
         assert_eq!(idom[0], 0); // entry dominates itself
         assert_eq!(idom[1], 0); // 0 dominates 1
@@ -1075,12 +1075,12 @@ mod tests {
     #[test]
     fn test_dominance_frontier() {
         // Diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
-        let preds = vec![
+        let preds = analysis::FlatAdj::from_vecs_usize(&[
             vec![],     // 0
             vec![0],    // 1
             vec![0],    // 2
             vec![1, 2], // 3
-        ];
+        ]);
         let idom = vec![0, 0, 0, 0];
         let df = analysis::compute_dominance_frontiers(4, &preds, &idom);
         // DF(1) = {3}, DF(2) = {3}

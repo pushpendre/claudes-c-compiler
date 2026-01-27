@@ -177,7 +177,7 @@ fn detect_diamond(
     func: &IrFunction,
     pred_idx: usize,
     label_to_idx: &FxHashMap<BlockId, usize>,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> Option<DiamondInfo> {
     let pred_block = &func.blocks[pred_idx];
 
@@ -223,10 +223,10 @@ fn detect_diamond(
     // The arm blocks should have exactly one predecessor each (the pred block).
     // If they have other predecessors, other code flows into them and we can't
     // eliminate the blocks.
-    if preds[true_idx].len() != 1 || preds[false_idx].len() != 1 {
+    if preds.len(true_idx) != 1 || preds.len(false_idx) != 1 {
         return None;
     }
-    if preds[true_idx][0] != pred_idx || preds[false_idx][0] != pred_idx {
+    if preds.row(true_idx)[0] as usize != pred_idx || preds.row(false_idx)[0] as usize != pred_idx {
         return None;
     }
 
@@ -296,15 +296,15 @@ fn detect_diamond(
 
     // The merge block should only be reached from the two arms (and not from pred directly).
     // If the merge block has other predecessors, we need to preserve the Phi nodes for those.
-    let merge_preds_from_diamond = preds[merge_idx].iter()
-        .filter(|&&p| p == true_idx || p == false_idx)
+    let merge_preds_from_diamond = preds.row(merge_idx).iter()
+        .filter(|&&p| p as usize == true_idx || p as usize == false_idx)
         .count();
 
     // If the merge block has predecessors other than the two arms, we can still convert
     // but we need to keep the Phi nodes with those other incoming edges.
     // For simplicity, only convert when the merge block has exactly 2 predecessors
     // (the two arms), so we can fully replace the Phis.
-    if preds[merge_idx].len() != 2 || merge_preds_from_diamond != 2 {
+    if preds.len(merge_idx) != 2 || merge_preds_from_diamond != 2 {
         return None;
     }
 
@@ -332,7 +332,7 @@ fn detect_triangle(
     func: &IrFunction,
     pred_idx: usize,
     label_to_idx: &FxHashMap<BlockId, usize>,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> Option<DiamondInfo> {
     let pred_block = &func.blocks[pred_idx];
 
@@ -392,16 +392,16 @@ fn detect_triangle(
     };
 
     // arm block must have exactly one predecessor (pred)
-    if preds[arm_idx].len() != 1 || preds[arm_idx][0] != pred_idx {
+    if preds.len(arm_idx) != 1 || preds.row(arm_idx)[0] as usize != pred_idx {
         return None;
     }
 
     // merge must have exactly 2 predecessors: pred and arm
-    if preds[merge_idx].len() != 2 {
+    if preds.len(merge_idx) != 2 {
         return None;
     }
-    let has_pred = preds[merge_idx].iter().any(|&p| p == pred_idx);
-    let has_arm = preds[merge_idx].iter().any(|&p| p == arm_idx);
+    let has_pred = preds.row(merge_idx).iter().any(|&p| p as usize == pred_idx);
+    let has_arm = preds.row(merge_idx).iter().any(|&p| p as usize == arm_idx);
     if !has_pred || !has_arm {
         return None;
     }

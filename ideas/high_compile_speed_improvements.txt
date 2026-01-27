@@ -15,15 +15,16 @@ Current bottleneck breakdown (from perf profiling):
 
 2. ALLOCATION OVERHEAD (7.7% of total, ~0.2s)
    malloc/free/realloc take 7.7% of samples. Major callers:
-   - ir::analysis::build_cfg (Vec<Vec<usize>> for pred/succ lists)
+   - ir::analysis::build_cfg (Vec<Vec<usize>> for pred/succ lists) [FIXED: now uses FlatAdj CSR format]
    - gvn::process_block (FxHashMap operations)
    - mem2reg::rename_block
    - passes::div_by_const
 
-   FIX: Use arena allocation or bump allocators for per-function data.
-   Pre-allocate and reuse CFG data structures across functions within
-   the same pass. Use SmallVec<[usize; 4]> for pred/succ lists (most
-   blocks have <=4 predecessors/successors).
+   PARTIALLY FIXED: build_cfg now uses FlatAdj (CSR format) with u32 indices,
+   reducing per-call allocations from 2*n+2 to 4. Further improvements possible:
+   - Use arena allocation or bump allocators for per-function data
+   - Cache CFG/dominator results between passes that don't modify the CFG
+   - Reuse Vec buffers across function invocations
 
 3. STRING COMPARISON (3.39% of total, ~0.09s)
    memcmp from str::contains and pattern matching. Major callers:

@@ -19,7 +19,8 @@ impl InlineAsmEmitter for ArmCodegen {
     fn asm_state_ref(&self) -> &CodegenState { &self.state }
 
     // TODO: Support multi-alternative constraint parsing (e.g., "rm", "ri") like x86.
-    // TODO: Support ARM-specific immediate constraints ("I", "J", "K", "L", etc.).
+    // NOTE: ARM-specific immediate constraints (K, L, I) are validated in
+    // constant_fits_immediate() below; classify_constraint returns GpReg for these.
     fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
         let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
         // Explicit register constraint from register variable: {regname}
@@ -282,4 +283,131 @@ impl InlineAsmEmitter for ArmCodegen {
         self.asm_scratch_idx = 0;
         self.asm_fp_scratch_idx = 0;
     }
+
+    /// Override the default (x86) immediate constraint validation with AArch64 semantics.
+    ///
+    /// On AArch64:
+    ///   'K' - logical immediate: a bitmask value encodable in the N:immr:imms field
+    ///         of AND/ORR/EOR/TST instructions. Excludes 0 and all-ones.
+    ///   'I' - unsigned 12-bit immediate (0..4095) for add/sub instructions
+    ///   'L' - logical immediate for 32-bit operations (32-bit bitmask pattern)
+    fn constant_fits_immediate(&self, constraint: &str, value: i64) -> bool {
+        let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+        // If constraint has 'i' or 'n', any constant value is accepted
+        if stripped.contains('i') || stripped.contains('n') {
+            return true;
+        }
+        // Check each constraint letter with AArch64-specific ranges
+        for ch in stripped.chars() {
+            let fits = match ch {
+                // AArch64 'K': 64-bit logical immediate (bitmask encodable in N:immr:imms)
+                // Used by AND/ORR/EOR/TST instructions. 0 and all-ones are NOT valid.
+                'K' => is_valid_aarch64_logical_immediate(value as u64),
+                // AArch64 'L': 32-bit logical immediate (validate in 32-bit context)
+                'L' => is_valid_aarch64_logical_immediate_32(value as u32),
+                // AArch64 'I': unsigned 12-bit add/sub immediate
+                'I' => value >= 0 && value <= 4095,
+                _ => continue,
+            };
+            if fits {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Check whether a 32-bit value is a valid AArch64 32-bit logical immediate.
+/// Used for the 'L' constraint (32-bit logical operations like AND w0, w1, #imm).
+fn is_valid_aarch64_logical_immediate_32(value: u32) -> bool {
+    if value == 0 || value == u32::MAX {
+        return false;
+    }
+    // Check element sizes: 2, 4, 8, 16, 32 bits within a 32-bit value
+    let mut size: u32 = 32;
+    while size >= 2 {
+        let mask = if size == 32 { u32::MAX } else { (1u32 << size) - 1 };
+        let element = value & mask;
+        // Check if value is a repeating pattern of this element size
+        let mut check = element as u32;
+        let mut s = size;
+        while s < 32 {
+            check |= check << s;
+            s *= 2;
+        }
+        if check == value {
+            let val = element & mask;
+            if val != 0 && val != mask {
+                let rotated = ((val >> 1) | ((val & 1) << (size - 1))) & mask;
+                let transitions = val ^ rotated;
+                if transitions.count_ones() == 2 {
+                    return true;
+                }
+            }
+        }
+        size >>= 1;
+    }
+    false
+}
+
+/// Check whether a 64-bit value is a valid AArch64 logical immediate.
+///
+/// AArch64 logical immediates are bitmask patterns encodable in the 13-bit
+/// N:immr:imms field of AND/ORR/EOR/TST instructions. Valid patterns consist
+/// of a repeating element of size 2, 4, 8, 16, 32, or 64 bits, where each
+/// element contains a contiguous (possibly rotated) run of set bits.
+///
+/// The values 0 and all-ones (0xFFFFFFFF_FFFFFFFF) are NOT valid logical immediates.
+fn is_valid_aarch64_logical_immediate(value: u64) -> bool {
+    // 0 and all-ones are never valid logical immediates
+    if value == 0 || value == u64::MAX {
+        return false;
+    }
+
+    // Try each possible element size: 2, 4, 8, 16, 32, 64 bits.
+    // For each size, check if the value is a repeating pattern of that element,
+    // and if the element contains a contiguous (possibly rotated) run of 1-bits.
+    let mut size: u32 = 64;
+    while size >= 2 {
+        let mask = if size == 64 { u64::MAX } else { (1u64 << size) - 1 };
+        let element = value & mask;
+
+        // Check if value is a repeating pattern of this element size
+        if is_repeating_pattern(value, element, size) {
+            // Check if the element has a contiguous run of 1-bits (possibly rotated)
+            if has_contiguous_ones(element, size) {
+                return true;
+            }
+        }
+        size >>= 1;
+    }
+    false
+}
+
+/// Check if `value` is composed of `element` repeated to fill 64 bits.
+fn is_repeating_pattern(value: u64, element: u64, size: u32) -> bool {
+    let mut check = element;
+    let mut s = size;
+    while s < 64 {
+        check |= check << s;
+        s *= 2;
+    }
+    check == value
+}
+
+/// Check if the lowest `size` bits of `element` contain a contiguous run of
+/// set bits (possibly rotated). A contiguous-rotated pattern means there's
+/// at most one 0->1 transition and one 1->0 transition in the circular bit sequence.
+fn has_contiguous_ones(element: u64, size: u32) -> bool {
+    let mask = if size == 64 { u64::MAX } else { (1u64 << size) - 1 };
+    let val = element & mask;
+    // All-zeros or all-ones within the element are not valid
+    if val == 0 || val == mask {
+        return false;
+    }
+    // A contiguous run of 1-bits (possibly rotated) has the property that
+    // val ^ (val rotated by 1) has exactly 2 set bits (the two transitions).
+    let rotated = ((val >> 1) | ((val & 1) << (size - 1))) & mask;
+    let transitions = val ^ rotated;
+    transitions.count_ones() == 2
 }

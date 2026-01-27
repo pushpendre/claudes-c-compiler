@@ -99,8 +99,8 @@ pub(crate) fn licm_function(func: &mut IrFunction) -> usize {
 /// tail without going through the header.
 fn find_natural_loops(
     num_blocks: usize,
-    preds: &[Vec<usize>],
-    succs: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
+    succs: &analysis::FlatAdj,
     idom: &[usize],
 ) -> Vec<NaturalLoop> {
     let mut loops = Vec::new();
@@ -121,7 +121,8 @@ fn find_natural_loops(
 
     // Find back edges: an edge (tail -> header) where header dominates tail
     for tail in 0..num_blocks {
-        for &header in &succs[tail] {
+        for &header in succs.row(tail) {
+            let header = header as usize;
             if dominates(header, tail) {
                 // Found a back edge: tail -> header
                 // Compute the natural loop body
@@ -163,7 +164,7 @@ fn merge_loops_by_header(loops: Vec<NaturalLoop>) -> Vec<NaturalLoop> {
 fn compute_loop_body(
     header: usize,
     tail: usize,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> FxHashSet<usize> {
     let mut body = FxHashSet::default();
     body.insert(header);
@@ -178,7 +179,8 @@ fn compute_loop_body(
     body.insert(tail);
 
     while let Some(block) = worklist.pop() {
-        for &pred in &preds[block] {
+        for &pred in preds.row(block) {
+            let pred = pred as usize;
             if !body.contains(&pred) {
                 body.insert(pred);
                 worklist.push(pred);
@@ -540,7 +542,7 @@ fn is_load_hoistable(
 fn hoist_loop_invariants(
     func: &mut IrFunction,
     natural_loop: &NaturalLoop,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
     alloca_info: &AllocaAnalysis,
 ) -> usize {
     let header = natural_loop.header;
@@ -702,12 +704,12 @@ fn hoist_loop_invariants(
 fn find_preheader(
     header: usize,
     loop_body: &FxHashSet<usize>,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> Option<usize> {
-    let outside_preds: Vec<usize> = preds[header]
+    let outside_preds: Vec<usize> = preds.row(header)
         .iter()
-        .filter(|&&p| !loop_body.contains(&p))
-        .copied()
+        .map(|&p| p as usize)
+        .filter(|p| !loop_body.contains(p))
         .collect();
 
     if outside_preds.len() != 1 {

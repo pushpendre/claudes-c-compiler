@@ -132,7 +132,7 @@ fn gvn_dfs(
     block_idx: usize,
     func: &mut IrFunction,
     dom_children: &[Vec<usize>],
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
     value_numbers: &mut Vec<u32>,
     next_vn: &mut u32,
     expr_to_value: &mut FxHashMap<ExprKey, Value>,
@@ -157,7 +157,7 @@ fn gvn_dfs(
     //
     // Invalidation is O(1): just bump load_generation. Entries with older
     // generations are ignored during lookup.
-    if block_idx != 0 && preds[block_idx].len() > 1 {
+    if block_idx != 0 && preds.len(block_idx) > 1 {
         *load_generation += 1;
     }
 

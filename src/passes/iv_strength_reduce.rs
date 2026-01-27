@@ -100,8 +100,8 @@ pub(crate) fn ivsr_function(func: &mut IrFunction) -> usize {
 /// Find all natural loops in the CFG.
 fn find_natural_loops(
     num_blocks: usize,
-    succs: &[Vec<usize>],
-    preds: &[Vec<usize>],
+    succs: &analysis::FlatAdj,
+    preds: &analysis::FlatAdj,
     idom: &[usize],
 ) -> Vec<NaturalLoop> {
     let mut loops = Vec::new();
@@ -115,7 +115,8 @@ fn find_natural_loops(
     };
 
     for tail in 0..num_blocks {
-        for &header in &succs[tail] {
+        for &header in succs.row(tail) {
+            let header = header as usize;
             if dominates(header, tail) {
                 let body = compute_loop_body(header, tail, preds);
                 loops.push(NaturalLoop { header, body });
@@ -130,7 +131,7 @@ fn find_natural_loops(
 fn compute_loop_body(
     header: usize,
     tail: usize,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> FxHashSet<usize> {
     let mut body = FxHashSet::default();
     body.insert(header);
@@ -141,7 +142,8 @@ fn compute_loop_body(
     let mut worklist = vec![tail];
     body.insert(tail);
     while let Some(block) = worklist.pop() {
-        for &pred in &preds[block] {
+        for &pred in preds.row(block) {
+            let pred = pred as usize;
             if !body.contains(&pred) {
                 body.insert(pred);
                 worklist.push(pred);
@@ -167,7 +169,7 @@ fn merge_loops_by_header(loops: Vec<NaturalLoop>) -> Vec<NaturalLoop> {
 fn reduce_loop(
     func: &mut IrFunction,
     natural_loop: &NaturalLoop,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> usize {
     let header = natural_loop.header;
 
@@ -178,10 +180,10 @@ fn reduce_loop(
     };
 
     // Find back-edge blocks (predecessors of header that are inside the loop)
-    let back_blocks: Vec<usize> = preds[header]
+    let back_blocks: Vec<usize> = preds.row(header)
         .iter()
-        .filter(|&&p| natural_loop.body.contains(&p))
-        .copied()
+        .map(|&p| p as usize)
+        .filter(|p| natural_loop.body.contains(p))
         .collect();
 
     // Only handle simple single-latch loops
@@ -708,12 +710,12 @@ fn is_loop_invariant(val_id: u32, loop_body: &FxHashSet<usize>, func: &IrFunctio
 fn find_preheader(
     header: usize,
     loop_body: &FxHashSet<usize>,
-    preds: &[Vec<usize>],
+    preds: &analysis::FlatAdj,
 ) -> Option<usize> {
-    let outside_preds: Vec<usize> = preds[header]
+    let outside_preds: Vec<usize> = preds.row(header)
         .iter()
-        .filter(|&&p| !loop_body.contains(&p))
-        .copied()
+        .map(|&p| p as usize)
+        .filter(|p| !loop_body.contains(p))
         .collect();
 
     if outside_preds.len() != 1 {
