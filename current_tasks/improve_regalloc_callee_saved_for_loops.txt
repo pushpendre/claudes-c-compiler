@@ -1,0 +1,16 @@
+Task: Allow callee-saved registers for high-priority non-call-spanning values
+Status: in_progress
+
+Problem:
+The register allocator only assigns callee-saved registers (rbx, r12-r15 on x86)
+to values whose live intervals span function calls. In call-free hot loops (like
+hash functions, matrix multiply, sorting), this means callee-saved registers go
+unused, and all values compete for only 4 caller-saved registers (r11, r10, r8, r9).
+Overflow values are spilled to the stack, causing a 6x+ slowdown vs GCC -O2.
+
+Fix:
+Add a Phase 3 to the register allocator: after assigning callee-saved to call-spanning
+values and caller-saved to non-call-spanning values, assign remaining callee-saved
+registers to the highest-priority non-call-spanning values that didn't get a
+caller-saved register. This trades prologue/epilogue save/restore cost (one-time)
+for elimination of repeated stack spills in hot loops.
