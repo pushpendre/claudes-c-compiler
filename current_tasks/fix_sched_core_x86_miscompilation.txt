@@ -1,0 +1,9 @@
+Task: Fix x86 kernel miscompilation in kernel/sched/core.c
+
+The delta debugging tool identified that kernel/sched/core.c compiled with our
+compiler causes a boot failure. The kernel panics with a NULL pointer dereference
+in count_open_files, called from dup_fd -> sane_fdtable_size during the first
+kernel_clone in rest_init. The miscompilation in sched/core.c is causing
+corrupted state that leads to this crash.
+
+Status: in_progress
