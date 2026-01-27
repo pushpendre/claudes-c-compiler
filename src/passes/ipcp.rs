@@ -196,7 +196,8 @@ fn is_side_effect_free(func: &crate::ir::ir::IrFunction) -> bool {
                 | Instruction::GlobalAddr { .. }
                 | Instruction::Phi { .. }
                 | Instruction::Select { .. }
-                | Instruction::LabelAddr { .. } => {
+                | Instruction::LabelAddr { .. }
+                | Instruction::ParamRef { .. } => {
                     // Pure: result depends only on operands, no memory access
                 }
 

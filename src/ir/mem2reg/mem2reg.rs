@@ -18,12 +18,29 @@ use crate::common::types::IrType;
 /// Promote allocas to SSA form with phi insertion.
 /// Only promotes scalar allocas that are exclusively loaded/stored
 /// (not address-taken by GEP, memcpy, va_start, etc.).
+/// Promote allocas to SSA form, skipping parameter allocas.
+/// This is the initial mem2reg pass that runs before inlining.
+/// Parameter allocas are not promoted here because the inliner assumes
+/// they exist for argument passing.
 pub fn promote_allocas(module: &mut IrModule) {
     for func in &mut module.functions {
         if func.is_declaration || func.blocks.is_empty() {
             continue;
         }
-        promote_function(func);
+        promote_function(func, false);
+    }
+}
+
+/// Promote allocas to SSA form, including parameter allocas.
+/// This is the post-inlining mem2reg pass. Parameter allocas can now be
+/// promoted because inlining has already completed and the IR lowering emits
+/// explicit ParamRef + Store instructions that make parameter values visible.
+pub fn promote_allocas_with_params(module: &mut IrModule) {
+    for func in &mut module.functions {
+        if func.is_declaration || func.blocks.is_empty() {
+            continue;
+        }
+        promote_function(func, true);
     }
 }
 
@@ -40,13 +57,15 @@ struct AllocaInfo {
 }
 
 /// Promote allocas in a single function to SSA form.
-fn promote_function(func: &mut IrFunction) {
+/// If `promote_params` is true, parameter allocas in the entry block are also
+/// eligible for promotion.
+fn promote_function(func: &mut IrFunction, promote_params: bool) {
     if func.blocks.is_empty() {
         return;
     }
 
     // Step 1: Identify promotable allocas
-    let mut alloca_infos = find_promotable_allocas(func);
+    let mut alloca_infos = find_promotable_allocas(func, promote_params);
     if std::env::var("CCC_DEBUG_MEM2REG").is_ok() {
         let total_allocas: usize = func.blocks[0].instructions.iter()
             .filter(|i| matches!(i, Instruction::Alloca { .. }))
@@ -141,12 +160,14 @@ fn promote_function(func: &mut IrFunction) {
 /// - Be in the entry block
 /// - Have scalar type (not used for arrays/structs via size > 8)
 /// - Only be used by Load and Store instructions (not address-taken)
-fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
+fn find_promotable_allocas(func: &IrFunction, promote_params: bool) -> Vec<AllocaInfo> {
     let num_params = func.params.len();
 
-    // Collect all allocas from the entry block, skipping the first N (parameter allocas).
-    // Parameter allocas receive their initial values from the backend (register stores)
-    // which are not visible in the IR, so they must not be promoted.
+    // Collect all allocas from the entry block.
+    // When promote_params is false, skip the first num_params allocas (parameter allocas)
+    // because the inliner relies on their presence for argument passing.
+    // When promote_params is true (post-inlining), parameter allocas are eligible
+    // because the IR has explicit ParamRef + Store instructions for their initial values.
     let mut alloca_index = 0;
     let mut all_allocas: Vec<(Value, IrType, usize)> = func.blocks[0]
         .instructions
@@ -155,8 +176,8 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
             if let Instruction::Alloca { dest, ty, size, volatile, .. } = inst {
                 let idx = alloca_index;
                 alloca_index += 1;
-                // Skip parameter allocas (first num_params allocas)
-                if idx < num_params {
+                // Skip parameter allocas when not promoting params
+                if !promote_params && idx < num_params {
                     return None;
                 }
                 // Never promote volatile allocas -- volatile locals must remain
@@ -255,6 +276,9 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         }
     }
 
+    // Build set of parameter alloca values for filtering below
+    let param_alloca_set: FxHashSet<u32> = func.param_alloca_values.iter().map(|v| v.0).collect();
+
     // Build final list of promotable allocas
     all_allocas
         .into_iter()
@@ -269,6 +293,17 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         })
         // Only promote allocas that are actually used (have loads or stores)
         .filter(|info| !info.def_blocks.is_empty() || !info.use_blocks.is_empty())
+        // Parameter allocas (sret, struct params) that have no IR-visible stores must
+        // NOT be promoted: they receive their values from emit_store_params at the
+        // backend level. Only param allocas with explicit ParamRef+Store (scalar params)
+        // have def_blocks and can safely be promoted.
+        .filter(|info| {
+            if param_alloca_set.contains(&info.alloca_value.0) && info.def_blocks.is_empty() {
+                false // Skip param allocas without any stores
+            } else {
+                true
+            }
+        })
         .collect()
 }
 

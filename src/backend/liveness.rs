@@ -770,6 +770,7 @@ pub(super) fn for_each_operand_in_instruction(inst: &Instruction, mut f: impl Fn
         Instruction::Select { cond, true_val, false_val, .. } => { f(cond); f(true_val); f(false_val); }
         Instruction::StackSave { .. } => {}
         Instruction::StackRestore { .. } => {}
+        Instruction::ParamRef { .. } => {}
     }
 }
 

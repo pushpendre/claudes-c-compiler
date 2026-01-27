@@ -44,6 +44,11 @@ pub trait ArchCodegen {
     /// Store function parameters from argument registers to their stack slots.
     fn emit_store_params(&mut self, func: &IrFunction);
 
+    /// Emit a ParamRef instruction: load the value of parameter `param_idx` into `dest`.
+    /// This is used when mem2reg has promoted a parameter alloca to SSA and the
+    /// initial parameter value needs to be materialized as an SSA value.
+    fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType);
+
     /// Load an operand into the primary accumulator register (rax/x0/t0).
     fn emit_load_operand(&mut self, op: &Operand);
 

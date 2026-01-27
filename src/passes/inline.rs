@@ -1131,6 +1131,41 @@ fn inline_call_site(
         }
     }
 
+    // Remove ParamRef instructions from inlined blocks. After inlining, ParamRef
+    // instructions are invalid because they reference param_idx of the callee,
+    // but at codegen time they would be interpreted as param_idx of the caller.
+    // The inliner already handles argument passing via stores above, so ParamRef
+    // instructions (and their associated stores to param allocas) are redundant.
+    // We also remove the Store that immediately follows each ParamRef since it
+    // stores the (now-removed) ParamRef dest into a param alloca.
+    let param_alloca_set: std::collections::HashSet<u32> = param_alloca_info.iter().map(|(v, _, _)| v.0).collect();
+    for block in &mut inlined_blocks {
+        let has_spans = !block.source_spans.is_empty();
+        let mut new_insts = Vec::with_capacity(block.instructions.len());
+        let mut new_spans = Vec::new();
+        let mut paramref_dests: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (idx, inst) in block.instructions.drain(..).enumerate() {
+            if let Instruction::ParamRef { dest, .. } = &inst {
+                paramref_dests.insert(dest.0);
+                // Don't emit this instruction; mark that the next Store to a param alloca should be skipped
+                continue;
+            }
+            // Skip stores of ParamRef dests to param allocas
+            if let Instruction::Store { val: Operand::Value(v), ptr, .. } = &inst {
+                if paramref_dests.contains(&v.0) && param_alloca_set.contains(&ptr.0) {
+                    continue;
+                }
+            }
+            new_insts.push(inst);
+            if has_spans {
+                new_spans.push(block.source_spans[idx]);
+            }
+        }
+        block.instructions = new_insts;
+        if has_spans {
+            block.source_spans = new_spans;
+        }
+    }
     // Now split the caller's block at the call site:
     // Block before call -> instructions before the call + branch to callee entry
     // Block after call (merge block) -> instructions after the call + original terminator
@@ -1460,6 +1495,11 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
         },
         Instruction::StackRestore { ptr } => Instruction::StackRestore {
             ptr: remap_value(*ptr, vo),
+        },
+        Instruction::ParamRef { dest, param_idx, ty } => Instruction::ParamRef {
+            dest: remap_value(*dest, vo),
+            param_idx: *param_idx,
+            ty: *ty,
         },
     }
 }

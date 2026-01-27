@@ -663,6 +663,7 @@ fn for_each_used_value(inst: &Instruction, f: &mut impl FnMut(Value)) {
             visit_operand(cond, f); visit_operand(true_val, f); visit_operand(false_val, f);
         }
         Instruction::StackRestore { ptr } => f(*ptr),
+        Instruction::ParamRef { .. } => {}
     }
 }
 

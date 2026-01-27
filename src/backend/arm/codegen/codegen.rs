@@ -1475,6 +1475,10 @@ impl ArchCodegen for ArmCodegen {
         // Use shared parameter classification (same ABI config as emit_call).
         let config = self.call_abi_config();
         let param_classes = classify_params(func, &config);
+        // Save param classes for ParamRef instructions
+        self.state.param_classes = param_classes.clone();
+        self.state.num_params = func.params.len();
+        self.state.func_is_variadic = func.is_variadic;
 
         // Phase 1: Store all GP register params first (before x0 gets clobbered by float moves).
         for (i, _param) in func.params.iter().enumerate() {
@@ -1681,6 +1685,39 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_store_result(&mut self, dest: &Value) {
         self.store_x0_to(dest);
+    }
+
+    fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
+        if param_idx >= self.state.param_classes.len() {
+            return;
+        }
+        let class = self.state.param_classes[param_idx];
+        let stack_base: i64 = 16; // After saved fp + lr
+
+        match class {
+            ParamClass::IntReg { reg_idx } => {
+                let src = Self::reg_for_type(ARM_ARG_REGS[reg_idx], ty);
+                self.state.emit_fmt(format_args!("    mov x0, {}", src));
+                self.emit_store_result(dest);
+            }
+            ParamClass::FloatReg { reg_idx } => {
+                if ty == IrType::F32 {
+                    self.state.emit_fmt(format_args!("    fmov w0, s{}", reg_idx));
+                } else {
+                    self.state.emit_fmt(format_args!("    fmov x0, d{}", reg_idx));
+                }
+                self.store_x0_to(dest);
+            }
+            ParamClass::StackScalar { offset } => {
+                let src = stack_base + offset;
+                let ldr_instr = self.load_instr_for_type(ty);
+                let reg = Self::reg_for_type("x0", ty);
+                self.emit_load_from_sp(reg, src, ldr_instr);
+                self.emit_store_result(dest);
+            }
+            // Struct/i128/F128 params remain in allocas
+            _ => {}
+        }
     }
 
     // ---- Primitives for shared default implementations ----

@@ -206,6 +206,35 @@ impl Lowerer {
         // Save param alloca values for the backend to detect unused param allocas.
         self.func_mut().param_alloca_values = ir_allocas.clone();
 
+        // Phase 1b: Emit explicit ParamRef + Store for scalar parameter allocas.
+        // This makes the parameter->alloca store visible in the IR so mem2reg
+        // can promote parameter allocas to SSA values, enabling constant
+        // propagation when parameters are reassigned (e.g., `x &= 0`).
+        // Only non-struct scalar params are eligible: struct params (struct_size != None)
+        // use special by-value handling in emit_store_params that we must not duplicate.
+        // Also skip sret pointer params (first param when uses_sret is true).
+        for (i, param) in info.params.iter().enumerate() {
+            // Skip struct params - they have special ABI handling
+            if param.struct_size.is_some() {
+                continue;
+            }
+            // Skip sret pointer param
+            if info.uses_sret && i == 0 {
+                continue;
+            }
+            let ty_size = param.ty.size();
+            if ty_size <= 8 {
+                let param_val = self.fresh_value();
+                self.emit(Instruction::ParamRef { dest: param_val, param_idx: i, ty: param.ty });
+                self.emit(Instruction::Store {
+                    val: Operand::Value(param_val),
+                    ptr: ir_allocas[i],
+                    ty: param.ty,
+                    seg_override: crate::common::types::AddressSpace::Default,
+                });
+            }
+        }
+
         // Phase 2 & 3: Process each original parameter by kind
         for (orig_idx, kind) in info.param_kinds.iter().enumerate() {
             let orig_param = &func.params[orig_idx];

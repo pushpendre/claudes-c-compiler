@@ -458,6 +458,15 @@ pub enum Instruction {
     /// Restore the stack pointer: stackrestore %ptr
     /// Used to reclaim VLA stack space when jumping backward past VLA declarations.
     StackRestore { ptr: Value },
+
+    /// Reference to a function parameter value: %dest = paramref param_idx
+    /// Represents the incoming value of the function's `param_idx`-th parameter.
+    /// Emitted in the entry block alongside param alloca + store to make parameter
+    /// initial values visible in the IR, allowing mem2reg to promote param allocas
+    /// to SSA and enabling constant propagation through reassigned parameters.
+    /// The backend translates this to a load from the appropriate argument register
+    /// or stack slot according to the calling convention.
+    ParamRef { dest: Value, param_idx: usize, ty: IrType },
 }
 
 /// Block terminator.
@@ -1308,7 +1317,8 @@ impl Instruction {
             | Instruction::GetReturnF32Second { dest }
             | Instruction::GetReturnF128Second { dest }
             | Instruction::Select { dest, .. }
-            | Instruction::StackSave { dest } => Some(*dest),
+            | Instruction::StackSave { dest }
+            | Instruction::ParamRef { dest, .. } => Some(*dest),
             Instruction::Call { dest, .. }
             | Instruction::CallIndirect { dest, .. } => *dest,
             Instruction::Intrinsic { dest, .. } => *dest,
@@ -1438,6 +1448,9 @@ impl Instruction {
             }
             Instruction::StackRestore { ptr } => {
                 used.push(ptr.0);
+            }
+            Instruction::ParamRef { .. } => {
+                // ParamRef has no operand values - it references a parameter by index
             }
         }
         used

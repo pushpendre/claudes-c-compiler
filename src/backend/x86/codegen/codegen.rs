@@ -1530,6 +1530,10 @@ impl ArchCodegen for X86Codegen {
         // Use shared parameter classification (same ABI config as emit_call).
         let config = self.call_abi_config();
         let param_classes = classify_params(func, &config);
+        // Save param classes for ParamRef instructions
+        self.state.param_classes = param_classes.clone();
+        self.state.num_params = func.params.len();
+        self.state.func_is_variadic = func.is_variadic;
         // Stack-passed parameters start at 16(%rbp) (after saved rbp + return addr).
         let stack_base: i64 = 16;
 
@@ -1625,6 +1629,43 @@ impl ArchCodegen for X86Codegen {
                 ParamClass::F128FpReg { .. } | ParamClass::F128GpPair { .. } | ParamClass::F128Stack { .. } |
                 ParamClass::LargeStructByRefReg { .. } | ParamClass::LargeStructByRefStack { .. } => {}
             }
+        }
+    }
+
+    fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
+        let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
+        if param_idx >= self.state.param_classes.len() {
+            return;
+        }
+        let class = self.state.param_classes[param_idx];
+        let stack_base: i64 = 16; // After saved rbp + return addr
+
+        match class {
+            ParamClass::IntReg { reg_idx } => {
+                let src_reg = Self::reg_for_type(X86_ARG_REGS[reg_idx], ty);
+                let load_instr = Self::mov_load_for_type(ty);
+                let dest_reg = Self::load_dest_reg(ty);
+                self.state.emit_fmt(format_args!("    {} %{}, {}", load_instr, src_reg, dest_reg));
+                self.emit_store_result(dest);
+            }
+            ParamClass::FloatReg { reg_idx } => {
+                if ty == IrType::F32 {
+                    self.state.out.emit_instr_reg_reg("    movd", xmm_regs[reg_idx], "eax");
+                    self.store_rax_to(dest);
+                } else {
+                    self.state.out.emit_instr_reg_reg("    movq", xmm_regs[reg_idx], "rax");
+                    self.store_rax_to(dest);
+                }
+            }
+            ParamClass::StackScalar { offset } => {
+                let src = stack_base + offset;
+                let load_instr = Self::mov_load_for_type(ty);
+                let reg = Self::load_dest_reg(ty);
+                self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, src, reg));
+                self.emit_store_result(dest);
+            }
+            // Struct/i128/F128 params remain in allocas (not promoted by mem2reg)
+            _ => {}
         }
     }
 

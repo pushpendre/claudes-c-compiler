@@ -249,7 +249,8 @@ fn for_each_operand_value(inst: &Instruction, mut f: impl FnMut(u32)) {
         | Instruction::GetReturnF128Second { .. }
         | Instruction::Fence { .. }
         | Instruction::StackSave { .. }
-        | Instruction::StackRestore { .. } => {}
+        | Instruction::StackRestore { .. }
+        | Instruction::ParamRef { .. } => {}
     }
 }
 

@@ -358,6 +358,7 @@ fn for_each_instruction_use(inst: &Instruction, mut f: impl FnMut(u32)) {
         Instruction::StackRestore { ptr } => {
             f(ptr.0);
         }
+        Instruction::ParamRef { .. } => {}
     }
 }
 

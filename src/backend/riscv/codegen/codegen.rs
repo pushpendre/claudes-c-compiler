@@ -837,6 +837,10 @@ impl ArchCodegen for RiscvCodegen {
         let mut config = self.call_abi_config();
         config.variadic_floats_in_gp = func.is_variadic;
         let param_classes = classify_params(func, &config);
+        // Save param classes for ParamRef instructions
+        self.state.param_classes = param_classes.clone();
+        self.state.num_params = func.params.len();
+        self.state.func_is_variadic = func.is_variadic;
 
         // Stack-passed params are at positive s0 offsets.
         // For variadic: register save area occupies s0+0..s0+56, stack params at s0+64+.
@@ -1059,6 +1063,38 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_store_result(&mut self, dest: &Value) {
         self.store_t0_to(dest);
+    }
+
+    fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
+        if param_idx >= self.state.param_classes.len() {
+            return;
+        }
+        let class = self.state.param_classes[param_idx];
+        let stack_base: i64 = if self.state.func_is_variadic { 64 } else { 0 };
+
+        match class {
+            ParamClass::IntReg { reg_idx } => {
+                self.state.emit_fmt(format_args!("    mv t0, {}", RISCV_ARG_REGS[reg_idx]));
+                self.emit_store_result(dest);
+            }
+            ParamClass::FloatReg { reg_idx } => {
+                let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+                if ty == IrType::F32 {
+                    self.state.emit_fmt(format_args!("    fmv.x.w t0, {}", float_arg_regs[reg_idx]));
+                } else {
+                    self.state.emit_fmt(format_args!("    fmv.x.d t0, {}", float_arg_regs[reg_idx]));
+                }
+                self.store_t0_to(dest);
+            }
+            ParamClass::StackScalar { offset } => {
+                let src = stack_base + offset;
+                let load_instr = Self::load_for_type(ty);
+                self.emit_load_from_s0("t0", src, load_instr);
+                self.emit_store_result(dest);
+            }
+            // Struct/i128/F128 params remain in allocas
+            _ => {}
+        }
     }
 
     // ---- Primitives for shared default implementations ----

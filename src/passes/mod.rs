@@ -210,7 +210,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         // propagate through to inline asm "i" (immediate) constraints.
         // Without this, expressions like `1 << (bit & 7)` in _static_cpu_has()
         // cannot be constant-folded and inline asm emits $0 placeholders.
-        crate::ir::mem2reg::promote_allocas(module);
+        crate::ir::mem2reg::promote_allocas_with_params(module);
 
         // After mem2reg, run scalar optimization passes so that arithmetic
         // on inlined constants is fully resolved before we try to resolve

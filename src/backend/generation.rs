@@ -1087,6 +1087,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 Instruction::Intrinsic { dest, op, dest_ptr, args } => cg.emit_intrinsic(dest, op, dest_ptr, args),
                 Instruction::StackSave { dest } => cg.emit_stack_save(dest),
                 Instruction::StackRestore { ptr } => cg.emit_stack_restore(ptr),
+                Instruction::ParamRef { dest, param_idx, ty } => cg.emit_param_ref(dest, *param_idx, *ty),
                 Instruction::Alloca { .. } | Instruction::Copy { .. }
                 | Instruction::Load { .. } | Instruction::BinOp { .. }
                 | Instruction::UnaryOp { .. } | Instruction::Cmp { .. }

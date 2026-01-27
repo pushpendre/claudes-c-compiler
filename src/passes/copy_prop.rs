@@ -302,6 +302,7 @@ fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &[Option<Op
         Instruction::StackRestore { ptr } => {
             count += replace_value_in_place(ptr, copy_map);
         }
+        Instruction::ParamRef { .. } => {}
     }
 
     count

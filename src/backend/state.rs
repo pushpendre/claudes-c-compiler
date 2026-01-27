@@ -157,6 +157,13 @@ pub struct CodegenState {
     pub reg_assigned_values: FxHashSet<u32>,
     /// Whether to emit .file/.loc debug directives for source-level debugging.
     pub debug_info: bool,
+    /// Pre-computed parameter classifications for the current function.
+    /// Populated by `emit_store_params` so that `emit_param_ref` can access them.
+    pub param_classes: Vec<crate::backend::call_emit::ParamClass>,
+    /// Number of function parameters (for ParamRef bounds checking).
+    pub num_params: usize,
+    /// Whether the current function is variadic (for ParamRef ABI handling).
+    pub func_is_variadic: bool,
 }
 
 impl CodegenState {
@@ -187,6 +194,9 @@ impl CodegenState {
             weak_extern_symbols: FxHashSet::default(),
             reg_assigned_values: FxHashSet::default(),
             debug_info: false,
+            param_classes: Vec::new(),
+            num_params: 0,
+            func_is_variadic: false,
         }
     }
 
