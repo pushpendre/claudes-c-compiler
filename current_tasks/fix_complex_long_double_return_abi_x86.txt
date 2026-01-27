@@ -1,0 +1,12 @@
+Fix x86-64 _Complex long double return ABI
+
+Bug: On x86-64, _Complex long double was returned via hidden sret pointer
+(in %rdi) instead of via x87 st(0)/st(1) as the System V ABI requires.
+This caused incorrect results when calling library functions like cpowl,
+and ABI incompatibility with GCC-compiled code.
+
+Fix: Added new IR instructions (GetReturnF128Second, SetReturnF128Second)
+and x86 backend codegen to return _Complex long double via x87 FPU stack.
+The real part is in st(0), imaginary part in st(1), matching GCC behavior.
+
+Status: completed

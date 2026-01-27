@@ -203,6 +203,15 @@ impl Lowerer {
         self.target == Target::Aarch64
     }
 
+    /// Returns true if the target returns _Complex long double via register pairs
+    /// (x87 st(0)/st(1) on x86-64) rather than via sret hidden pointer.
+    /// On x86-64: true (COMPLEX_X87 class, returned in st(0) and st(1)).
+    /// On ARM64: false (returned via decomposition into q0/q1, handled separately).
+    /// On RISC-V: false (returned via sret hidden pointer).
+    pub(super) fn returns_complex_long_double_in_regs(&self) -> bool {
+        self.target == Target::X86_64
+    }
+
     /// Look up the shared type metadata for a variable by name.
     ///
     /// Checks locals first, then globals. Returns `&VarInfo` which provides
@@ -578,6 +587,10 @@ impl Lowerer {
                 } else {
                     ret_ty = IrType::F32;
                 }
+            } else if matches!(full_ret_ctype, CType::ComplexLongDouble) && self.returns_complex_long_double_in_regs() {
+                // x86-64: _Complex long double returned via x87 st(0)/st(1)
+                // IR return type is F128 (real part); imag part via SetReturnF128Second
+                ret_ty = IrType::F128;
             }
         }
 
@@ -608,7 +621,7 @@ impl Lowerer {
             if matches!(full_ret_ctype, CType::ComplexLongDouble) {
                 // On x86-64, _Complex long double is returned via x87 st(0)/st(1),
                 // not via hidden pointer (sret). On other targets, use sret.
-                if !self.is_x86() {
+                if !self.returns_complex_long_double_in_regs() {
                     let size = self.sizeof_type(ret_type_spec);
                     sret_size = Some(size);
                 }

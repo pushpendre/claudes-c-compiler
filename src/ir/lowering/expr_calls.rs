@@ -257,7 +257,7 @@ impl Lowerer {
         Operand::Value(alloca)
     }
 
-    /// Handle complex return types (ComplexFloat, ComplexDouble).
+    /// Handle complex return types (ComplexFloat, ComplexDouble, ComplexLongDouble).
     /// Returns Some(result) if the return was complex, None otherwise.
     fn handle_complex_return(&mut self, dest: Value, ret_ct: &CType) -> Option<Operand> {
         match ret_ct {
@@ -304,7 +304,7 @@ impl Lowerer {
                 self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F64 , seg_override: AddressSpace::Default });
                 Some(Operand::Value(alloca))
             }
-            CType::ComplexLongDouble if self.is_x86() => {
+            CType::ComplexLongDouble if self.returns_complex_long_double_in_regs() => {
                 // x86-64: _Complex long double returns real in x87 st(0), imag in x87 st(1).
                 // After the call, emit_call_store_result stores st(0) (real) into dest.
                 // GetReturnF128Second reads the next x87 value (former st(1), now st(0) after first fstpt).
@@ -674,24 +674,25 @@ impl Lowerer {
     /// Strips Deref layers since dereferencing a function pointer is a no-op in C.
     fn get_func_ptr_return_ir_type(&self, func_expr: &Expr) -> IrType {
         if let Some(ctype) = self.get_expr_ctype(func_expr) {
-            return Self::extract_return_type_from_ctype(&ctype);
+            return self.extract_return_type_from_ctype(&ctype);
         }
         // Strip all Deref layers (dereferencing function pointers is a no-op)
         let mut expr = func_expr;
         while let Expr::Deref(inner, _) = expr {
             expr = inner;
             if let Some(ctype) = self.get_expr_ctype(expr) {
-                return Self::extract_return_type_from_ctype(&ctype);
+                return self.extract_return_type_from_ctype(&ctype);
             }
         }
         IrType::I64
     }
 
-    pub(super) fn extract_return_type_from_ctype(ctype: &CType) -> IrType {
+    pub(super) fn extract_return_type_from_ctype(&self, ctype: &CType) -> IrType {
+        let returns_cld_in_regs = self.returns_complex_long_double_in_regs();
         match ctype {
             CType::Pointer(inner, _) => {
                 match inner.as_ref() {
-                    CType::Function(ft) => Self::func_return_ir_type(&ft.return_type),
+                    CType::Function(ft) => Self::func_return_ir_type(&ft.return_type, returns_cld_in_regs),
                     CType::Pointer(ret, _) => {
                         match ret.as_ref() {
                             CType::Float => IrType::F32,
@@ -704,7 +705,7 @@ impl Lowerer {
                     _ => IrType::I64,
                 }
             }
-            CType::Function(ft) => Self::func_return_ir_type(&ft.return_type),
+            CType::Function(ft) => Self::func_return_ir_type(&ft.return_type, returns_cld_in_regs),
             _ => IrType::I64,
         }
     }
@@ -712,7 +713,7 @@ impl Lowerer {
     /// Map a function's return CType to the IR type used for the call instruction.
     /// Complex types return in FP registers (F64 for both ComplexFloat and ComplexDouble),
     /// not as Ptr which is what IrType::from_ctype gives.
-    fn func_return_ir_type(ret_ctype: &CType) -> IrType {
+    fn func_return_ir_type(ret_ctype: &CType, returns_cld_in_regs: bool) -> IrType {
         match ret_ctype {
             // Complex float: on x86-64, both F32 parts packed into xmm0 as F64
             // On ARM/RISC-V, real part in first FP reg as F32

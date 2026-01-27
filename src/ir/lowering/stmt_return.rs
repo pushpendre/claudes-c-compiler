@@ -231,6 +231,15 @@ impl Lowerer {
                 return Some(real);
             }
 
+            // _Complex long double on x86-64: return real in st(0), imag in st(1)
+            if *rct == CType::ComplexLongDouble && self.returns_complex_long_double_in_regs()
+                && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
+                let real = self.load_complex_real(src_ptr, rct);
+                let imag = self.load_complex_imag(src_ptr, rct);
+                self.emit(Instruction::SetReturnF128Second { src: imag });
+                return Some(real);
+            }
+
             // _Complex float: platform-specific return convention
             if *rct == CType::ComplexFloat && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
                 if self.uses_packed_complex_float() {
@@ -295,6 +304,16 @@ impl Lowerer {
             let real = self.load_complex_real(src_ptr, &rct_clone);
             let imag = self.load_complex_imag(src_ptr, &rct_clone);
             self.emit(Instruction::SetReturnF64Second { src: imag });
+            return Some(real);
+        }
+
+        // _Complex long double on x86-64: return real in st(0), imag in st(1)
+        if rct_clone == CType::ComplexLongDouble && self.returns_complex_long_double_in_regs()
+            && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
+            let src_ptr = self.operand_to_value(complex_val);
+            let real = self.load_complex_real(src_ptr, &rct_clone);
+            let imag = self.load_complex_imag(src_ptr, &rct_clone);
+            self.emit(Instruction::SetReturnF128Second { src: imag });
             return Some(real);
         }
 

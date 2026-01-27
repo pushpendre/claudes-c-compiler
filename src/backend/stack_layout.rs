@@ -846,6 +846,12 @@ pub fn calculate_stack_space_common(
     let mut block_space: FxHashMap<usize, i64> = FxHashMap::default();
     let mut max_block_local_space: i64 = 0;
 
+    // Track which value IDs have already been collected for slot allocation.
+    // Multi-def values (from phi elimination) are defined in multiple blocks,
+    // so without dedup each definition would be collected separately, wasting
+    // slots in the Tier 2 packer.
+    let mut collected_values: FxHashSet<u32> = FxHashSet::default();
+
     for (_block_idx, block) in func.blocks.iter().enumerate() {
         for inst in &block.instructions {
             if let Instruction::Alloca { dest, size, ty, align, .. } = inst {
@@ -940,6 +946,13 @@ pub fn calculate_stack_space_common(
                 // These will get the same slot as their root after all slots are assigned.
                 // Don't alias i128/f128 values (16-byte slots) to avoid size mismatches.
                 if !is_i128 && !is_f128 && copy_alias.contains_key(&dest.0) {
+                    continue;
+                }
+
+                // Dedup: multi-def values (phi results) appear in multiple blocks.
+                // Without this check, each definition would allocate a separate slot,
+                // wasting frame space (up to 3x for 3-way phi merges).
+                if !collected_values.insert(dest.0) {
                     continue;
                 }
 
