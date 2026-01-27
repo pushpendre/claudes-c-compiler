@@ -1,0 +1,8 @@
+Task: Split generation.rs into generation.rs + stack_layout.rs
+
+generation.rs is 1842 lines with two distinct concerns:
+- Lines 1-~800: codegen dispatch (generate_module/function/instruction/terminator)
+- Lines ~800-1842: stack layout (calculate_stack_space_common, coalescable allocas,
+  regalloc helpers, param alloca detection)
+
+Extract the stack layout half into a new stack_layout.rs module.
