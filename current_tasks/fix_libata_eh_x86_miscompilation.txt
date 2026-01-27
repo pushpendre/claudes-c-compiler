@@ -1,0 +1,14 @@
+Task: Fix drivers/ata/libata-eh.c x86 miscompilation
+
+The delta debugging tool (seed=11111) found that compiling drivers/ata/libata-eh.c
+with CCC causes the x86 kernel to fail to boot (223s timeout = hang).
+
+Plan:
+1. Compare CCC vs GCC assembly output
+2. Boot the kernel and check serial output for crash/hang details
+3. Identify the miscompiled construct
+4. Write minimal reproducer
+5. Fix the compiler bug
+6. Verify the fix with the DD tool
+
+Status: in_progress
