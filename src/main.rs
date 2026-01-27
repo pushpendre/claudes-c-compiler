@@ -96,6 +96,9 @@ fn real_main() {
             "-E" => {
                 driver.mode = CompileMode::PreprocessOnly;
             }
+            "-P" => {
+                driver.suppress_line_markers = true;
+            }
 
             // Optimization levels: all levels run the same maximum optimizations.
             // While the compiler is still maturing, having separate -O0/-O1/-O2

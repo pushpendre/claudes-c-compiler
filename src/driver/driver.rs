@@ -121,6 +121,10 @@ pub struct Driver {
     /// The original command-line arguments (excluding argv[0]), saved so we can
     /// forward them verbatim to GCC when gcc_fallback is true.
     pub original_args: Vec<String>,
+    /// Whether to suppress line markers in preprocessor output (-P flag).
+    /// When true, `# <line> "<file>"` directives are stripped from -E output.
+    /// Used by the Linux kernel's cc-version.sh to detect the compiler.
+    pub suppress_line_markers: bool,
 }
 
 impl Driver {
@@ -160,6 +164,7 @@ impl Driver {
             dep_file: None,
             gcc_fallback: false,
             original_args: Vec::new(),
+            suppress_line_markers: false,
         }
     }
 
@@ -319,7 +324,11 @@ impl Driver {
                         cmd.arg(format!("-D{}={}", def.name, def.value));
                     }
                 }
-                cmd.arg("-E").arg(input_file);
+                cmd.arg("-E");
+                if self.suppress_line_markers {
+                    cmd.arg("-P");
+                }
+                cmd.arg(input_file);
                 if self.output_path_set {
                     cmd.arg("-o").arg(&self.output_path);
                 }
@@ -344,11 +353,17 @@ impl Driver {
             self.process_force_includes(&mut preprocessor)?;
             let preprocessed = preprocessor.preprocess(&source);
 
+            let output = if self.suppress_line_markers {
+                Self::strip_line_markers(&preprocessed)
+            } else {
+                preprocessed
+            };
+
             if self.output_path_set {
-                std::fs::write(&self.output_path, &preprocessed)
+                std::fs::write(&self.output_path, &output)
                     .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
             } else {
-                print!("{}", preprocessed);
+                print!("{}", output);
             }
         }
         Ok(())
@@ -462,6 +477,28 @@ impl Driver {
     /// Both are passed to the target assembler (gcc) directly.
     fn is_assembly_source(path: &str) -> bool {
         path.ends_with(".s") || path.ends_with(".S")
+    }
+
+    /// Strip GCC-style line markers (`# <num> "file"`) from preprocessed output.
+    /// Used when -P flag is set. Filters out lines matching `# <digit>...` while
+    /// preserving all other lines (including blank lines) verbatim.
+    fn strip_line_markers(input: &str) -> String {
+        fn is_line_marker(line: &str) -> bool {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('#') {
+                return false;
+            }
+            trimmed[1..].trim_start().starts_with(|c: char| c.is_ascii_digit())
+        }
+
+        let mut result: String = input.lines()
+            .filter(|line| !is_line_marker(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if input.ends_with('\n') {
+            result.push('\n');
+        }
+        result
     }
 
     /// Assemble a .s or .S file to an object file using the target assembler.
