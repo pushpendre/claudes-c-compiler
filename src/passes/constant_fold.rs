@@ -531,7 +531,17 @@ fn try_fold_float_cast_mapped(dest: Value, src: &Operand, from_ty: IrType, to_ty
         }
         (false, true) => {
             // int-to-float conversion
-            let val = src_const.to_i64()?;
+            // Normalize to source type width first (sign-extend or zero-extend)
+            let raw_val = src_const.to_i64()?;
+            let val = match from_ty {
+                IrType::I8 => raw_val as i8 as i64,
+                IrType::U8 => raw_val as u8 as i64,
+                IrType::I16 => raw_val as i16 as i64,
+                IrType::U16 => raw_val as u16 as i64,
+                IrType::I32 => raw_val as i32 as i64,
+                IrType::U32 => raw_val as u32 as i64,
+                _ => raw_val,
+            };
             if to_ty == IrType::F128 {
                 // For long double, use direct integer-to-x87 conversion to preserve
                 // full 64-bit precision (x87 has 64-bit mantissa, unlike f64's 52-bit).

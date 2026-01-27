@@ -149,7 +149,7 @@ impl Lowerer {
                 }
 
                 // Integer source: use bit-based cast chain evaluation
-                let (bits, _src_signed) = self.eval_const_expr_as_bits(inner)?;
+                let (bits, src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_width = target_ir_ty.size() * 8;
                 let target_signed = matches!(target_ir_ty, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64 | IrType::I128);
 
@@ -186,12 +186,14 @@ impl Lowerer {
                     IrType::U32 => IrConst::I64(truncated as u32 as i64),
                     IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(truncated as i64),
                     IrType::I128 | IrType::U128 => unreachable!("handled above"),
+                    // For int-to-float, use source signedness (not target) to
+                    // determine sign/zero extension before float conversion
                     IrType::F32 => {
-                        let int_val = if target_signed { truncated as i64 as f32 } else { truncated as u64 as f32 };
+                        let int_val = if src_signed { bits as i64 as f32 } else { bits as f32 };
                         IrConst::F32(int_val)
                     }
                     IrType::F64 => {
-                        let int_val = if target_signed { truncated as i64 as f64 } else { truncated as u64 as f64 };
+                        let int_val = if src_signed { bits as i64 as f64 } else { bits as f64 };
                         IrConst::F64(int_val)
                     }
                     _ => return None,

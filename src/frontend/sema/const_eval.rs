@@ -185,6 +185,17 @@ impl<'a> SemaConstEval<'a> {
                     bits & ((1u64 << target_width) - 1)
                 };
 
+                // For int-to-float conversions, we need the *source* signedness
+                // (not target) to correctly interpret the bit pattern. E.g.,
+                // (double)(unsigned long)0xFFFFFFFFFFFFFFFF should produce
+                // 18446744073709551615.0, not -1.0.
+                if matches!(target_ctype, CType::Float | CType::Double | CType::LongDouble) {
+                    let src_signed = self.lookup_expr_type(inner)
+                        .or_else(|| self.infer_expr_ctype(inner))
+                        .map_or(true, |ct| !ct.is_unsigned());
+                    return self.bits_to_irconst(truncated, &target_ctype, src_signed);
+                }
+
                 // Convert to IrConst based on target CType
                 self.bits_to_irconst(truncated, &target_ctype, target_signed)
             }

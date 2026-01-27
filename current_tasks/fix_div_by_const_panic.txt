@@ -1,0 +1,10 @@
+Task: Fix div_by_const panic for large unsigned divisors
+Status: in_progress
+Started: 2026-01-27
+
+Bug: compute_unsigned_magic_32 panicked with unreachable!() for divisors
+close to u32::MAX (about 100 values near 2^32). The magic number algorithm
+can't find valid 32-bit multipliers for these large divisors.
+
+Fix: Return Option from compute_unsigned_magic_32, falling back to native
+division for these rare cases.
