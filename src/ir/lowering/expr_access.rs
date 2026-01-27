@@ -756,7 +756,6 @@ impl Lowerer {
         } else {
             self.resolve_member_access_with_ctype(base_expr, field_name)
         };
-
         // Extract address space: for p->field from the pointer type,
         // for s.field from the struct variable's address space qualifier.
         let addr_space = if is_pointer {

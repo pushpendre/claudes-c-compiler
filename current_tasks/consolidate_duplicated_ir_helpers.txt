@@ -1,0 +1,27 @@
+Task: Consolidate duplicated IR helper functions
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+Several utility functions are duplicated across different modules:
+
+1. instruction_used_values() and terminator_used_values() exist in both
+   passes/inline.rs and ir/mem2reg/mem2reg.rs with divergent implementations.
+   The inline.rs version is incomplete (uses catch-all wildcard, misses many
+   instruction variants). The mem2reg.rs version is comprehensive.
+
+2. Three nearly-identical collect_global_init_refs_* functions in passes/mod.rs
+   all walk the same GlobalInit tree but differ only in their collection target
+   (Vec<String>, HashSet<&str>, Vec<bool>). These can be unified into a single
+   generic traversal with a callback.
+
+3. Clean up completed task files from current_tasks/ that are cluttering the
+   directory.
+
+Approach:
+- Move the comprehensive instruction_used_values/terminator_used_values into
+  ir/ir.rs as methods or associated functions on Instruction/Terminator
+- Update inline.rs and mem2reg.rs to call the shared versions
+- Replace the three collect_global_init_refs_* with a single for_each_global_init_ref
+  callback-based traversal
+- Remove completed task files from current_tasks/

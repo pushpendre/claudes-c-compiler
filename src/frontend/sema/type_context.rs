@@ -225,6 +225,15 @@ impl TypeContext {
                 self.struct_layouts.remove(&key);
             }
             for (key, val) in frame.struct_layouts_shadowed {
+                // Don't restore an empty forward-declaration layout over a full
+                // definition.
+                if val.fields.is_empty() {
+                    if let Some(current) = self.struct_layouts.get(&key) {
+                        if !current.fields.is_empty() {
+                            continue;
+                        }
+                    }
+                }
                 self.struct_layouts.insert(key, val);
             }
             {
