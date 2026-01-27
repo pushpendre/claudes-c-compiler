@@ -1,0 +1,13 @@
+Task: Fix drivers/acpi/acpica/nsaccess.c x86 miscompilation causing boot hang
+Status: in_progress
+Started: 2026-01-27
+
+The delta debugging tool (seed=200) found that compiling drivers/acpi/acpica/nsaccess.c
+with CCC causes the x86 kernel to hang during boot (223s timeout).
+
+Plan:
+1. Compare CCC vs GCC assembly output for nsaccess.c
+2. Identify the miscompiled construct
+3. Write minimal reproducer
+4. Fix the compiler bug
+5. Verify the fix with the DD tool
