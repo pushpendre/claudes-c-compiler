@@ -2724,6 +2724,78 @@ impl ArchCodegen for RiscvCodegen {
 
     // ---- Float binop primitives ----
 
+    /// Override emit_float_binop for F128 to use full-precision operands.
+    ///
+    /// The default implementation loads operands via emit_load_operand (operand_to_t0)
+    /// which gets the f64 approximation in t0/t1. For F128, the slot holds the full
+    /// 16-byte f128, not an f64 approximation, so loading 8 bytes from the slot would
+    /// yield the f128 low half -- not an f64 value. This override loads operands
+    /// using emit_f128_operand_to_a0_a1 which correctly accesses the full f128 data.
+    fn emit_float_binop(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty == IrType::F128 {
+            let libcall = match op {
+                FloatOp::Add => "__addtf3",
+                FloatOp::Sub => "__subtf3",
+                FloatOp::Mul => "__multf3",
+                FloatOp::Div => "__divtf3",
+            };
+
+            // Allocate stack space for saving the LHS f128 (16 bytes)
+            self.emit_addi_sp(-16);
+
+            // Load LHS as full f128 into a0:a1
+            self.emit_f128_operand_to_a0_a1(lhs);
+            // Save LHS f128 to temp stack space
+            self.state.emit("    sd a0, 0(sp)");
+            self.state.emit("    sd a1, 8(sp)");
+
+            // Load RHS as full f128 into a0:a1, then move to a2:a3
+            self.emit_f128_operand_to_a0_a1(rhs);
+            self.state.emit("    mv a2, a0");
+            self.state.emit("    mv a3, a1");
+
+            // Reload LHS f128 into a0:a1
+            self.state.emit("    ld a0, 0(sp)");
+            self.state.emit("    ld a1, 8(sp)");
+
+            // Call the arithmetic libcall: result f128 in a0:a1
+            self.state.emit_fmt(format_args!("    call {}", libcall));
+
+            // Free temp stack space
+            self.emit_addi_sp(16);
+
+            // Store full f128 result to dest slot
+            if let Some(slot) = self.state.get_slot(dest.0) {
+                self.emit_store_to_s0("a0", slot.0, "sd");
+                self.emit_store_to_s0("a1", slot.0 + 8, "sd");
+            }
+
+            // Convert result to f64 approximation for register-based data flow
+            self.state.emit("    call __trunctfdf2");
+            self.state.emit("    fmv.x.d t0, fa0");
+            self.state.reg_cache.invalidate_all();
+
+            // Track that dest has full f128 in its slot
+            self.f128_load_sources.insert(dest.0, (dest.0, 0, false));
+
+            // Store f64 approx only to register (if register-allocated), not to slot
+            if let Some(&reg) = self.reg_assignments.get(&dest.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mv {}, t0", reg_name));
+            }
+            self.state.reg_cache.set_acc(dest.0, false);
+            return;
+        }
+
+        // Non-F128: use the default implementation (loads f64/f32 via operand_to_t0)
+        let mnemonic = self.emit_float_binop_mnemonic(op);
+        self.emit_load_operand(lhs);
+        self.emit_acc_to_secondary();
+        self.emit_load_operand(rhs);
+        self.emit_float_binop_impl(mnemonic, ty);
+        self.emit_store_result(dest);
+    }
+
     fn emit_float_binop_impl(&mut self, mnemonic: &str, ty: IrType) {
         // On RISC-V: emit_acc_to_secondary does "mv t1, t0", acc (rhs) stays in t0
         // So after shared default: t1 = lhs, t0 = rhs
