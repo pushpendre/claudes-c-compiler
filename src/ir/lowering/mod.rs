@@ -1,6 +1,8 @@
 pub mod definitions;
 pub mod func_state;
 pub mod lowering;
+mod func_lowering;
+mod global_decl;
 pub mod expr;
 pub mod expr_ops;
 pub mod expr_access;
