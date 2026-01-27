@@ -1,0 +1,11 @@
+Task: Deduplicate regalloc setup boilerplate across 3 backends
+
+All 3 backends (x86/ARM/RISC-V) repeat identical code in calculate_stack_space:
+- Build available_regs from arch callee-saved, filtering out ASM clobbers
+- Run regalloc::allocate_registers
+- Store assignments + used_callee_saved
+- Merge ASM clobber regs into used_callee_saved (dedup)
+- Sort, build reg_assigned set
+
+Extract shared helper that takes callee_saved + asm_clobbered as inputs.
+Also deduplicate the inline-asm callee-saved scan loop (x86 + RISC-V).
