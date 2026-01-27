@@ -1,0 +1,14 @@
+Fix RISC-V ELF float ABI flags
+
+Problem: The RISC-V assembler config hardcodes -mabi=lp64d (double-float ABI)
+and -march=rv64gc, ignoring user-supplied -mabi and -march flags. When the Linux
+kernel passes -mabi=lp64 (soft-float ABI) and -march=rv64imac (no F/D extensions),
+the generated .o files have double-float ABI ELF flags (0x5) instead of the
+expected soft-float flags (0x1). The linker rejects mixing these:
+  "can't link double-float modules with soft-float modules"
+
+Fix:
+1. Parse -mabi= and -march= from CLI args, store in Driver
+2. Pass them as extra dynamic args to the assembler (after defaults, so last-wins)
+3. Update preprocessor macros for the RISC-V ABI (__riscv_float_abi_soft vs _double)
+4. Add regression test
