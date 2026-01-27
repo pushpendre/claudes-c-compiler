@@ -1,0 +1,25 @@
+Task: Raise tiny inline threshold to cover guard-pattern functions
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+  Static inline functions with simple control flow (e.g., `if (flag) call()`)
+  have ~9-15 IR instructions and 2-3 basic blocks. The previous "tiny" threshold
+  (<=5 instructions, <=1 block) was too restrictive and didn't cover these
+  guard-pattern functions.
+
+  When the caller exceeds MAX_CALLER_INSTRUCTIONS_AFTER_INLINE (200), these
+  small functions are not inlined, leaving standalone definitions that reference
+  undefined symbols in dead code paths. This causes linker errors like:
+    undefined reference to `__fscache_clear_page_bits'
+  in fs/netfs/buffered_write.c (kernel x86 build, CONFIG_FSCACHE disabled).
+
+Fix:
+  Raised MAX_TINY_INLINE_INSTRUCTIONS from 5 to 15.
+  Added MAX_TINY_INLINE_BLOCKS = 4 (was hardcoded to 1).
+  This covers guard-pattern static inline functions that have an if/else
+  and one or two calls, ensuring they're always inlined regardless of
+  caller size.
+
+Related: fix_static_inline_not_inlined_in_large_callers.txt (same root cause,
+different approach - this PR addresses it by raising the tiny threshold)

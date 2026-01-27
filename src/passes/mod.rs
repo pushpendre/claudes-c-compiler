@@ -421,9 +421,48 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         }
     }
 
+    // Build a set of always_inline functions whose addresses are taken.
+    // A function's address is "taken" if it appears in a GlobalAddr instruction
+    // (not a Call), in an inline asm input_symbols, or in a global initializer.
+    // These functions need standalone bodies even though they're always_inline,
+    // because the address must resolve to a real symbol at link time.
+    let mut address_taken: FxHashSet<String> = FxHashSet::default();
+
+    // Check GlobalAddr instructions in all functions (address-of-function in code)
+    for func in &module.functions {
+        if func.is_declaration {
+            continue;
+        }
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    Instruction::GlobalAddr { name, .. } => {
+                        address_taken.insert(name.clone());
+                    }
+                    Instruction::InlineAsm { input_symbols, .. } => {
+                        for sym in input_symbols {
+                            if let Some(s) = sym {
+                                let base = s.split('+').next().unwrap_or(s);
+                                address_taken.insert(base.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Check global initializers (address-of-function stored in globals)
+    for global in &module.globals {
+        collect_global_init_addr_taken(&global.init, &mut address_taken);
+    }
+
     // Remove unreachable static functions and static always_inline functions.
     // Static always_inline functions should never be emitted as standalone bodies —
     // GCC never emits them. Their bodies exist only to be inlined at call sites.
+    // EXCEPTION: if the function's address is taken (used as a function pointer),
+    // the standalone body must be kept so the linker can resolve the reference.
     // If they're still present after inlining, their standalone bodies may contain
     // unresolvable inline asm operands (e.g., "i" constraint with %c modifier
     // referencing function parameters that are only known after inlining), which
@@ -432,9 +471,13 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         if func.is_declaration {
             return true;
         }
-        // Remove static always_inline functions — they should only exist as inlined copies.
+        // Remove static always_inline functions — unless their address is taken
+        // (used as a function pointer in code or global initializers), in which case
+        // we need the standalone body so the linker can resolve the reference.
+        // Also keep them if they're still in the reachable set (e.g., if the inliner
+        // couldn't inline all call sites due to budget limits).
         if func.is_static && func.is_always_inline {
-            return false;
+            return address_taken.contains(&func.name) || reachable.contains(&func.name);
         }
         if !func.is_static {
             return true;
@@ -483,6 +526,27 @@ fn collect_global_init_refs_vec(init: &GlobalInit, refs: &mut Vec<String>) {
         GlobalInit::Compound(fields) => {
             for field in fields {
                 collect_global_init_refs_vec(field, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect function/symbol addresses referenced from a global initializer.
+/// Used to determine which always_inline functions have their address taken
+/// via global initializers (e.g., function pointers in struct literals).
+fn collect_global_init_addr_taken(init: &GlobalInit, addr_taken: &mut FxHashSet<String>) {
+    match init {
+        GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
+            addr_taken.insert(name.clone());
+        }
+        GlobalInit::GlobalLabelDiff(label1, label2, _) => {
+            addr_taken.insert(label1.clone());
+            addr_taken.insert(label2.clone());
+        }
+        GlobalInit::Compound(fields) => {
+            for field in fields {
+                collect_global_init_addr_taken(field, addr_taken);
             }
         }
         _ => {}
