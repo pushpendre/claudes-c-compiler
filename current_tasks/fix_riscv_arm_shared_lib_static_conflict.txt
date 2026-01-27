@@ -1,0 +1,21 @@
+Task: Fix RISC-V and ARM shared library build failure (postgres regression)
+Status: in_progress
+
+Problem:
+When building shared libraries (-shared) on RISC-V and ARM, the linker receives
+both -static (from extra_args default) and -shared (from user args). This causes
+the linker to use static CRT objects (crtbeginT.o) which contain absolute
+relocations (R_RISCV_HI20, R_AARCH64_ADR_PREL_PG_HI21) that are incompatible
+with shared objects.
+
+Root cause:
+In backend/common.rs link_with_args(), the code skips -no-pie/-pie for shared
+builds but does NOT skip -static. The -static default exists because QEMU
+user-mode emulation needs static binaries, but it must not be passed when
+building .so files.
+
+Fix:
+Add -static to the list of flags skipped when is_shared is true in link_with_args().
+
+Impact:
+This fixes postgres build on RISC-V and ARM (was failing at shared library link step).
