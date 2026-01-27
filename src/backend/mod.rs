@@ -3,7 +3,8 @@ pub mod common;
 // Shared codegen framework, split into focused modules:
 pub mod state;       // CodegenState, StackSlot, SlotAddr
 pub mod traits;      // ArchCodegen trait with default implementations
-pub mod generation;  // Module/function/instruction dispatch
+pub mod generation;    // Module/function/instruction dispatch
+pub mod stack_layout;  // Stack layout: slot assignment, alloca coalescing, regalloc helpers
 pub mod call_abi;    // Call argument classification and stack computation
 pub mod call_emit;   // Callee-side parameter classification (shared by emit_store_params)
 pub mod cast;        // Cast and float operation classification
