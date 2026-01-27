@@ -1,8 +1,0 @@
-Task: Split RISC-V codegen.rs into focused submodules
-
-riscv/codegen/codegen.rs is ~3,850 lines. Extract:
-1. InlineAsmEmitter impl -> asm_emitter.rs (~268 lines)
-2. Intrinsic/SIMD emission -> intrinsics.rs (~490 lines)
-3. F128 soft-float helpers -> f128.rs (~260 lines)
-
-Target: reduce codegen.rs to ~2,832 lines.
