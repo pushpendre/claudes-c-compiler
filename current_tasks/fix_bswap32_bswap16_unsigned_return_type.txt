@@ -1,0 +1,22 @@
+Fix __builtin_bswap32 and __builtin_bswap16 return types to unsigned
+
+Problem:
+The builtin_return_ctype function in type_checker.rs declares
+__builtin_bswap32 and __builtin_bswap16 as returning CType::Int (signed int).
+In GCC, __builtin_bswap32 returns unsigned int and __builtin_bswap16 returns
+unsigned short.
+
+When bswap32 returns a value with the MSB set (e.g., 0x90d34265), a subsequent
+right shift like `>> 16` performs arithmetic shift (sign-extending) instead of
+logical shift. This produces wrong results:
+  (__builtin_bswap32(0x6542d390)) >> 16 = 0xffff90d3 (wrong, sign-extended)
+  Expected: 0x000090d3 (zero-extended)
+
+This caused the mbedTLS ARIA cipher selftest to fail on both x86 and i686,
+because the ARIA_P1 macro expands to ARIA_P2(ARIA_P3(x)) which is
+((__builtin_bswap32(x)) >> 16) ^ ((__builtin_bswap32(x)) << 16).
+
+Fix:
+- type_checker.rs: __builtin_bswap32 -> CType::UInt, __builtin_bswap16 -> CType::UShort
+
+Status: in_progress
