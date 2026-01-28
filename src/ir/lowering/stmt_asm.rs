@@ -117,15 +117,6 @@ impl Lowerer {
                 } else {
                     let cur_val = self.fresh_value();
                     self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
-                    // Also store the current value into the temp alloca so that
-                    // the backend's preload_readwrite_output reads the correct
-                    // value instead of uninitialized memory.
-                    if asm_ptr != ptr {
-                        self.emit(Instruction::Store {
-                            val: Operand::Value(cur_val), ptr: asm_ptr,
-                            ty: out_ty, seg_override: out_seg,
-                        });
-                    }
                     Operand::Value(cur_val)
                 };
                 ir_inputs.push((constraint.replace('+', "").to_string(), input_operand, name.clone()));

@@ -1,7 +1,0 @@
-Task: Fix ARM miscompilation of drivers/of/address.c causing kernel boot hang
-
-The delta debugging tool identified that compiling drivers/of/address.c with
-our ARM compiler causes the kernel to hang during boot. This is a single-file
-failure (not an interaction bug).
-
-Status: investigating the root cause
