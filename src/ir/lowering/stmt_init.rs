@@ -32,7 +32,10 @@ impl Lowerer {
         }
 
         if !self.globals.contains_key(&declarator.name) {
-            let ext_da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+            let mut ext_da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+            if let Some(vs) = decl.vector_size {
+                ext_da.apply_vector_size(vs);
+            }
             self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&ext_da));
         }
         true // Handled, caller should continue to next declarator

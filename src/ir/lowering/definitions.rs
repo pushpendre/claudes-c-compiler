@@ -161,6 +161,28 @@ pub(super) struct DeclAnalysis {
     pub is_ptr_to_func_ptr: bool,
 }
 
+impl DeclAnalysis {
+    /// Apply `__attribute__((vector_size(N)))` to this declaration analysis.
+    /// When a non-typedef variable is declared with an inline vector_size attribute,
+    /// the CType, allocation size, and IR type must be updated to reflect the vector type.
+    /// Without this, the variable is treated as a plain scalar (e.g., `float` instead of
+    /// `CType::Vector(Float, 16)`), causing incorrect element-wise access and codegen.
+    pub fn apply_vector_size(&mut self, total_size: usize) {
+        // Wrap the C type in CType::Vector
+        if let Some(ref ct) = self.c_type {
+            self.c_type = Some(CType::Vector(Box::new(ct.clone()), total_size));
+        }
+        // Vectors are aggregates (like structs): passed by pointer, allocated as a blob
+        self.actual_alloc_size = total_size;
+        self.alloc_size = total_size;
+        self.var_ty = IrType::Ptr;
+        // base_ty stays as the element type (e.g., F32 for float vectors)
+        // This matches what happens when typedef resolution produces CType::Vector,
+        // which maps to IrType::Ptr via from_ctype but the element type is still
+        // accessible through the CType.
+    }
+}
+
 /// Information about a VLA dimension in a function parameter type.
 #[derive(Debug)]
 pub(super) struct VlaDimInfo {

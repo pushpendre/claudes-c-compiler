@@ -151,6 +151,12 @@ impl Lowerer {
 
             // Shared declaration analysis
             let mut da = self.analyze_declaration(type_spec, &declarator.derived);
+            // Apply inline __attribute__((vector_size(N))) to non-typedef declarations.
+            // For typedefs, this is handled above; for variables, we must wrap the
+            // CType and adjust sizes/types so the variable is treated as a vector aggregate.
+            if let Some(vs) = decl.vector_size {
+                da.apply_vector_size(vs);
+            }
             self.fixup_unsized_array(&mut da, type_spec, &declarator.derived, &declarator.init);
 
             // Detect complex type variables and arrays of complex elements

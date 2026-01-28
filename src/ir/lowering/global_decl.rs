@@ -89,7 +89,10 @@ impl Lowerer {
             // Global register variable: `register <type> <name> __asm__("reg")`
             // No storage is emitted; reads/writes map directly to the named register.
             if let Some(ref reg_name) = declarator.attrs.asm_register {
-                let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                if let Some(vs) = decl.vector_size {
+                    da.apply_vector_size(vs);
+                }
                 let mut ginfo = GlobalInfo::from_analysis(&da);
                 ginfo.asm_register = Some(reg_name.clone());
                 ginfo.var.address_space = decl.address_space;
@@ -100,7 +103,10 @@ impl Lowerer {
             // extern without initializer: track the type but don't emit a .bss entry
             if decl.is_extern && declarator.init.is_none() {
                 if !self.globals.contains_key(&declarator.name) {
-                    let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                    let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                    if let Some(vs) = decl.vector_size {
+                        da.apply_vector_size(vs);
+                    }
                     let mut ginfo = GlobalInfo::from_analysis(&da);
                     ginfo.var.address_space = decl.address_space;
                     self.globals.insert(declarator.name.clone(), ginfo);
@@ -108,7 +114,10 @@ impl Lowerer {
                 // For extern TLS variables, we still need an IrGlobal entry so the
                 // codegen layer knows to use TLS access patterns for this symbol.
                 if decl.is_thread_local && !self.emitted_global_names.contains(&declarator.name) {
-                    let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                    let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                    if let Some(vs) = decl.vector_size {
+                        da.apply_vector_size(vs);
+                    }
                     self.module.globals.push(IrGlobal {
                         name: declarator.name.clone(),
                         ty: da.var_ty,
@@ -168,6 +177,13 @@ impl Lowerer {
             }
 
             let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+
+            // Apply inline __attribute__((vector_size(N))) to non-typedef declarations.
+            // For typedefs, this is handled above; for variables, we must wrap the
+            // CType and adjust sizes/types so the variable is treated as a vector aggregate.
+            if let Some(vs) = decl.vector_size {
+                da.apply_vector_size(vs);
+            }
 
             // For global arrays-of-pointers, clear struct_layout
             if da.is_array_of_pointers || da.is_array_of_func_ptrs {
