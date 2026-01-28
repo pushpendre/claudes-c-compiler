@@ -1,0 +1,23 @@
+Fix 3 failing x86 inline asm tests:
+
+1. Peephole optimizer incorrectly eliminates loads from mm/xmm registers.
+   register_family_fast() returns REG_NONE for mm0..mm7 and xmm0..xmm15,
+   causing adjacent store/load elimination to treat different MMX/XMM registers
+   as identical (REG_NONE == REG_NONE). Fix: add mm/xmm families to the
+   register classifier, and guard REG_NONE comparisons.
+
+2. XMM scratch allocator doesn't skip clobbered XMM registers.
+   assign_scratch_reg for FpReg just increments asm_xmm_scratch_idx without
+   checking the excluded list, so clobbered xmm registers can be assigned to
+   operands, causing value corruption.
+
+3. GCC operand numbering doesn't include synthetic "+" inputs at higher indices.
+   When "+" outputs create matching inputs, GCC numbers them AFTER explicit
+   inputs, but our gcc_to_internal mapping omits them entirely.
+
+Tests affected:
+- asm-adcl-x86-001g-run2 (ADC carry chain, issue #3)
+- asm-movq-mmx-x86-003-run2 (MMX movq, issue #1)
+- asm-pxor-x86-001c-run2 (PXOR double XOR, issue #2)
+
+Status: in_progress
