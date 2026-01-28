@@ -1,0 +1,15 @@
+Fix i686 global struct data emission with pointer-sized fields
+
+GlobalInit::byte_size() and GlobalInit::emitted_byte_size() in ir/ir.rs
+hardcode GlobalAddr/GlobalAddrOffset to 8 bytes. On i686 (32-bit), pointers
+are 4 bytes. This causes:
+
+1. .size directive inflated (e.g. 20 instead of 16 for struct with 2 ptrs + 2 ints)
+2. append_nested_compound in global_init_compound_struct.rs skips fields after
+   a GlobalAddr because it thinks 8 bytes were consumed when only 4 were
+3. Structs with pointer members crash at runtime (SIGSEGV) due to misaligned/missing data
+
+Fix: use target_ptr_size() instead of hardcoded 8 in byte_size()/emitted_byte_size().
+
+Affected tests: anon-struct-designated-init, static-local-selfref-member-addr,
+struct-member-array-decay-init, and likely many more from /clean_tests.
