@@ -246,6 +246,7 @@ impl Driver {
         match self.target {
             Target::Aarch64 => preprocessor.set_target("aarch64"),
             Target::Riscv64 => preprocessor.set_target("riscv64"),
+            Target::I686 => preprocessor.set_target("i686"),
             Target::X86_64 => preprocessor.set_target("x86_64"),
         }
         // Apply RISC-V ABI/arch overrides from -mabi= and -march= flags.
@@ -275,6 +276,10 @@ impl Driver {
         if self.input_files.is_empty() {
             return Err("No input files".to_string());
         }
+
+        // Set the thread-local target pointer size for type system queries.
+        // Must be done before any CType/IrType size computations.
+        crate::common::types::set_target_ptr_size(self.target.ptr_size());
 
         // When -m16 or -m32 is passed, we don't support 32-bit/16-bit x86 codegen.
         // Delegate the entire compilation to the system GCC, forwarding all original args.

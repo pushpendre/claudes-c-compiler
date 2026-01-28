@@ -393,6 +393,76 @@ impl Preprocessor {
                 // RISC-V uses IEEE 754 binary128 for long double (not x87 80-bit)
                 self.override_ldbl_binary128();
             }
+            "i686" | "i386" => {
+                // Remove x86-64 macros (keep x86 general macros)
+                self.macros.undefine("__x86_64__");
+                self.macros.undefine("__x86_64");
+                self.macros.undefine("__amd64__");
+                self.macros.undefine("__amd64");
+                self.macros.undefine("__LP64__");
+                self.macros.undefine("_LP64");
+                self.macros.undefine("__SIZEOF_INT128__");
+                // Define i686/i386 macros
+                self.define_simple_macro("__i386__", "1");
+                self.define_simple_macro("__i386", "1");
+                self.define_simple_macro("i386", "1");
+                self.define_simple_macro("__i686__", "1");
+                self.define_simple_macro("__i686", "1");
+                self.define_simple_macro("__ILP32__", "1");
+                self.define_simple_macro("_ILP32", "1");
+                // ILP32 data model: pointer/long/size_t are 4 bytes
+                self.define_simple_macro("__SIZEOF_POINTER__", "4");
+                self.define_simple_macro("__SIZEOF_LONG__", "4");
+                self.define_simple_macro("__SIZEOF_SIZE_T__", "4");
+                self.define_simple_macro("__SIZEOF_PTRDIFF_T__", "4");
+                // Long double is 12 bytes on i686 (80-bit x87 + 4 bytes padding)
+                self.define_simple_macro("__SIZEOF_LONG_DOUBLE__", "12");
+                // Type limits for ILP32
+                self.define_simple_macro("__LONG_MAX__", "2147483647L");
+                self.define_simple_macro("__SIZE_MAX__", "4294967295U");
+                self.define_simple_macro("__PTRDIFF_MAX__", "2147483647");
+                // Type names for ILP32 (long is 32-bit, so many types change)
+                self.define_simple_macro("__SIZE_TYPE__", "unsigned int");
+                self.define_simple_macro("__PTRDIFF_TYPE__", "int");
+                self.define_simple_macro("__INTMAX_TYPE__", "long long int");
+                self.define_simple_macro("__UINTMAX_TYPE__", "long long unsigned int");
+                self.define_simple_macro("__INT64_TYPE__", "long long int");
+                self.define_simple_macro("__UINT64_TYPE__", "long long unsigned int");
+                self.define_simple_macro("__INTPTR_TYPE__", "int");
+                self.define_simple_macro("__UINTPTR_TYPE__", "unsigned int");
+                self.define_simple_macro("__INT_LEAST64_TYPE__", "long long int");
+                self.define_simple_macro("__UINT_LEAST64_TYPE__", "long long unsigned int");
+                self.define_simple_macro("__INT_FAST16_TYPE__", "int");
+                self.define_simple_macro("__INT_FAST32_TYPE__", "int");
+                self.define_simple_macro("__INT_FAST64_TYPE__", "long long int");
+                self.define_simple_macro("__UINT_FAST16_TYPE__", "unsigned int");
+                self.define_simple_macro("__UINT_FAST64_TYPE__", "long long unsigned int");
+                // Replace x86-64 include paths with i686 paths
+                self.system_include_paths.retain(|p| {
+                    let s = p.to_string_lossy();
+                    !s.contains("x86_64")
+                });
+                let i686_paths = [
+                    "/usr/lib/gcc-cross/i686-linux-gnu/11/include",
+                    "/usr/lib/gcc-cross/i686-linux-gnu/12/include",
+                    "/usr/lib/gcc-cross/i686-linux-gnu/13/include",
+                    "/usr/lib/gcc-cross/i686-linux-gnu/14/include",
+                    "/usr/lib/gcc/i686-linux-gnu/11/include",
+                    "/usr/lib/gcc/i686-linux-gnu/12/include",
+                    "/usr/lib/gcc/i686-linux-gnu/13/include",
+                    "/usr/lib/gcc/i686-linux-gnu/14/include",
+                    "/usr/i686-linux-gnu/include",
+                    "/usr/include/i386-linux-gnu",
+                ];
+                for p in &i686_paths {
+                    let path = PathBuf::from(p);
+                    if path.is_dir() {
+                        self.system_include_paths.insert(0, path);
+                    }
+                }
+                // i686 uses the same x87 80-bit long double format as x86-64
+                // (LDBL macros are already set correctly), but sizeof differs (12 vs 16)
+            }
             _ => {
                 // x86_64 is already the default
             }

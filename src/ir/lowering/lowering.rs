@@ -163,10 +163,10 @@ impl Lowerer {
         self.func_state.as_mut().expect("not inside a function")
     }
 
-    /// Returns true if the target is x86-64.
+    /// Returns true if the target is x86 (either x86-64 or i686).
     /// Used to select x87 80-bit extended precision format for long double memory layout.
     pub(super) fn is_x86(&self) -> bool {
-        self.target == Target::X86_64
+        self.target == Target::X86_64 || self.target == Target::I686
     }
 
     /// Returns true if the target is RISC-V 64.
@@ -181,11 +181,11 @@ impl Lowerer {
         self.target == Target::Aarch64
     }
 
-    /// Returns true if the target uses x86-64 style packed _Complex float ABI
+    /// Returns true if the target uses x86 style packed _Complex float ABI
     /// (two F32s packed into a single F64/xmm register).
     /// Returns false for ARM/RISC-V which pass _Complex float as two separate F32 registers.
     pub(super) fn uses_packed_complex_float(&self) -> bool {
-        self.target == Target::X86_64
+        self.target == Target::X86_64 || self.target == Target::I686
     }
 
     /// Returns true if the target packs _Complex float into a single 8-byte value
@@ -206,12 +206,12 @@ impl Lowerer {
     }
 
     /// Returns true if the target returns _Complex long double via register pairs
-    /// (x87 st(0)/st(1) on x86-64) rather than via sret hidden pointer.
-    /// On x86-64: true (COMPLEX_X87 class, returned in st(0) and st(1)).
+    /// (x87 st(0)/st(1) on x86) rather than via sret hidden pointer.
+    /// On x86-64/i686: true (COMPLEX_X87 class, returned in st(0) and st(1)).
     /// On ARM64: false (returned via decomposition into q0/q1, handled separately).
     /// On RISC-V: false (returned via sret hidden pointer).
     pub(super) fn returns_complex_long_double_in_regs(&self) -> bool {
-        self.target == Target::X86_64
+        self.target == Target::X86_64 || self.target == Target::I686
     }
 
     /// Look up the shared type metadata for a variable by name.

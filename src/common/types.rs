@@ -1,6 +1,34 @@
 use std::rc::Rc;
+use std::cell::Cell;
 
 use crate::common::fx_hash::FxHashMap;
+
+// ── Target data model thread-local ───────────────────────────────────────────
+//
+// The pointer/long size depends on the target architecture (8 for LP64, 4 for ILP32).
+// We use a thread-local because CType::size_ctx() and IrType::size() are called from
+// many places that don't have access to a Target parameter. The driver sets this at
+// the start of compilation based on the selected target.
+
+thread_local! {
+    static TARGET_PTR_SIZE: Cell<usize> = const { Cell::new(8) }; // default: LP64
+}
+
+/// Set the target pointer size for the current thread (4 for i686/ILP32, 8 for LP64).
+/// Must be called before any type size queries.
+pub fn set_target_ptr_size(size: usize) {
+    TARGET_PTR_SIZE.with(|c| c.set(size));
+}
+
+/// Get the target pointer size for the current thread.
+pub fn target_ptr_size() -> usize {
+    TARGET_PTR_SIZE.with(|c| c.get())
+}
+
+/// Whether the current target is 32-bit (ILP32).
+pub fn target_is_32bit() -> bool {
+    target_ptr_size() == 4
+}
 
 /// Reference-counted string used for struct/union layout keys in CType.
 /// Cloning is a cheap reference count increment instead of a heap allocation.
@@ -883,26 +911,33 @@ pub fn align_up(offset: usize, align: usize) -> usize {
 }
 
 impl CType {
-    /// Size in bytes on a 64-bit target, with struct/union layout lookup via context.
+    /// Size in bytes, with struct/union layout lookup via context.
+    /// Uses the thread-local target pointer size for target-dependent types
+    /// (Long, Pointer, LongDouble).
     pub fn size_ctx(&self, ctx: &dyn StructLayoutProvider) -> usize {
+        let ptr_sz = target_ptr_size();
         match self {
             CType::Void => 0,
             CType::Bool | CType::Char | CType::UChar => 1,
             CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt => 4,
-            CType::Long | CType::ULong => 8,
+            // ILP32: long = 4 bytes; LP64: long = 8 bytes
+            CType::Long | CType::ULong => ptr_sz,
             CType::LongLong | CType::ULongLong => 8,
             CType::Int128 | CType::UInt128 => 16,
             CType::Float => 4,
             CType::Double => 8,
-            CType::LongDouble => 16,
+            // i686: long double is 12 bytes (80-bit x87 with 4 bytes padding)
+            // x86-64: long double is 16 bytes (80-bit x87 with 6 bytes padding)
+            // ARM/RISC-V: long double is 16 bytes (IEEE binary128)
+            CType::LongDouble => if ptr_sz == 4 { 12 } else { 16 },
             CType::ComplexFloat => 8,     // 2 * sizeof(float)
             CType::ComplexDouble => 16,   // 2 * sizeof(double)
-            CType::ComplexLongDouble => 32, // 2 * sizeof(long double) = 2 * 16
-            CType::Pointer(_, _) => 8,
+            CType::ComplexLongDouble => if ptr_sz == 4 { 24 } else { 32 },
+            CType::Pointer(_, _) => ptr_sz,
             CType::Array(elem, Some(n)) => elem.size_ctx(ctx) * n,
-            CType::Array(_, None) => 8, // incomplete array treated as pointer
-            CType::Function(_) => 8, // function pointer size
+            CType::Array(_, None) => ptr_sz, // incomplete array treated as pointer
+            CType::Function(_) => ptr_sz, // function pointer size
             CType::Struct(key) | CType::Union(key) => {
                 ctx.get_struct_layout(key).map(|l| l.size).unwrap_or(0)
             }
@@ -911,25 +946,31 @@ impl CType {
         }
     }
 
-    /// Alignment in bytes on a 64-bit target, with struct/union layout lookup via context.
+    /// Alignment in bytes, with struct/union layout lookup via context.
+    /// Uses the thread-local target pointer size for target-dependent types.
     pub fn align_ctx(&self, ctx: &dyn StructLayoutProvider) -> usize {
+        let ptr_sz = target_ptr_size();
         match self {
             CType::Void => 1,
             CType::Bool | CType::Char | CType::UChar => 1,
             CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt => 4,
-            CType::Long | CType::ULong => 8,
-            CType::LongLong | CType::ULongLong => 8,
-            CType::Int128 | CType::UInt128 => 16,
+            // ILP32: long aligned to 4; LP64: long aligned to 8
+            CType::Long | CType::ULong => ptr_sz,
+            // i686: long long aligned to 4 (not 8!) per i386 System V ABI
+            // LP64: long long aligned to 8
+            CType::LongLong | CType::ULongLong => if ptr_sz == 4 { 4 } else { 8 },
+            CType::Int128 | CType::UInt128 => if ptr_sz == 4 { 4 } else { 16 },
             CType::Float => 4,
-            CType::Double => 8,
-            CType::LongDouble => 16,
+            CType::Double => if ptr_sz == 4 { 4 } else { 8 },
+            // i686: long double aligned to 4; LP64: aligned to 16
+            CType::LongDouble => if ptr_sz == 4 { 4 } else { 16 },
             CType::ComplexFloat => 4,       // align of float component
-            CType::ComplexDouble => 8,      // align of double component
-            CType::ComplexLongDouble => 16, // align of long double (F128) component
-            CType::Pointer(_, _) => 8,
+            CType::ComplexDouble => if ptr_sz == 4 { 4 } else { 8 },
+            CType::ComplexLongDouble => if ptr_sz == 4 { 4 } else { 16 },
+            CType::Pointer(_, _) => ptr_sz,
             CType::Array(elem, _) => elem.align_ctx(ctx),
-            CType::Function(_) => 8,
+            CType::Function(_) => ptr_sz,
             CType::Struct(key) | CType::Union(key) => {
                 ctx.get_struct_layout(key).map(|l| l.align).unwrap_or(1)
             }
@@ -1270,11 +1311,14 @@ impl IrType {
             IrType::I8 | IrType::U8 => 1,
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 => 4,
-            IrType::I64 | IrType::U64 | IrType::Ptr => 8,
+            IrType::I64 | IrType::U64 => 8,
+            IrType::Ptr => target_ptr_size(),
             IrType::I128 | IrType::U128 => 16,
             IrType::F32 => 4,
             IrType::F64 => 8,
-            IrType::F128 => 16,
+            // i686: F128 (long double) is 12 bytes (80-bit x87 + 2 bytes padding)
+            // LP64: F128 is 16 bytes
+            IrType::F128 => if target_is_32bit() { 12 } else { 16 },
             IrType::Void => 0,
         }
     }
@@ -1360,6 +1404,7 @@ impl IrType {
     }
 
     pub fn from_ctype(ct: &CType) -> Self {
+        let is_32bit = target_is_32bit();
         match ct {
             CType::Void => IrType::Void,
             CType::Bool => IrType::U8,
@@ -1386,8 +1431,11 @@ impl IrType {
                 }
             }
             CType::UInt => IrType::U32,
-            CType::Long | CType::LongLong => IrType::I64,
-            CType::ULong | CType::ULongLong => IrType::U64,
+            // ILP32: long = 32-bit; LP64: long = 64-bit
+            CType::Long => if is_32bit { IrType::I32 } else { IrType::I64 },
+            CType::ULong => if is_32bit { IrType::U32 } else { IrType::U64 },
+            CType::LongLong => IrType::I64,
+            CType::ULongLong => IrType::U64,
             CType::Int128 => IrType::I128,
             CType::UInt128 => IrType::U128,
             CType::Float => IrType::F32,

@@ -26,6 +26,8 @@ fn real_main() {
         Target::Aarch64
     } else if binary_name.contains("riscv") {
         Target::Riscv64
+    } else if binary_name.contains("i686") || binary_name.contains("i386") {
+        Target::I686
     } else {
         Target::X86_64
     };

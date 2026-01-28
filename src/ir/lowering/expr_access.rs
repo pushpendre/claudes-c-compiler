@@ -940,8 +940,8 @@ impl Lowerer {
         }
 
         use crate::backend::Target;
-        let ap_val = if self.target == Target::Riscv64 {
-            // RISC-V: va_list is void*, need address of the variable holding it
+        let ap_val = if self.target == Target::Riscv64 || self.target == Target::I686 {
+            // RISC-V / i686: va_list is a pointer, need address of the variable holding it
             self.lower_address_of(ap_expr)
         } else {
             // x86-64 / AArch64: va_list is an array type, lower_expr handles
@@ -1059,7 +1059,8 @@ impl Lowerer {
     /// - RISC-V: va_list is void*, always need address-of the variable.
     pub(super) fn lower_va_list_pointer(&mut self, ap_expr: &Expr) -> Operand {
         use crate::backend::Target;
-        if self.target == Target::Riscv64 {
+        if self.target == Target::Riscv64 || self.target == Target::I686 {
+            // RISC-V / i686: va_list is a pointer, need address of the variable
             self.lower_address_of(ap_expr)
         } else {
             self.lower_expr(ap_expr)

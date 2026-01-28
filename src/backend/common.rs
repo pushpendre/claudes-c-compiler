@@ -490,6 +490,7 @@ macro_rules! emit {
 #[derive(Clone, Copy)]
 pub enum PtrDirective {
     Quad,   // x86-64
+    Long,   // i686 (32-bit)
     Xword,  // AArch64
     Dword,  // RISC-V 64
 }
@@ -498,15 +499,21 @@ impl PtrDirective {
     pub fn as_str(self) -> &'static str {
         match self {
             PtrDirective::Quad => ".quad",
+            PtrDirective::Long => ".long",
             PtrDirective::Xword => ".xword",
             PtrDirective::Dword => ".dword",
         }
     }
 
-    /// Returns true if this is the x86-64 target directive.
+    /// Returns true if this is an x86 target directive (x86-64 or i686).
     /// Used to select x87 80-bit extended precision format for long double constants.
     pub fn is_x86(self) -> bool {
-        matches!(self, PtrDirective::Quad)
+        matches!(self, PtrDirective::Quad | PtrDirective::Long)
+    }
+
+    /// Returns true if this is a 32-bit pointer directive.
+    pub fn is_32bit(self) -> bool {
+        matches!(self, PtrDirective::Long)
     }
 
     /// Returns true if this is the RISC-V target directive.
@@ -527,7 +534,7 @@ impl PtrDirective {
     pub fn align_arg(self, bytes: usize) -> usize {
         debug_assert!(bytes == 0 || bytes.is_power_of_two(), "alignment must be power of 2");
         match self {
-            PtrDirective::Quad => bytes,
+            PtrDirective::Quad | PtrDirective::Long => bytes,
             PtrDirective::Xword | PtrDirective::Dword => {
                 if bytes <= 1 { 0 } else { bytes.trailing_zeros() as usize }
             }

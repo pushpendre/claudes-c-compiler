@@ -17,6 +17,7 @@ pub mod regalloc;     // Linear scan register allocator
 
 
 pub mod x86;
+pub mod i686;
 pub mod arm;
 pub mod riscv;
 
@@ -83,6 +84,7 @@ pub struct CodegenOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     X86_64,
+    I686,
     Aarch64,
     Riscv64,
 }
@@ -93,9 +95,20 @@ impl Target {
     pub fn triple(&self) -> &'static str {
         match self {
             Target::X86_64 => "x86_64-linux-gnu",
+            Target::I686 => "i686-linux-gnu",
             Target::Aarch64 => "aarch64-linux-gnu",
             Target::Riscv64 => "riscv64-linux-gnu",
         }
+    }
+
+    /// Whether this target uses 32-bit pointers (ILP32 data model).
+    pub fn is_32bit(&self) -> bool {
+        matches!(self, Target::I686)
+    }
+
+    /// Pointer size in bytes for this target.
+    pub fn ptr_size(&self) -> usize {
+        if self.is_32bit() { 4 } else { 8 }
     }
 
     /// Get the assembler config for this target.
@@ -104,6 +117,10 @@ impl Target {
             Target::X86_64 => common::AssemblerConfig {
                 command: "gcc",
                 extra_args: &[],
+            },
+            Target::I686 => common::AssemblerConfig {
+                command: "i686-linux-gnu-gcc",
+                extra_args: &["-m32"],
             },
             Target::Aarch64 => common::AssemblerConfig {
                 command: "aarch64-linux-gnu-gcc",
@@ -122,6 +139,10 @@ impl Target {
             Target::X86_64 => common::LinkerConfig {
                 command: "gcc",
                 extra_args: &["-no-pie"],
+            },
+            Target::I686 => common::LinkerConfig {
+                command: "i686-linux-gnu-gcc",
+                extra_args: &["-m32", "-no-pie"],
             },
             Target::Aarch64 => common::LinkerConfig {
                 command: "aarch64-linux-gnu-gcc",
@@ -164,6 +185,12 @@ impl Target {
                 cg.set_no_jump_tables(opts.no_jump_tables);
                 cg.generate(module)
             }
+            Target::I686 => {
+                let mut cg = i686::I686Codegen::new();
+                cg.set_pic(opts.pic);
+                cg.set_no_jump_tables(opts.no_jump_tables);
+                cg.generate(module)
+            }
             Target::Aarch64 => {
                 let mut cg = arm::ArmCodegen::new();
                 cg.set_pic(opts.pic);
@@ -203,6 +230,12 @@ impl Target {
                 cg.set_no_jump_tables(opts.no_jump_tables);
                 let raw = generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr);
                 x86::codegen::peephole::peephole_optimize(raw)
+            }
+            Target::I686 => {
+                let mut cg = i686::I686Codegen::new();
+                cg.set_pic(opts.pic);
+                cg.set_no_jump_tables(opts.no_jump_tables);
+                generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Aarch64 => {
                 let mut cg = arm::ArmCodegen::new();
