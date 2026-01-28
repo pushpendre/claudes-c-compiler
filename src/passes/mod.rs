@@ -233,6 +233,19 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         resolve_inline_asm_symbols(module);
     }
 
+    // Phase 0.5: Resolve remaining IsConstant (__builtin_constant_p) to 0.
+    // After inlining and the post-inline constant_fold+copy_prop passes above,
+    // any IsConstant whose operand became constant through inlining has already
+    // been resolved to Copy(1). The remaining IsConstant instructions have
+    // operands that are genuinely non-constant (global variables, non-inlined
+    // parameters, etc.) and must resolve to 0.
+    //
+    // This must happen before the main optimization loop so that cfg_simplify
+    // can fold CondBranch instructions testing __builtin_constant_p results and
+    // eliminate dead code paths. Without this, unreachable calls to intentionally
+    // undefined symbols (like the kernel's __bad_udelay) survive and cause link errors.
+    constant_fold::resolve_remaining_is_constant(module);
+
     // Run up to 3 iterations of the full pipeline. After the first full pass,
     // subsequent iterations only process functions that were modified (dirty
     // tracking), avoiding redundant work on already-optimized functions.

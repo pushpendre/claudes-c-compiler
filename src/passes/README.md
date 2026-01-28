@@ -31,6 +31,10 @@ Before the main optimization loop:
 3. **constant_fold + copy_prop + simplify + constant_fold + copy_prop** to resolve arithmetic on inlined constants
 4. **resolve_inline_asm_symbols** traces GlobalAddr+GEP/Add/Cast def chains to resolve "i" constraint symbol+offset strings (e.g., `boot_cpu_data+74`) for inline asm inputs that became resolvable after inlining
 
+### Phase 0.5: Resolve remaining `__builtin_constant_p` (post-inline, pre-loop)
+
+5. **resolve_remaining_is_constant** resolves any `IsConstant` instructions that were not resolved to 1 during the post-inline constant folding. These have genuinely non-constant operands (global variables, non-inlined parameters) and are resolved to `Copy(0)`. This enables the main loop's cfg_simplify to fold branches guarded by `__builtin_constant_p` and eliminate dead code paths. Without this, unreachable calls to intentionally-undefined symbols (like the kernel's `__bad_udelay`) would survive to link time.
+
 ### Main loop (up to 3 iterations)
 
 The pipeline runs up to 3 iterations, early-exiting if no changes are made:

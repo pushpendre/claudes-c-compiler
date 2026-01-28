@@ -13,6 +13,38 @@ pub fn run(module: &mut IrModule) -> usize {
     module.for_each_function(fold_function)
 }
 
+/// Resolve all remaining `UnaryOp::IsConstant` instructions to `Copy(0)`.
+///
+/// After inlining and the post-inline constant folding passes, any `IsConstant`
+/// whose operand became constant has already been resolved to `Copy(1)`. The
+/// remaining `IsConstant` instructions have operands that are definitively not
+/// compile-time constants (e.g., global variables, function parameters in non-inlined
+/// contexts).
+///
+/// Resolving these to `Copy(0)` before the main optimization loop is critical:
+/// it enables `cfg_simplify` to fold `CondBranch` instructions that test the
+/// result of `__builtin_constant_p` and eliminate dead code paths. Without this,
+/// unreachable function calls (like the kernel's `__bad_udelay()`, which is
+/// intentionally undefined to generate a link error for invalid `udelay()` arguments)
+/// survive into the object file and cause linker errors.
+pub fn resolve_remaining_is_constant(module: &mut IrModule) {
+    for func in &mut module.functions {
+        if func.is_declaration || func.blocks.is_empty() {
+            continue;
+        }
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                if let Instruction::UnaryOp { dest, op: IrUnaryOp::IsConstant, .. } = inst {
+                    *inst = Instruction::Copy {
+                        dest: *dest,
+                        src: Operand::Const(IrConst::I32(0)),
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Fold constants within a single function.
 ///
 /// Builds a const-value map from Copy instructions so that operands referencing
