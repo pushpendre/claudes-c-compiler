@@ -1,0 +1,30 @@
+Issue: i686 long long literals typed as I32 when value fits in 32 bits
+
+Priority: HIGH (affects variadic call sites, call argument sizes, and any code
+that relies on the type of `100LL` being 64-bit)
+
+Problem:
+In ir/lowering/expr_types.rs around line 599, `Expr::LongLiteral` on ILP32 targets
+returns `IrType::I32` when the value fits in a 32-bit int:
+
+    Expr::LongLiteral(val, _) => {
+        if is_32bit {
+            if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 { IrType::I32 } else { IrType::I64 }
+        } else {
+            IrType::I64
+        }
+    }
+
+The AST conflates `long` and `long long` suffixed literals (both `100L` and `100LL`
+produce `Expr::LongLiteral`). On ILP32, `long` is 32 bits but `long long` is always
+64 bits. So `100LL` should be typed as I64, but is incorrectly typed as I32.
+
+Impact:
+- Variadic function calls with `long long` args only push 4 bytes instead of 8
+- Any operation expecting a 64-bit type from a literal gets a 32-bit value
+- Call argument classification uses wrong sizes
+
+Fix approach:
+Either (a) distinguish `long` and `long long` in the AST (add `LongLongLiteral`),
+or (b) use the suffix information from the lexer to determine the correct type.
+The lexer already tracks `is_long` vs `is_long_long` in `make_int_token`.

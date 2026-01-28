@@ -112,6 +112,30 @@ impl I686Codegen {
         self.reg_assignments.get(&dest.0).copied()
     }
 
+    /// Load the address of va_list storage into %edx.
+    ///
+    /// va_list_ptr is an IR value that holds a pointer to the va_list storage.
+    /// - If va_list_ptr is an alloca (local va_list variable), we LEA the slot
+    ///   address into %edx (the alloca IS the va_list storage).
+    /// - If va_list_ptr is a regular value (e.g., loaded pointer from va_list*),
+    ///   we load its value into %edx (the value IS the address of va_list storage).
+    fn load_va_list_addr_to_edx(&mut self, va_list_ptr: &Value) {
+        let is_alloca = self.state.is_alloca(va_list_ptr.0);
+        if let Some(phys) = self.reg_assignments.get(&va_list_ptr.0).copied() {
+            // Value is in a callee-saved register (non-alloca pointer value)
+            let reg = phys_reg_name(phys);
+            emit!(self.state, "    movl %{}, %edx", reg);
+        } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if is_alloca {
+                // Alloca: the slot IS the va_list; get the address of the slot
+                emit!(self.state, "    leal {}(%ebp), %edx", slot.0);
+            } else {
+                // Regular value: the slot holds a pointer to the va_list storage
+                emit!(self.state, "    movl {}(%ebp), %edx", slot.0);
+            }
+        }
+    }
+
     /// Load an operand into %eax.
     fn operand_to_eax(&mut self, op: &Operand) {
         // Check register cache - skip load if value is already in eax
@@ -2993,46 +3017,59 @@ impl ArchCodegen for I686Codegen {
     // --- va_arg ---
 
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
-        // i686 cdecl: va_list is just a char* pointer to the stack
-        // va_arg increments the pointer by the argument size
-        if let Some(va_slot) = self.state.get_slot(va_list_ptr.0) {
-            // Load current va_list pointer
-            emit!(self.state, "    movl {}(%ebp), %ecx", va_slot.0);
-            // Load the value at the pointer
-            if is_i128_type(result_ty) {
-                if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                    for i in (0..16).step_by(4) {
-                        emit!(self.state, "    movl {}(%ecx), %eax", i);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + i as i64);
-                    }
+        // i686 cdecl: va_list is just a char* pointer to the stack.
+        // va_list_ptr is a pointer to the memory location holding the va_list value.
+        // We need to:
+        // 1. Load va_list_ptr address into %edx
+        // 2. Load the va_list value (char*) from (%edx) into %ecx
+        // 3. Read the argument from (%ecx)
+        // 4. Advance %ecx
+        // 5. Store updated va_list back through (%edx)
+
+        // Step 1: Get address of va_list storage into %edx
+        self.load_va_list_addr_to_edx(va_list_ptr);
+        // Step 2: Load current va_list pointer from that address
+        self.state.emit("    movl (%edx), %ecx");
+
+        // Step 3 & 4: Load the value and advance
+        if is_i128_type(result_ty) {
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                for i in (0..16).step_by(4) {
+                    emit!(self.state, "    movl {}(%ecx), %eax", i);
+                    emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + i as i64);
                 }
-                emit!(self.state, "    addl $16, %ecx");
-            } else if result_ty == IrType::F128 {
-                if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                    emit!(self.state, "    fldt (%ecx)");
-                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
-                    self.state.f128_direct_slots.insert(dest.0);
-                }
-                emit!(self.state, "    addl $12, %ecx");
-            } else if result_ty == IrType::F64 {
-                if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                    emit!(self.state, "    movl (%ecx), %eax");
-                    emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
-                    emit!(self.state, "    movl 4(%ecx), %eax");
-                    emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
-                }
-                emit!(self.state, "    addl $8, %ecx");
-            } else {
-                let load_instr = self.mov_load_for_type(result_ty);
-                emit!(self.state, "    {} (%ecx), %eax", load_instr);
-                self.store_eax_to(dest);
-                // Advance pointer by 4 (minimum push size on i686 stack)
-                let advance = result_ty.size().max(4);
-                emit!(self.state, "    addl ${}, %ecx", advance);
             }
-            // Store updated va_list pointer back
-            emit!(self.state, "    movl %ecx, {}(%ebp)", va_slot.0);
+            self.state.emit("    addl $16, %ecx");
+        } else if result_ty == IrType::F128 {
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                self.state.emit("    fldt (%ecx)");
+                emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                self.state.f128_direct_slots.insert(dest.0);
+            }
+            self.state.emit("    addl $12, %ecx");
+        } else if result_ty == IrType::F64 || result_ty == IrType::I64 || result_ty == IrType::U64 {
+            // 8-byte types: read two dwords from the va_list
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                self.state.emit("    movl (%ecx), %eax");
+                emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
+                self.state.emit("    movl 4(%ecx), %eax");
+                emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
+            }
+            self.state.emit("    addl $8, %ecx");
+        } else {
+            let load_instr = self.mov_load_for_type(result_ty);
+            emit!(self.state, "    {} (%ecx), %eax", load_instr);
+            self.store_eax_to(dest);
+            // Advance pointer by 4 (minimum push size on i686 stack)
+            let advance = result_ty.size().max(4);
+            emit!(self.state, "    addl ${}, %ecx", advance);
         }
+        // Step 5: Store updated va_list pointer back through the address in %edx
+        // Note: %edx was set in step 1 and hasn't been clobbered (we only use %eax/%ecx above).
+        // However, store_eax_to may use %edx in some cases, so we need to reload %edx
+        // if store_eax_to was called (the scalar case). For safety, reload %edx.
+        self.load_va_list_addr_to_edx(va_list_ptr);
+        self.state.emit("    movl %ecx, (%edx)");
     }
 
     fn emit_va_start(&mut self, va_list_ptr: &Value) {
@@ -3040,22 +3077,22 @@ impl ArchCodegen for I686Codegen {
         // Stack layout above ebp: [ret addr (4)] [params...]
         // Named params start at 8(%ebp) and occupy va_named_stack_bytes bytes.
         // Variadic args start immediately after: 8 + va_named_stack_bytes.
+        //
+        // va_list_ptr is a pointer to the va_list storage location. We compute
+        // the address of the first vararg and store it through va_list_ptr.
         let vararg_offset = 8 + self.va_named_stack_bytes as i64;
-        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
-            emit!(self.state, "    leal {}(%ebp), %eax", vararg_offset);
-            emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-        }
+        self.load_va_list_addr_to_edx(va_list_ptr);
+        emit!(self.state, "    leal {}(%ebp), %eax", vararg_offset);
+        self.state.emit("    movl %eax, (%edx)");
     }
 
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
-        // i686: va_list is just a pointer, so copy the pointer value
-        if let (Some(src_slot), Some(dest_slot)) = (
-            self.state.get_slot(src_ptr.0),
-            self.state.get_slot(dest_ptr.0),
-        ) {
-            emit!(self.state, "    movl {}(%ebp), %eax", src_slot.0);
-            emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
-        }
+        // i686: va_list is just a 4-byte pointer. Copy the va_list value from
+        // src to dest. Both pointers point to the va_list storage location.
+        self.load_va_list_addr_to_edx(src_ptr);
+        self.state.emit("    movl (%edx), %eax");
+        self.load_va_list_addr_to_edx(dest_ptr);
+        self.state.emit("    movl %eax, (%edx)");
     }
 
     // --- Atomics ---
