@@ -52,14 +52,20 @@ impl Lowerer {
     /// named `free` that is a function pointer should produce an indirect call, not a direct
     /// call to the libc `free` symbol).
     pub(super) fn is_func_ptr_variable(&self, name: &str) -> bool {
-        if self.func().locals.contains_key(name) {
+        // When called outside a function context (e.g., during global constant
+        // evaluation), there are no locals, so this is not a func ptr variable.
+        let func_state = match self.func_state.as_ref() {
+            Some(fs) => fs,
+            None => return self.globals.contains_key(name) && !self.known_functions.contains(name),
+        };
+        if func_state.locals.contains_key(name) {
             // Local variable exists with this name. Check if it's a function pointer
             // via ptr_sigs (set for function pointer params and locals) or c_type.
             if self.func_meta.ptr_sigs.contains_key(name) {
                 return true;
             }
             // Also check the local's CType for function pointer types not in ptr_sigs
-            if let Some(local_info) = self.func().locals.get(name) {
+            if let Some(local_info) = func_state.locals.get(name) {
                 if let Some(ref cty) = local_info.c_type {
                     if cty.is_function_pointer() {
                         return true;
@@ -160,7 +166,12 @@ impl Lowerer {
 
         // Decompose complex double/float arguments into (real, imag) pairs for ABI compliance
         let param_ctypes_for_decompose = if let Expr::Identifier(name, _) = stripped_func {
-            self.func_meta.sigs.get(name.as_str()).map(|s| s.param_ctypes.clone()).filter(|v| !v.is_empty())
+            let sig_for_decompose = if self.is_func_ptr_variable(name) {
+                self.func_meta.ptr_sigs.get(name.as_str()).or_else(|| self.func_meta.sigs.get(name.as_str()))
+            } else {
+                self.func_meta.sigs.get(name.as_str())
+            };
+            sig_for_decompose.map(|s| s.param_ctypes.clone()).filter(|v| !v.is_empty())
         } else {
             None
         };
@@ -185,7 +196,12 @@ impl Lowerer {
         let (call_variadic, num_fixed_args) = if let Expr::Identifier(name, _) = stripped_func {
             let variadic = call_is_variadic;
             let n_fixed = if variadic {
-                if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
+                let variadic_sig = if self.is_func_ptr_variable(name) {
+                    self.func_meta.ptr_sigs.get(name.as_str()).or_else(|| self.func_meta.sigs.get(name.as_str()))
+                } else {
+                    self.func_meta.sigs.get(name.as_str())
+                };
+                if let Some(sig) = variadic_sig {
                     if !sig.param_ctypes.is_empty() {
                         let decomposes_cld = self.decomposes_complex_long_double();
                         let decomposes_cd = self.decomposes_complex_double();
@@ -379,10 +395,19 @@ impl Lowerer {
             }
             _ => None,
         };
-        let sig = func_name.and_then(|name|
-            self.func_meta.sigs.get(name)
-                .or_else(|| self.func_meta.ptr_sigs.get(name))
-        );
+        // When the callee is a local function pointer variable, prefer ptr_sigs
+        // over sigs. This prevents a parameter named e.g. `round` from picking up
+        // the seeded `double round(double)` library signature instead of the
+        // actual function pointer's signature.
+        let sig = func_name.and_then(|name| {
+            if self.is_func_ptr_variable(name) {
+                self.func_meta.ptr_sigs.get(name)
+                    .or_else(|| self.func_meta.sigs.get(name))
+            } else {
+                self.func_meta.sigs.get(name)
+                    .or_else(|| self.func_meta.ptr_sigs.get(name))
+            }
+        });
 
         // When calling through a complex expression (e.g., struct member function
         // pointer like stats->compute_stats(...)), sig will be None because there

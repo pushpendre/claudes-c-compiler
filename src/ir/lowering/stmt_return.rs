@@ -268,8 +268,8 @@ impl Lowerer {
                 }
             }
 
-            // _Complex long double on x86-64: return real in x87 st(0), imag in x87 st(1)
-            if *rct == CType::ComplexLongDouble && self.is_x86() && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
+            // _Complex long double on x86-64/ARM64: return real in FP reg, imag in second FP reg
+            if *rct == CType::ComplexLongDouble && self.returns_complex_long_double_in_regs() && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
                 let real = self.load_complex_real(src_ptr, rct);
                 let imag = self.load_complex_imag(src_ptr, rct);
                 self.emit(Instruction::SetReturnF128Second { src: imag });
@@ -361,8 +361,8 @@ impl Lowerer {
             }
         }
 
-        // _Complex long double on x86-64: return real in x87 st(0), imag in x87 st(1)
-        if rct_clone == CType::ComplexLongDouble && self.is_x86() && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
+        // _Complex long double on x86-64/ARM64: return real in FP reg, imag in second FP reg
+        if rct_clone == CType::ComplexLongDouble && self.returns_complex_long_double_in_regs() && !self.func_meta.sigs.get(&fname).and_then(|s| s.sret_size).is_some() {
             let ptr = self.operand_to_value(complex_val);
             let real = self.load_complex_real(ptr, &rct_clone);
             let imag = self.load_complex_imag(ptr, &rct_clone);

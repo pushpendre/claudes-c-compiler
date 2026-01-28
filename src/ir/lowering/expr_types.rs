@@ -450,11 +450,24 @@ impl Lowerer {
             stripped = inner;
         }
         if let Expr::Identifier(name, _) = stripped {
-            if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
-                return ret_ty;
-            }
-            if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
-                return ret_ty;
+            // When the callee is a local function pointer variable, prefer ptr_sigs
+            // over sigs. This prevents a parameter named e.g. `round` from picking up
+            // the seeded `double round(double)` library signature instead of the
+            // actual function pointer's signature.
+            if self.is_func_ptr_variable(name) {
+                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
+                    return ret_ty;
+                }
+                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
+                    return ret_ty;
+                }
+            } else {
+                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
+                    return ret_ty;
+                }
+                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
+                    return ret_ty;
+                }
             }
             if let Some(ret_ty) = Self::builtin_return_type(name) {
                 return ret_ty;

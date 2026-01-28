@@ -2959,14 +2959,25 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_call_store_f128_result(&mut self, dest: &Value) {
         // After a function call, Q0 holds the full f128 return value.
-        // Store the full 16 bytes to the dest slot and track it, then
-        // produce an f64 approximation in x0 for register data flow.
+        // Q1 may hold the second return value (imag part of _Complex long double).
+        // We must save Q1 before calling __trunctfdf2 because that call clobbers it.
+        //
+        // Strategy: first store Q0 to dest slot (using frame-relative addressing),
+        // then save Q1 to the stack, call __trunctfdf2, and restore Q1.
+        // This avoids adjusting slot offsets when sp changes.
         if let Some(slot) = self.state.get_slot(dest.0) {
             self.emit_store_to_sp("q0", slot.0, "str");
             self.state.track_f128_self(dest.0);
         }
+        // Save Q1 before the libcall that would clobber it.
+        self.state.emit("    sub sp, sp, #16");
+        self.state.emit("    str q1, [sp]");
+        // Produce an f64 approximation in x0 for register data flow.
         self.state.emit("    bl __trunctfdf2");
         self.state.emit("    fmov x0, d0");
+        // Restore Q1 from saved location.
+        self.state.emit("    ldr q1, [sp]");
+        self.state.emit("    add sp, sp, #16");
         self.state.reg_cache.invalidate_all();
         self.state.reg_cache.set_acc(dest.0, false);
     }
@@ -3798,14 +3809,22 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_get_return_f128_second(&mut self, _dest: &Value) {
-        // ARM64: _Complex long double is decomposed into separate F128 args/returns,
-        // so this should not be reached. If it is, do nothing.
+    fn emit_get_return_f128_second(&mut self, dest: &Value) {
+        // ARM64 AAPCS64: _Complex long double returns imag part in q1.
+        // Store q1 (16-byte f128) to the dest stack slot.
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_sp("q1", slot.0, "str");
+            // Track that dest has full f128 data for subsequent precision-preserving loads
+            self.state.track_f128_self(dest.0);
+        }
     }
 
-    fn emit_set_return_f128_second(&mut self, _src: &Operand) {
-        // ARM64: _Complex long double is decomposed into separate F128 args/returns,
-        // so this should not be reached. If it is, do nothing.
+    fn emit_set_return_f128_second(&mut self, src: &Operand) {
+        // ARM64 AAPCS64: _Complex long double returns imag part in q1.
+        // Load the source F128 value into q1.
+        // First load into q0 using the existing full-precision loader, then move to q1.
+        self.emit_f128_operand_to_q0_full(src);
+        self.state.emit("    mov v1.16b, v0.16b");
     }
 
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {

@@ -4010,29 +4010,70 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_i128_cmp_ordered(&mut self, op: IrCmpOp) {
-        // Compare 64-bit values: high 32 bits first, then low
-        let label_id = self.state.next_label_id();
-        let high_decided = format!(".Li128_high_{}", label_id);
+        // Compare 64-bit values in eax:edx (lhs) vs (%esp):4(%esp) (rhs).
+        // For signed comparisons (Slt/Sle/Sgt/Sge):
+        //   - High 32-bit words are compared as SIGNED
+        //   - Low 32-bit words (when high words equal) are compared as UNSIGNED
+        // For unsigned comparisons (Ult/Ule/Ugt/Uge):
+        //   - Both high and low words are compared as UNSIGNED
+        let is_signed = matches!(op, IrCmpOp::Slt | IrCmpOp::Sle | IrCmpOp::Sgt | IrCmpOp::Sge);
 
-        // Compare high 32 bits first
-        self.state.emit("    cmpl 4(%esp), %edx");
-        emit!(self.state, "    jne {}", high_decided);
-        // High equal, compare low
-        self.state.emit("    cmpl (%esp), %eax");
-        emit!(self.state, "{}:", high_decided);
+        if is_signed {
+            // Signed 64-bit comparison: need separate paths for high-word
+            // decided vs high-words-equal cases, because the high words use
+            // signed comparison but the low words use unsigned comparison.
+            let label_id = self.state.next_label_id();
+            let label_hi_decided = format!(".Li128_hidec_{}", label_id);
+            let label_done = format!(".Li128_done_{}", label_id);
 
-        let set_instr = match op {
-            IrCmpOp::Slt => "setl",
-            IrCmpOp::Sle => "setle",
-            IrCmpOp::Sgt => "setg",
-            IrCmpOp::Sge => "setge",
-            IrCmpOp::Ult => "setb",
-            IrCmpOp::Ule => "setbe",
-            IrCmpOp::Ugt => "seta",
-            IrCmpOp::Uge => "setae",
-            _ => "sete",
-        };
-        emit!(self.state, "    {} %al", set_instr);
+            // Compare high 32 bits (signed)
+            self.state.emit("    cmpl 4(%esp), %edx");
+            emit!(self.state, "    jne {}", label_hi_decided);
+
+            // High words equal: compare low 32 bits as UNSIGNED
+            self.state.emit("    cmpl (%esp), %eax");
+            let low_set = match op {
+                IrCmpOp::Slt => "setb",   // unsigned below
+                IrCmpOp::Sle => "setbe",  // unsigned below or equal
+                IrCmpOp::Sgt => "seta",   // unsigned above
+                IrCmpOp::Sge => "setae",  // unsigned above or equal
+                _ => unreachable!(),
+            };
+            emit!(self.state, "    {} %al", low_set);
+            emit!(self.state, "    jmp {}", label_done);
+
+            // High words differ: use signed comparison result from high words
+            emit!(self.state, "{}:", label_hi_decided);
+            let high_set = match op {
+                IrCmpOp::Slt => "setl",
+                IrCmpOp::Sle => "setl",   // if high < high, result is true (<=)
+                IrCmpOp::Sgt => "setg",
+                IrCmpOp::Sge => "setg",   // if high > high, result is true (>=)
+                _ => unreachable!(),
+            };
+            emit!(self.state, "    {} %al", high_set);
+
+            emit!(self.state, "{}:", label_done);
+        } else {
+            // Unsigned 64-bit comparison: both high and low use unsigned flags,
+            // so we can use the simple fall-through approach.
+            let label_id = self.state.next_label_id();
+            let high_decided = format!(".Li128_high_{}", label_id);
+
+            self.state.emit("    cmpl 4(%esp), %edx");
+            emit!(self.state, "    jne {}", high_decided);
+            self.state.emit("    cmpl (%esp), %eax");
+            emit!(self.state, "{}:", high_decided);
+
+            let set_instr = match op {
+                IrCmpOp::Ult => "setb",
+                IrCmpOp::Ule => "setbe",
+                IrCmpOp::Ugt => "seta",
+                IrCmpOp::Uge => "setae",
+                _ => unreachable!(),
+            };
+            emit!(self.state, "    {} %al", set_instr);
+        }
         self.state.emit("    movzbl %al, %eax");
         self.state.emit("    addl $8, %esp");
     }

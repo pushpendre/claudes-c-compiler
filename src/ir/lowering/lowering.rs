@@ -208,13 +208,13 @@ impl Lowerer {
     }
 
     /// Returns true if the target returns _Complex long double via register pairs
-    /// (x87 st(0)/st(1) on x86-64) rather than via sret hidden pointer.
+    /// rather than via sret hidden pointer.
     /// On x86-64: true (COMPLEX_X87 class, returned in st(0) and st(1)).
+    /// On ARM64: true (HFA with 2 quad-precision members, returned in q0/q1).
     /// On i686: false (24 bytes > 8-byte reg pair; uses sret hidden pointer like GCC).
-    /// On ARM64: false (returned via decomposition into q0/q1, handled separately).
     /// On RISC-V: false (returned via sret hidden pointer).
     pub(super) fn returns_complex_long_double_in_regs(&self) -> bool {
-        self.target == Target::X86_64
+        self.target == Target::X86_64 || self.target == Target::Aarch64
     }
 
     /// Returns true if the target decomposes _Complex double into two separate
@@ -647,8 +647,8 @@ impl Lowerer {
         //   _Complex double (16 bytes): sret hidden pointer (ret_ty stays Ptr)
         //   _Complex long double (24 bytes): sret hidden pointer (ret_ty stays Ptr)
         if ptr_count == 0 {
-            if matches!(full_ret_ctype, CType::ComplexLongDouble) && self.is_x86() && self.returns_complex_long_double_in_regs() {
-                // x86-64: _Complex long double returns real part in x87 st(0)
+            if matches!(full_ret_ctype, CType::ComplexLongDouble) && self.returns_complex_long_double_in_regs() {
+                // x86-64: real part in x87 st(0); ARM64: real part in q0
                 ret_ty = IrType::F128;
             } else if matches!(full_ret_ctype, CType::ComplexDouble) && self.decomposes_complex_double() {
                 // x86-64/ARM64/RISC-V: _Complex double returns real in FP reg
