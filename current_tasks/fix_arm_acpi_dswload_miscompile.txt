@@ -1,0 +1,18 @@
+Task: Fix ARM miscompilation of drivers/acpi/acpica/dswload.c causing kernel boot hang
+
+Status: in_progress
+
+Problem:
+When drivers/acpi/acpica/dswload.c is compiled with ccc-arm and swapped into
+a GCC-built kernel, the kernel hangs during boot (400s timeout).
+
+This was found using the delta debugging tool with --seed 42 --total-count 500.
+The file is part of the ACPI subsystem (AML namespace loading/walking).
+
+Plan:
+1. Compare GCC vs CCC assembly output for dswload.c
+2. Identify the miscompiled function(s)
+3. Write a minimal reproducer
+4. Fix the compiler bug
+5. Verify the fix with DD tool
+6. Add regression test
