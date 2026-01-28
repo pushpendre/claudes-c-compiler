@@ -1,0 +1,26 @@
+Task: Fix i686 wide value upper bytes not zeroed on 32-bit store path
+
+Problem:
+On i686, when phi elimination converts a Phi node into Copy instructions,
+some incoming paths use IrConst::I64 constants (because all integer literals
+are lowered as IrConst::I64) while other paths use 32-bit Value operands.
+
+The IrConst::I64 path in emit_copy_value correctly writes 8 bytes to the
+destination slot and marks it as "wide". But when another Copy path writes
+a 32-bit Value to the same destination via store_eax_to(), only 4 bytes
+(the low half) are written. The upper 4 bytes retain stack garbage.
+
+Later, emit_wide_value_to_eax_ored() reads both 32-bit halves and ORs them
+to test truthiness. The garbage upper bytes cause incorrect branch decisions.
+
+Concrete trigger: libjpeg-turbo's jpegtran on i686 fails with "Bogus virtual
+array access" because a boolean `need_workspace` variable (type `int`) is
+incorrectly treated as TRUE due to garbage in the upper 32 bits of its
+64-bit stack slot.
+
+Fix:
+In store_eax_to(), when storing to a wide value's stack slot, also zero the
+upper 4 bytes with `movl $0, slot+4(%ebp)`. This ensures that any 32-bit
+write to a wide slot clears garbage from the upper half.
+
+Blocks: libjpeg jpegtran test on i686.
