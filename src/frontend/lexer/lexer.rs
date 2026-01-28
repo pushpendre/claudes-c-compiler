@@ -751,7 +751,7 @@ impl Lexer {
             b'"' => '"',
             b'a' => '\x07',
             b'b' => '\x08',
-            b'e' => '\x1b', // GNU extension: ESC
+            b'e' | b'E' => '\x1b', // GNU extension: ESC
             b'f' => '\x0c',
             b'v' => '\x0b',
             b'x' => {

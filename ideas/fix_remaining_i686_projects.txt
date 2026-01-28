@@ -1,46 +1,68 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28 (updated after rep movsb callee-save fix)
+Date: 2026-01-28 (updated after inline asm typed register load fix)
 
 Current status:
-- Unit tests: ~99.2% pass (10% sample: 2716/2737)
+- Unit tests: ~99.7% pass (10% sample: 2728/2737)
 - Projects passing: 5/12 (zlib, lua, libpng, jq, libuv)
 - Projects failing: libsodium, mquickjs, libjpeg, mbedtls, libffi, musl, tcc
 
-Fixed in latest round (rep movsb callee-save fix):
-- emit_memcpy now always saves/restores ESI and EDI around rep movsb
-- Previously only saved them if they were register-allocated in the function
-- This violated the callee-saved ABI contract and caused widespread crashes
-- jq: went from 1/12 pass to 12/12 pass (was SIGABRT/SIGSEGV on every test)
-- lua: now passes (was failing due to same callee-save corruption)
-- libpng: now passes (same root cause)
+Fixed in latest round (inline asm typed register load fix):
+- libsodium now BUILDS (was failing with "operand size mismatch for `movzw'")
+- The issue was movzwl/movsbl/movswl used 16/8-bit dest registers in inline asm
+- Runtime tests still fail (segfaults and timeouts in crypto operations)
 
 Known remaining issues:
 
-1. mquickjs crashes with SIGSEGV
-   - All test_*.js tests segfault
-   - Need to debug under GDB to find specific crash point
+1. mquickjs: SIGSEGV in js_string_compare during JS parsing
+   - Crashes in get_string_ptr -> JS_VALUE_TO_PTR returning garbage pointer
+   - JSValue is uint32_t on i686, pointer tagged with low bits
+   - val=0x236 -> ptr = val-1 = 0x235, which is not a heap pointer
+   - Root cause: likely corruption during JSValueArray access or value passing
+   - Needs deep debugging to find where the corruption occurs
 
-2. musl: Build fails during assembly of i386 math routines
-   - Error in src/math/i386/scalblnf.s (inline asm)
-   - May need i686-specific inline assembly handling
+2. sqlite: SIGSEGV in columnTypeImpl (0/622 tests pass)
+   - Crashes dereferencing NULL struct pointer + offset 0x1c
+   - Pattern: pTab=NULL, then pTab->field crashes
+   - May share root cause with mquickjs (struct/pointer codegen issue)
 
-3. tcc: Build/test failures
+3. musl: 3/6 tests pass (hello, string_ops, math pass)
+   - malloc test: malloc returns NULL despite brk() succeeding
+   - io test: tmpfile() fails (likely related to mmap)
+   - environ test: setenv/getenv broken (returns "fail")
+   - Built musl has __udivdi3/__umoddi3 deps (satisfied by -lgcc)
 
-4. libffi: Build fails (needs i686-specific handling)
+4. libsodium: Build succeeds, 0/7 tests pass
+   - sodium_init() hangs/segfaults in some tests
+   - Random test crashes immediately (SIGSEGV)
 
-5. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
+5. libjpeg: 1/2 tests pass (roundtrip passes, jpegtran fails)
+   - Error: "Bogus virtual array access" from libjpeg-turbo runtime
+   - Suggests incorrect array indexing or struct field access
 
-6. libsodium: Timeouts and segfaults
+6. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
+   - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
+   - Used in AES-NI key schedule (aesni_set_rk_128/192/256)
 
-7. libjpeg: Test failures
+7. libffi: Build succeeds, 0/6 tests pass (all SIGSEGV)
+   - All FFI call tests crash
+   - Likely i686 ABI/calling convention issue in libffi's closure/trampoline code
+
+8. tcc: Build fails in lib/alloca86_64.S
+   - TCC tries to build x86-64 runtime support even when built for i686
+   - Not a compiler bug - TCC Makefile configuration issue
+
+Unit test failure categories:
+- Complex number tests (SIGSEGV) - fix_complex_comparison_i64_type being worked on
+- Stack alignment >8 bytes: _Alignas(16+) not working for stack vars on i686
+- Integer constant overflow: large UL constants not promoted to ULL on ILP32
 
 Priority investigation targets:
-- mquickjs (JS engine, exercises many codegen paths)
-- musl inline asm for i386 math routines
-- mbedtls SSE2 intrinsic builtins
+- mquickjs/sqlite crashes likely share a common codegen root cause
+- Stack _Alignas(>=16) support for i686
+- musl malloc failure (mmap-related?)
 
 Techniques:
 - Compare i686 assembly output against i686-linux-gnu-gcc for suspect functions
 - Use GDB to trace execution and find divergence points
-- Run unit test suite to find specific failing test categories
+- strace to check syscall behavior for musl failures
