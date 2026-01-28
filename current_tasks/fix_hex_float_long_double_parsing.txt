@@ -1,0 +1,21 @@
+Task: Fix hex float long double literal parsing (parse_hex_float_to_f128)
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+Hex float long double literals like 0x1.p+0L are parsed incorrectly,
+producing wrong f128 values. For example, 0x1.p+0L should be 1.0 but
+produces ~1.54e-33.
+
+Root cause:
+In parse_hex_float_to_f128 (src/common/long_double.rs), the exponent
+calculation uses `bits_used` (total bits read from hex digits) instead of
+`bl` (actual bit length of the mantissa value). For 0x1, bits_used=4
+but bl=1, causing the exponent to be off by 3.
+
+Fix:
+Replace `bits_used` with `bl` in the adj_exp calculations in all three
+normalization branches.
+
+Impact: Fixes compiler_suite_0015_0000 on x86 (hex float long double test).
+May fix additional long double tests across all architectures.
