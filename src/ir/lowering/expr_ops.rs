@@ -20,6 +20,22 @@ impl Lowerer {
             _ => {}
         }
 
+        // Vector arithmetic (element-wise) -- check before constant folding since
+        // vectors can't be constant-folded and get_expr_type doesn't handle them.
+        // Per GCC vector extensions, if either operand is a vector, the operation
+        // is element-wise. A scalar operand is splatted (broadcast) to all lanes.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) {
+            let lhs_ct = self.expr_ctype(lhs);
+            if lhs_ct.is_vector() {
+                return self.lower_vector_binary_op(op, lhs, rhs, &lhs_ct);
+            }
+            let rhs_ct = self.expr_ctype(rhs);
+            if rhs_ct.is_vector() {
+                return self.lower_vector_binary_op(op, lhs, rhs, &rhs_ct);
+            }
+        }
+
         // Fast path: constant-fold pure integer arithmetic at lowering time.
         // This ensures correct C type semantics (e.g., 32-bit int width for
         // expressions like (1 << 31) / N) which the IR-level fold pass may lose
@@ -35,15 +51,6 @@ impl Lowerer {
                 if let Some(val) = self.eval_const_expr_from_parts(op, lhs, rhs) {
                     return Operand::Const(val);
                 }
-            }
-        }
-
-        // Vector arithmetic (element-wise)
-        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) {
-            let lhs_ct = self.expr_ctype(lhs);
-            if lhs_ct.is_vector() {
-                return self.lower_vector_binary_op(op, lhs, rhs, &lhs_ct);
             }
         }
 

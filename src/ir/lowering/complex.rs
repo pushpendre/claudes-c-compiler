@@ -443,26 +443,38 @@ impl Lowerer {
             Expr::Cast(type_spec, _, _) => {
                 self.type_spec_to_ctype(type_spec)
             }
-            Expr::BinaryOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs, _) => {
-                // Determine the result type for arithmetic involving complex operands.
-                // Per C11 6.3.1.8, when mixing complex and real types, the result type
-                // is determined by applying usual arithmetic conversions to the
-                // corresponding real type of the complex and the other operand's type.
-                // e.g., _Complex float + double => _Complex double
+            Expr::BinaryOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                | BinOp::Mod | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                | BinOp::Shl | BinOp::Shr), lhs, rhs, _) => {
                 let lt = self.expr_ctype(lhs);
                 let rt = self.expr_ctype(rhs);
-                if lt.is_complex() || rt.is_complex() {
-                    return self.common_complex_type(&lt, &rt);
+                // Per GCC vector extensions, vector binops produce a vector result.
+                if lt.is_vector() {
+                    return lt;
                 }
-                // Neither is complex: return the wider floating type or the left type
-                if matches!(lt, CType::LongDouble) || matches!(rt, CType::LongDouble) {
-                    return CType::LongDouble;
+                if rt.is_vector() {
+                    return rt;
                 }
-                if matches!(lt, CType::Double) || matches!(rt, CType::Double) {
-                    return CType::Double;
-                }
-                if matches!(lt, CType::Float) || matches!(rt, CType::Float) {
-                    return CType::Float;
+                // Complex and float type promotion only applies to arithmetic ops.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                    // Determine the result type for arithmetic involving complex operands.
+                    // Per C11 6.3.1.8, when mixing complex and real types, the result type
+                    // is determined by applying usual arithmetic conversions to the
+                    // corresponding real type of the complex and the other operand's type.
+                    // e.g., _Complex float + double => _Complex double
+                    if lt.is_complex() || rt.is_complex() {
+                        return self.common_complex_type(&lt, &rt);
+                    }
+                    // Neither is complex: return the wider floating type or the left type
+                    if matches!(lt, CType::LongDouble) || matches!(rt, CType::LongDouble) {
+                        return CType::LongDouble;
+                    }
+                    if matches!(lt, CType::Double) || matches!(rt, CType::Double) {
+                        return CType::Double;
+                    }
+                    if matches!(lt, CType::Float) || matches!(rt, CType::Float) {
+                        return CType::Float;
+                    }
                 }
                 lt
             }

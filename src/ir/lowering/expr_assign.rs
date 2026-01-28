@@ -629,6 +629,7 @@ impl Lowerer {
     }
 
     /// Lower vector compound assignment (a += b, a -= b, etc.): element-wise operation.
+    /// The RHS may be a scalar, which is broadcast to all vector elements.
     fn lower_vector_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, lhs_ct: &CType) -> Operand {
         let (elem_ct, num_elems) = match lhs_ct.vector_info() {
             Some((elem_ct, num_elems)) => (elem_ct.clone(), num_elems),
@@ -641,11 +642,22 @@ impl Lowerer {
         // Get the IR binary operation
         let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
 
-        // Get pointers to LHS and RHS vectors
+        // LHS is always a vector for compound assignment
         let lhs_ptr = self.lower_expr(lhs);
         let lhs_ptr_val = self.operand_to_value(lhs_ptr);
-        let rhs_ptr = self.lower_expr(rhs);
-        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+
+        // RHS may be a scalar or a vector
+        let rhs_is_vector = self.expr_ctype(rhs).is_vector();
+        let rhs_lowered = self.lower_expr(rhs);
+        let rhs_val = self.operand_to_value(rhs_lowered);
+
+        // For scalar RHS, cast to element type once (broadcast value)
+        let rhs_scalar = if !rhs_is_vector {
+            let src_ty = self.get_expr_type(rhs);
+            Some(self.emit_implicit_cast(Operand::Value(rhs_val), src_ty, elem_ir_ty))
+        } else {
+            None
+        };
 
         // Element-wise operation
         for i in 0..num_elems {
@@ -656,19 +668,24 @@ impl Lowerer {
             } else {
                 lhs_ptr_val
             };
-            // GEP to element i for RHS
-            let rhs_elem_ptr = if offset > 0 {
-                self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
-            } else {
-                rhs_ptr_val
-            };
-            // Load both elements
+            // Load LHS element
             let lhs_elem = self.fresh_value();
             self.emit(Instruction::Load { dest: lhs_elem, ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
-            let rhs_elem = self.fresh_value();
-            self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+            // Get RHS element: splatted scalar or loaded from vector
+            let rhs_elem_op = if let Some(ref scalar_op) = rhs_scalar {
+                scalar_op.clone()
+            } else {
+                let rhs_elem_ptr = if offset > 0 {
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                } else {
+                    rhs_val
+                };
+                let rhs_elem = self.fresh_value();
+                self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+                Operand::Value(rhs_elem)
+            };
             // Compute result
-            let result_elem = self.emit_binop_val(ir_op, Operand::Value(lhs_elem), Operand::Value(rhs_elem), elem_ir_ty);
+            let result_elem = self.emit_binop_val(ir_op, Operand::Value(lhs_elem), rhs_elem_op, elem_ir_ty);
             // Store back to LHS
             self.emit(Instruction::Store { val: Operand::Value(result_elem), ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
         }
@@ -677,6 +694,8 @@ impl Lowerer {
     }
 
     /// Lower vector binary operation (a + b, a - b, etc.): element-wise, returns new alloca.
+    /// Per GCC vector extensions, if one operand is a scalar and the other is a
+    /// vector, the scalar is broadcast (splatted) to all elements of the vector.
     pub(super) fn lower_vector_binary_op(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, vec_ct: &CType) -> Operand {
         let (elem_ct, num_elems) = match vec_ct.vector_info() {
             Some((elem_ct, num_elems)) => (elem_ct.clone(), num_elems),
@@ -691,40 +710,73 @@ impl Lowerer {
         let is_unsigned = elem_ct.is_unsigned();
         let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
 
+        // Determine if each operand is a vector or scalar.
+        let lhs_is_vector = self.expr_ctype(lhs).is_vector();
+        let rhs_is_vector = self.expr_ctype(rhs).is_vector();
+
         // Allocate result vector on stack
         let result_alloca = self.emit_entry_alloca(IrType::Ptr, total_size, total_size, false);
 
-        // Get pointers to LHS and RHS vectors
-        let lhs_ptr = self.lower_expr(lhs);
-        let lhs_ptr_val = self.operand_to_value(lhs_ptr);
-        let rhs_ptr = self.lower_expr(rhs);
-        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+        // Lower operands. Vectors produce pointers; scalars produce values.
+        let lhs_lowered = self.lower_expr(lhs);
+        let lhs_val = self.operand_to_value(lhs_lowered);
+        let rhs_lowered = self.lower_expr(rhs);
+        let rhs_val = self.operand_to_value(rhs_lowered);
+
+        // For scalar operands, cast to the element type once (broadcast value).
+        let lhs_scalar = if !lhs_is_vector {
+            let src_ty = self.get_expr_type(lhs);
+            Some(self.emit_implicit_cast(Operand::Value(lhs_val), src_ty, elem_ir_ty))
+        } else {
+            None
+        };
+        let rhs_scalar = if !rhs_is_vector {
+            let src_ty = self.get_expr_type(rhs);
+            Some(self.emit_implicit_cast(Operand::Value(rhs_val), src_ty, elem_ir_ty))
+        } else {
+            None
+        };
 
         // Element-wise operation
         for i in 0..num_elems {
             let offset = i * elem_size;
-            let lhs_elem_ptr = if offset > 0 {
-                self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+
+            // Get LHS element: load from vector, or use splatted scalar
+            let lhs_elem_op = if let Some(ref scalar_op) = lhs_scalar {
+                scalar_op.clone()
             } else {
-                lhs_ptr_val
+                let lhs_elem_ptr = if offset > 0 {
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                } else {
+                    lhs_val
+                };
+                let lhs_elem = self.fresh_value();
+                self.emit(Instruction::Load { dest: lhs_elem, ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+                Operand::Value(lhs_elem)
             };
-            let rhs_elem_ptr = if offset > 0 {
-                self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+
+            // Get RHS element: load from vector, or use splatted scalar
+            let rhs_elem_op = if let Some(ref scalar_op) = rhs_scalar {
+                scalar_op.clone()
             } else {
-                rhs_ptr_val
+                let rhs_elem_ptr = if offset > 0 {
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                } else {
+                    rhs_val
+                };
+                let rhs_elem = self.fresh_value();
+                self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+                Operand::Value(rhs_elem)
             };
+
             let result_elem_ptr = if offset > 0 {
                 self.emit_binop_val(IrBinOp::Add, Operand::Value(result_alloca), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
             } else {
                 result_alloca
             };
-            // Load both elements
-            let lhs_elem = self.fresh_value();
-            self.emit(Instruction::Load { dest: lhs_elem, ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
-            let rhs_elem = self.fresh_value();
-            self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+
             // Compute result
-            let result_elem = self.emit_binop_val(ir_op, Operand::Value(lhs_elem), Operand::Value(rhs_elem), elem_ir_ty);
+            let result_elem = self.emit_binop_val(ir_op, lhs_elem_op, rhs_elem_op, elem_ir_ty);
             // Store to result
             self.emit(Instruction::Store { val: Operand::Value(result_elem), ptr: result_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
         }
