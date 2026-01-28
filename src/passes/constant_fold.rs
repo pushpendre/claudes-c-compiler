@@ -497,8 +497,9 @@ fn fold_float_cmp(op: IrCmpOp, lhs: f64, rhs: f64) -> bool {
     }
 }
 
-/// Fold a binary operation on two F128 (long double) constants using full x87 80-bit precision.
-/// This avoids the precision loss that occurs when extracting f64 and computing with f64.
+/// Fold a binary operation on two F128 (long double) constants using x87 80-bit precision.
+/// The constants are stored as f128 bytes (112-bit mantissa), but arithmetic is performed
+/// using x87 FPU which has 64-bit mantissa. The result is stored back as f128.
 ///
 /// Note: const_arith.rs has a similar path in eval_const_binop_float() for the frontend
 /// const evaluator. These are separate because the IR pass operates on IrConst/IrBinOp
@@ -506,10 +507,11 @@ fn fold_float_cmp(op: IrCmpOp, lhs: f64, rhs: f64) -> bool {
 fn fold_f128_binop(op: IrBinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
     use crate::common::long_double;
 
+    // Convert f128 -> x87 for arithmetic
     let la = lhs.x87_bytes();
     let ra = rhs.x87_bytes();
 
-    let result_bytes = match op {
+    let result_x87 = match op {
         IrBinOp::Add => long_double::x87_add(&la, &ra),
         IrBinOp::Sub => long_double::x87_sub(&la, &ra),
         IrBinOp::Mul => long_double::x87_mul(&la, &ra),
@@ -518,24 +520,36 @@ fn fold_f128_binop(op: IrBinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst>
         _ => return None,
     };
 
-    let approx = long_double::x87_to_f64(&result_bytes);
-    Some(IrConst::long_double_with_bytes(approx, result_bytes))
+    // Convert x87 result back to f128 for storage
+    let result_f128 = long_double::x87_bytes_to_f128_bytes(&result_x87);
+    let approx = long_double::x87_to_f64(&result_x87);
+    Some(IrConst::long_double_with_bytes(approx, result_f128))
 }
 
 /// Negate an F128 (long double) constant with full precision by flipping the sign bit.
 fn fold_f128_neg(src: &IrConst) -> IrConst {
     use crate::common::long_double;
 
+    // For negation, we can operate directly on f128 bytes (just flip sign bit)
+    if let IrConst::LongDouble(fv, f128_bytes) = src {
+        let val = u128::from_le_bytes(*f128_bytes);
+        let neg_val = val ^ (1u128 << 127); // flip sign bit
+        let neg_f128 = neg_val.to_le_bytes();
+        return IrConst::long_double_with_bytes(-fv, neg_f128);
+    }
+    // Fallback via x87
     let bytes = src.x87_bytes();
     let neg_bytes = long_double::x87_neg(&bytes);
+    let neg_f128 = long_double::x87_bytes_to_f128_bytes(&neg_bytes);
     let approx = long_double::x87_to_f64(&neg_bytes);
-    IrConst::long_double_with_bytes(approx, neg_bytes)
+    IrConst::long_double_with_bytes(approx, neg_f128)
 }
 
-/// Compare two F128 (long double) constants using full x87 80-bit precision.
+/// Compare two F128 (long double) constants using x87 80-bit precision.
 fn fold_f128_cmp(op: IrCmpOp, lhs: &IrConst, rhs: &IrConst) -> bool {
     use crate::common::long_double;
 
+    // Convert f128 -> x87 for comparison
     let la = lhs.x87_bytes();
     let ra = rhs.x87_bytes();
     let cmp = long_double::x87_cmp(&la, &ra);

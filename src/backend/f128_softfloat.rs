@@ -187,13 +187,12 @@ pub trait F128SoftFloat {
 /// Load an F128 operand into the first argument position with full precision.
 ///
 /// Three paths:
-/// 1. **Constant**: convert x87 bytes to IEEE f128, load lo:hi directly.
+/// 1. **Constant**: load f128 bytes directly as lo:hi.
 /// 2. **Tracked value**: load full 16-byte f128 from the original memory location.
 /// 3. **Fallback**: load f64 approximation and extend via __extenddftf2.
 pub fn f128_operand_to_arg1<T: F128SoftFloat + ?Sized>(cg: &mut T, op: &Operand) {
-    // Path 1: F128 constant with full-precision x87 bytes.
-    if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
-        let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
+    // Path 1: F128 constant with full-precision f128 bytes.
+    if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = op {
         let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
         let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
         cg.f128_load_const_to_arg1(lo, hi);

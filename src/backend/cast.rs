@@ -251,11 +251,10 @@ pub fn f128_cmp_libcall(op: IrCmpOp) -> (&'static str, F128CmpKind) {
 }
 
 /// Extract the IEEE f128 low/high u64 halves from an F128 constant operand.
-/// Converts the x87 80-bit extended format to IEEE binary128 format.
+/// The f128 bytes are already in IEEE binary128 format.
 /// Returns None for non-constant operands (caller must use runtime conversion).
 pub fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
-    if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
-        let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
+    if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = op {
         let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
         let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
         Some((lo, hi))

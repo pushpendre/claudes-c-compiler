@@ -230,10 +230,10 @@ impl Lexer {
                 return match hex_float_kind {
                     1 => Token::new(TokenKind::FloatLiteralF32(value), span),
                     2 => {
-                        // Parse hex float with full x87 80-bit precision for long double
+                        // Parse hex float with full f128 precision for long double
                         let hex_text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0x0p0");
-                        let x87_bytes = crate::common::long_double::parse_long_double_to_x87_bytes(hex_text);
-                        Token::new(TokenKind::FloatLiteralLongDouble(value, x87_bytes), span)
+                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(hex_text);
+                        Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
                     }
                     _ => Token::new(TokenKind::FloatLiteral(value), span),
                 };
@@ -379,9 +379,9 @@ impl Lexer {
                 match float_kind {
                     1 => Token::new(TokenKind::ImaginaryLiteralF32(value), span),
                     2 => {
-                        // Parse with full x87 80-bit precision for long double imaginary
-                        let x87_bytes = crate::common::long_double::parse_long_double_to_x87_bytes(&text);
-                        Token::new(TokenKind::ImaginaryLiteralLongDouble(value, x87_bytes), span)
+                        // Parse with full f128 precision for long double imaginary
+                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(&text);
+                        Token::new(TokenKind::ImaginaryLiteralLongDouble(value, f128_bytes), span)
                     }
                     _ => Token::new(TokenKind::ImaginaryLiteral(value), span),
                 }
@@ -389,9 +389,9 @@ impl Lexer {
                 match float_kind {
                     1 => Token::new(TokenKind::FloatLiteralF32(value as f64), span),
                     2 => {
-                        // Parse with full x87 80-bit precision for long double
-                        let x87_bytes = crate::common::long_double::parse_long_double_to_x87_bytes(&text);
-                        Token::new(TokenKind::FloatLiteralLongDouble(value, x87_bytes), span)
+                        // Parse with full f128 precision for long double
+                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(&text);
+                        Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
                     }
                     _ => Token::new(TokenKind::FloatLiteral(value), span),
                 }

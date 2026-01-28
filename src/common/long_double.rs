@@ -211,6 +211,53 @@ impl BigUint {
         (self.limbs.len() as u32 - 1) * 32 + top_bits
     }
 
+    /// Extract the top N bits (up to 128), with the MSB at bit (N-1).
+    /// Returns (top_val, bits_shifted) where the value is approximately top_val * 2^bits_shifted.
+    fn top_n_bits(&self, n: u32) -> (u128, i32) {
+        assert!(n > 0 && n <= 128);
+        let bl = self.bit_length();
+        if bl == 0 {
+            return (0, 0);
+        }
+        if bl <= n {
+            // Value fits in n bits
+            let mut val: u128 = 0;
+            for (i, &limb) in self.limbs.iter().enumerate() {
+                val |= (limb as u128) << (i * 32);
+            }
+            return (val, 0);
+        }
+
+        // We need bits [bl-1 .. bl-n] of the big integer
+        let shift = bl - n;
+        let word_shift = (shift / 32) as usize;
+        let bit_shift = shift % 32;
+
+        let mut val: u128 = 0;
+        // We need up to (n/32 + 2) limbs due to bit_shift straddling
+        let limbs_needed = (n / 32 + 2) as usize;
+        for j in 0..limbs_needed {
+            let idx = word_shift + j;
+            if idx < self.limbs.len() {
+                let limb = self.limbs[idx] as u128;
+                if j == 0 {
+                    val |= limb >> bit_shift;
+                } else {
+                    let bit_pos = j as u32 * 32 - bit_shift;
+                    if bit_pos < 128 {
+                        val |= limb << bit_pos;
+                    }
+                }
+            }
+        }
+        // Mask to n bits
+        if n < 128 {
+            val &= (1u128 << n) - 1;
+        }
+
+        (val, shift as i32)
+    }
+
     /// Extract the top 64 bits, with the MSB at bit 63.
     /// Returns (top64, bits_shifted) where the value is approximately top64 * 2^bits_shifted.
     fn top_64_bits(&self) -> (u64, i32) {
@@ -711,6 +758,533 @@ pub fn x87_bytes_to_f128_bytes(x87: &[u8; 16]) -> [u8; 16] {
     let exp_sign_bits: u128 = ((exp15 as u128) << 112) | (sign << 127);
     let val: u128 = mantissa112 | exp_sign_bits;
     val.to_le_bytes()
+}
+
+// =============================================================================
+// IEEE 754 binary128 (f128) native functions
+// =============================================================================
+
+/// Parse a float string directly to IEEE 754 binary128 (f128) bytes with full 112-bit
+/// mantissa precision. Used for long double constants on ARM64/RISC-V where long double
+/// is quad precision.
+///
+/// This is the f128 equivalent of `parse_long_double_to_x87_bytes`. While x87 only has
+/// 64 bits of mantissa, f128 has 112 bits, so parsing directly to f128 preserves more
+/// precision than parsing to x87 and converting.
+pub fn parse_long_double_to_f128_bytes(text: &str) -> [u8; 16] {
+    // Strip the L/l suffix if present
+    let text = text.trim();
+    let text = if text.ends_with('L') || text.ends_with('l') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    };
+
+    // Handle sign prefix
+    let (negative_prefix, text) = if text.starts_with('-') {
+        (true, &text[1..])
+    } else if text.starts_with('+') {
+        (false, &text[1..])
+    } else {
+        (false, text)
+    };
+
+    // Handle hex floats
+    if text.len() > 2 && (text.starts_with("0x") || text.starts_with("0X")) {
+        return parse_hex_float_to_f128(negative_prefix, text);
+    }
+
+    // Handle special values
+    let text_lower = text.to_ascii_lowercase();
+    if text_lower == "inf" || text_lower == "infinity" {
+        return make_f128_infinity(negative_prefix);
+    }
+    if text_lower == "nan" || text_lower.starts_with("nan(") {
+        return make_f128_nan(negative_prefix);
+    }
+
+    // Parse decimal float
+    parse_decimal_float_to_f128(negative_prefix, text)
+}
+
+/// Parse a decimal float string to IEEE 754 binary128 format.
+fn parse_decimal_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
+    let bytes = text.as_bytes();
+
+    // Collect all significant digits and track decimal point position
+    let mut digits: Vec<u8> = Vec::with_capacity(40);
+    let mut decimal_point_offset: Option<usize> = None;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            decimal_point_offset = Some(digits.len());
+            i += 1;
+        } else if bytes[i].is_ascii_digit() {
+            digits.push(bytes[i] - b'0');
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Parse optional exponent
+    let mut exp10: i32 = 0;
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
+            i += 1;
+            true
+        } else {
+            if i < bytes.len() && bytes[i] == b'+' {
+                i += 1;
+            }
+            false
+        };
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            exp10 = exp10.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
+            i += 1;
+        }
+        if exp_neg {
+            exp10 = -exp10;
+        }
+    }
+
+    let frac_digits = if let Some(dp) = decimal_point_offset {
+        (digits.len() - dp) as i32
+    } else {
+        0
+    };
+    let decimal_exp = exp10 - frac_digits;
+
+    // Strip leading zeros
+    while digits.len() > 1 && digits[0] == 0 {
+        digits.remove(0);
+    }
+
+    if digits.is_empty() || (digits.len() == 1 && digits[0] == 0) {
+        return make_f128_zero(negative);
+    }
+
+    decimal_to_f128_bigint(negative, &digits, decimal_exp)
+}
+
+/// Convert decimal digits and exponent to f128 format using big integer arithmetic.
+/// f128 has 112 mantissa bits (+ 1 implicit), so we need 113 bits of precision.
+fn decimal_to_f128_bigint(negative: bool, digits: &[u8], decimal_exp: i32) -> [u8; 16] {
+    if decimal_exp >= 0 {
+        let mut big_val = BigUint::from_decimal_digits(digits);
+        let exp = decimal_exp as u32;
+        let p10 = pow10_big(exp);
+        big_val = mul_big(&big_val, &p10);
+
+        if big_val.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        let (top113, shift) = big_val.top_n_bits(113);
+
+        if top113 == 0 {
+            return make_f128_zero(negative);
+        }
+
+        // Normalize: ensure top bit (bit 112) is set for the implicit integer bit
+        let lz = top113.leading_zeros() - (128 - 113); // leading zeros within 113-bit field
+        let mantissa113 = top113 << lz;
+        let binary_exp = shift + 112 - lz as i32;
+
+        encode_f128(negative, binary_exp, mantissa113)
+    } else {
+        let neg_exp = (-decimal_exp) as u32;
+
+        let big_d = BigUint::from_decimal_digits(digits);
+        if big_d.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        // We want 113+ bits of precision in the quotient.
+        // Shift D left by enough bits before dividing.
+        let extra_bits = 128 + neg_exp * 4; // generous extra precision
+        let extra_bits = extra_bits.min(200000); // sanity limit
+
+        let mut shifted_d = big_d;
+        shifted_d.shl(extra_bits);
+
+        let p10 = pow10_big(neg_exp);
+        let quotient = BigUint::div_big(&shifted_d, &p10);
+
+        if quotient.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        let (top113, shift) = quotient.top_n_bits(113);
+
+        if top113 == 0 {
+            return make_f128_zero(negative);
+        }
+
+        let lz = top113.leading_zeros() - (128 - 113);
+        let mantissa113 = top113 << lz;
+        let binary_exp = shift + 112 - lz as i32 - extra_bits as i32;
+
+        encode_f128(negative, binary_exp, mantissa113)
+    }
+}
+
+/// Encode an IEEE 754 binary128 value from sign, binary exponent, and 113-bit mantissa.
+/// `binary_exp` is the exponent of the MSB (bit 112) of `mantissa113`.
+/// That is, value = mantissa113 * 2^(binary_exp - 112).
+fn encode_f128(negative: bool, binary_exp: i32, mantissa113: u128) -> [u8; 16] {
+    if mantissa113 == 0 {
+        return make_f128_zero(negative);
+    }
+
+    // f128 format: biased_exponent = unbiased_exponent + 16383
+    let biased_exp = binary_exp + 16383;
+
+    if biased_exp >= 0x7FFF {
+        return make_f128_infinity(negative);
+    }
+
+    if biased_exp <= 0 {
+        // Subnormal or underflow
+        let shift = 1 - biased_exp;
+        if shift >= 113 {
+            return make_f128_zero(negative);
+        }
+        let mantissa_denorm = mantissa113 >> shift as u32;
+        // f128: implicit bit is NOT stored, mantissa is bits [111:0]
+        let mantissa_stored = mantissa_denorm & ((1u128 << 112) - 1);
+        let sign_bit = if negative { 1u128 << 127 } else { 0 };
+        let val = sign_bit | mantissa_stored;
+        return val.to_le_bytes();
+    }
+
+    let exp15 = biased_exp as u128;
+    // Remove implicit integer bit (bit 112), store only lower 112 bits
+    let mantissa_stored = mantissa113 & ((1u128 << 112) - 1);
+    let sign_bit = if negative { 1u128 << 127 } else { 0 };
+    let val = sign_bit | (exp15 << 112) | mantissa_stored;
+    val.to_le_bytes()
+}
+
+/// Parse a hex float string (0x..p..) to f128 format.
+fn parse_hex_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
+    // Skip "0x" or "0X"
+    let text = &text[2..];
+
+    let bytes = text.as_bytes();
+    let mut hex_digits: Vec<u8> = Vec::with_capacity(32);
+    let mut decimal_point_offset: Option<usize> = None;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            decimal_point_offset = Some(hex_digits.len());
+            i += 1;
+        } else if bytes[i].is_ascii_hexdigit() {
+            let d = if bytes[i] >= b'0' && bytes[i] <= b'9' {
+                bytes[i] - b'0'
+            } else if bytes[i] >= b'a' && bytes[i] <= b'f' {
+                bytes[i] - b'a' + 10
+            } else {
+                bytes[i] - b'A' + 10
+            };
+            hex_digits.push(d);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Parse binary exponent (p/P)
+    let mut exp2: i32 = 0;
+    if i < bytes.len() && (bytes[i] == b'p' || bytes[i] == b'P') {
+        i += 1;
+        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
+            i += 1;
+            true
+        } else {
+            if i < bytes.len() && bytes[i] == b'+' {
+                i += 1;
+            }
+            false
+        };
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            exp2 = exp2.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
+            i += 1;
+        }
+        if exp_neg {
+            exp2 = -exp2;
+        }
+    }
+
+    // Build the mantissa from hex digits
+    let mut mantissa: u128 = 0;
+    let mut bits_used: u32 = 0;
+    for &d in &hex_digits {
+        if bits_used + 4 <= 128 {
+            mantissa = (mantissa << 4) | (d as u128);
+            bits_used += 4;
+        }
+    }
+
+    if mantissa == 0 {
+        return make_f128_zero(negative);
+    }
+
+    // Each hex digit after the point contributes 4 bits of binary fraction
+    let frac_hex_digits = if let Some(dp) = decimal_point_offset {
+        (hex_digits.len() - dp) as i32
+    } else {
+        0
+    };
+    let binary_exp = exp2 - frac_hex_digits * 4;
+
+    // Normalize mantissa to have bit 112 set (for 113-bit mantissa)
+    let bl = 128 - mantissa.leading_zeros();
+    if bl > 113 {
+        // Too many bits, shift right
+        let excess = bl - 113;
+        mantissa >>= excess;
+        let adj_exp = binary_exp + (bits_used as i32 - 1) + excess as i32;
+        encode_f128(negative, adj_exp, mantissa)
+    } else if bl < 113 && bl > 0 {
+        let deficit = 113 - bl;
+        mantissa <<= deficit;
+        let adj_exp = binary_exp + (bits_used as i32 - 1) - deficit as i32;
+        encode_f128(negative, adj_exp, mantissa)
+    } else {
+        let adj_exp = binary_exp + (bits_used as i32 - 1);
+        encode_f128(negative, adj_exp, mantissa)
+    }
+}
+
+fn make_f128_zero(negative: bool) -> [u8; 16] {
+    let val: u128 = if negative { 1u128 << 127 } else { 0 };
+    val.to_le_bytes()
+}
+
+fn make_f128_infinity(negative: bool) -> [u8; 16] {
+    let val: u128 = (if negative { 1u128 } else { 0 } << 127) | (0x7FFF_u128 << 112);
+    val.to_le_bytes()
+}
+
+fn make_f128_nan(negative: bool) -> [u8; 16] {
+    let val: u128 = (if negative { 1u128 } else { 0 } << 127) | (0x7FFF_u128 << 112) | (1u128 << 111);
+    val.to_le_bytes()
+}
+
+/// Convert f128 bytes to x87 80-bit bytes. This is a lossy narrowing conversion
+/// (112-bit mantissa → 64-bit mantissa) used when x87 format is needed (x86 backend,
+/// x87 FPU constant folding).
+pub fn f128_bytes_to_x87_bytes(f128: &[u8; 16]) -> [u8; 16] {
+    let val = u128::from_le_bytes(*f128);
+    let sign = ((val >> 127) & 1) as u16;
+    let exp15 = ((val >> 112) & 0x7FFF) as u16;
+    let mantissa112 = val & ((1u128 << 112) - 1);
+
+    if exp15 == 0 && mantissa112 == 0 {
+        // Zero
+        return make_x87_zero(sign == 1);
+    }
+
+    if exp15 == 0x7FFF {
+        if mantissa112 == 0 {
+            return make_x87_infinity(sign == 1);
+        }
+        return make_x87_nan(sign == 1);
+    }
+
+    // Normal number
+    // f128 mantissa: 112 bits, implicit leading 1
+    // x87 mantissa: 64 bits, explicit leading 1
+    // Take top 63 bits of f128 mantissa and prepend the explicit 1
+    // mantissa112 >> (112 - 63) = mantissa112 >> 49
+    let mantissa64 = (1u64 << 63) | ((mantissa112 >> 49) as u64);
+
+    // Exponent bias is the same for both formats (16383)
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&mantissa64.to_le_bytes());
+    let exp_sign = exp15 | (sign << 15);
+    bytes[8] = (exp_sign & 0xFF) as u8;
+    bytes[9] = (exp_sign >> 8) as u8;
+    bytes
+}
+
+/// Convert f128 bytes to f64 (lossy narrowing).
+pub fn f128_bytes_to_f64(f128: &[u8; 16]) -> f64 {
+    let val = u128::from_le_bytes(*f128);
+    let sign = ((val >> 127) & 1) as u64;
+    let exp15 = ((val >> 112) & 0x7FFF) as i64;
+    let mantissa112 = val & ((1u128 << 112) - 1);
+
+    if exp15 == 0 && mantissa112 == 0 {
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+
+    if exp15 == 0x7FFF {
+        if mantissa112 == 0 {
+            return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+        return f64::NAN;
+    }
+
+    // Normal f128: value = (-1)^sign * 2^(exp15-16383) * (1 + mantissa112/2^112)
+    let unbiased = exp15 - 16383;
+
+    if unbiased >= -1022 && unbiased <= 1023 {
+        let f64_biased_exp = (unbiased + 1023) as u64;
+        // Take top 52 bits of 112-bit mantissa
+        let mantissa52 = (mantissa112 >> 60) as u64;
+        let f64_bits = (sign << 63) | (f64_biased_exp << 52) | mantissa52;
+        f64::from_bits(f64_bits)
+    } else if unbiased > 1023 {
+        if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY }
+    } else {
+        // Subnormal in f64
+        let mantissa_with_implicit = mantissa112 | (1u128 << 112);
+        let val = mantissa_with_implicit as f64 * 2.0_f64.powi(unbiased as i32 - 112);
+        if sign == 1 { -val } else { val }
+    }
+}
+
+/// Convert a signed i64 to f128 bytes with full precision.
+/// f128 has 112-bit mantissa, so all i64 values are representable exactly.
+pub fn i64_to_f128_bytes(val: i64) -> [u8; 16] {
+    if val == 0 {
+        return make_f128_zero(false);
+    }
+    let negative = val < 0;
+    let abs_val: u64 = if val == i64::MIN {
+        1u64 << 63
+    } else if negative {
+        (-val) as u64
+    } else {
+        val as u64
+    };
+    u64_to_f128_bytes_with_sign(abs_val, negative)
+}
+
+/// Convert an unsigned u64 to f128 bytes with full precision.
+pub fn u64_to_f128_bytes(val: u64) -> [u8; 16] {
+    if val == 0 {
+        return make_f128_zero(false);
+    }
+    u64_to_f128_bytes_with_sign(val, false)
+}
+
+fn u64_to_f128_bytes_with_sign(val: u64, negative: bool) -> [u8; 16] {
+    if val == 0 {
+        return make_f128_zero(negative);
+    }
+    let bl = 64 - val.leading_zeros(); // number of significant bits
+    // binary_exp = bl - 1 (position of MSB)
+    // We need to normalize to 113-bit mantissa with bit 112 set
+    let mantissa113: u128 = (val as u128) << (113 - bl);
+    let binary_exp = (bl as i32) - 1;
+    encode_f128(negative, binary_exp, mantissa113)
+}
+
+/// Convert an unsigned u128 to f128 bytes.
+/// Values with more than 113 significant bits will be rounded.
+pub fn u128_to_f128_bytes(val: u128) -> [u8; 16] {
+    if val == 0 {
+        return make_f128_zero(false);
+    }
+    if val <= u64::MAX as u128 {
+        return u64_to_f128_bytes(val as u64);
+    }
+    let bl = 128 - val.leading_zeros(); // number of significant bits
+    let mantissa113: u128 = if bl > 113 {
+        val >> (bl - 113)
+    } else if bl < 113 {
+        val << (113 - bl)
+    } else {
+        val
+    };
+    let binary_exp = (bl as i32) - 1;
+    encode_f128(false, binary_exp, mantissa113)
+}
+
+/// Convert a signed i128 to f128 bytes.
+pub fn i128_to_f128_bytes(val: i128) -> [u8; 16] {
+    if val == 0 {
+        return make_f128_zero(false);
+    }
+    let negative = val < 0;
+    let abs_val: u128 = if val == i128::MIN {
+        1u128 << 127
+    } else if negative {
+        (-val) as u128
+    } else {
+        val as u128
+    };
+    if abs_val <= u64::MAX as u128 {
+        return u64_to_f128_bytes_with_sign(abs_val as u64, negative);
+    }
+    let bl = 128 - abs_val.leading_zeros();
+    let mantissa113: u128 = if bl > 113 {
+        abs_val >> (bl - 113)
+    } else if bl < 113 {
+        abs_val << (113 - bl)
+    } else {
+        abs_val
+    };
+    let binary_exp = (bl as i32) - 1;
+    encode_f128(negative, binary_exp, mantissa113)
+}
+
+/// Convert f64 to f128 bytes (widening, zero-fills extra mantissa bits).
+pub fn f64_to_f128_bytes_lossless(val: f64) -> [u8; 16] {
+    let bits = val.to_bits();
+    let sign = ((bits >> 63) & 1) as u128;
+    let exp11 = ((bits >> 52) & 0x7FF) as i64;
+    let mantissa52 = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    if exp11 == 0 && mantissa52 == 0 {
+        return make_f128_zero(sign == 1);
+    }
+
+    if exp11 == 0x7FF {
+        if mantissa52 == 0 {
+            return make_f128_infinity(sign == 1);
+        }
+        return make_f128_nan(sign == 1);
+    }
+
+    // Normal f64: exp = exp11 - 1023, mantissa = 1.mantissa52
+    // f128: exp = exp11 - 1023 + 16383, mantissa112 = mantissa52 << (112 - 52)
+    let exp15 = (exp11 - 1023 + 16383) as u128;
+    let mantissa112: u128 = (mantissa52 as u128) << 60; // 112 - 52 = 60
+
+    let val128: u128 = (sign << 127) | (exp15 << 112) | mantissa112;
+    val128.to_le_bytes()
+}
+
+/// Convert f128 bytes to i64 (for constant folding).
+pub fn f128_bytes_to_i64(bytes: &[u8; 16]) -> Option<i64> {
+    // Convert through x87 for now since the existing code handles edge cases
+    let x87 = f128_bytes_to_x87_bytes(bytes);
+    x87_bytes_to_i64(&x87)
+}
+
+/// Convert f128 bytes to u64 (for constant folding).
+pub fn f128_bytes_to_u64(bytes: &[u8; 16]) -> Option<u64> {
+    let x87 = f128_bytes_to_x87_bytes(bytes);
+    x87_bytes_to_u64(&x87)
+}
+
+/// Convert f128 bytes to i128 (for constant folding).
+pub fn f128_bytes_to_i128(bytes: &[u8; 16]) -> Option<i128> {
+    let x87 = f128_bytes_to_x87_bytes(bytes);
+    x87_bytes_to_i128(&x87)
+}
+
+/// Convert f128 bytes to u128 (for constant folding).
+pub fn f128_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
+    let x87 = f128_bytes_to_x87_bytes(bytes);
+    x87_bytes_to_u128(&x87)
 }
 
 /// Create x87 bytes from an f64 value (for when we don't have the original text).
@@ -1405,5 +1979,55 @@ mod tests {
 
         let bytes = f64_to_x87_bytes_simple(-0.0);
         assert_eq!(bytes[9] & 0x80, 0x80);
+    }
+}
+
+#[cfg(test)]
+mod f128_tests {
+    use super::*;
+
+    #[test]
+    fn test_f128_parse_integer() {
+        // 9223372036854775807 = 2^63 - 1
+        // In f128: exp=62+16383=16445=0x403D, mantissa has all lower bits set
+        let bytes = parse_long_double_to_f128_bytes("9223372036854775807.0L");
+        let val = u128::from_le_bytes(bytes);
+        let exp = (val >> 112) & 0x7FFF;
+        let mantissa = val & ((1u128 << 112) - 1);
+
+        // Expected: exp = 0x403D (biased 62)
+        assert_eq!(exp, 0x403D, "exponent for 2^63-1 should be 0x403D");
+        // Mantissa should have high bits set (not all zeros)
+        assert_ne!(mantissa, 0, "mantissa for 2^63-1 should not be zero");
+    }
+
+    #[test]
+    fn test_f128_parse_pi() {
+        let bytes = parse_long_double_to_f128_bytes("3.14159265358979323846264338327950288L");
+        let val = u128::from_le_bytes(bytes);
+        let exp = (val >> 112) & 0x7FFF;
+
+        // pi: exp = 1 + 16383 = 16384 = 0x4000
+        assert_eq!(exp, 0x4000, "exponent for pi should be 0x4000");
+    }
+
+    #[test]
+    fn test_f128_parse_one() {
+        let bytes = parse_long_double_to_f128_bytes("1.0L");
+        let val = u128::from_le_bytes(bytes);
+        let exp = (val >> 112) & 0x7FFF;
+        let mantissa = val & ((1u128 << 112) - 1);
+
+        assert_eq!(exp, 0x3FFF, "exponent for 1.0 should be 0x3FFF");
+        assert_eq!(mantissa, 0, "mantissa for 1.0 should be zero");
+    }
+
+    #[test]
+    fn test_f128_roundtrip_x87() {
+        // Parse to f128, convert to x87, and back
+        let f128 = parse_long_double_to_f128_bytes("1.0L");
+        let x87 = f128_bytes_to_x87_bytes(&f128);
+        let f128_back = x87_bytes_to_f128_bytes(&x87);
+        assert_eq!(f128, f128_back, "roundtrip should preserve value");
     }
 }

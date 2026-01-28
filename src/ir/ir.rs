@@ -521,11 +521,9 @@ pub enum IrConst {
     F64(f64),
     /// Long double constant with full precision.
     /// - `f64`: approximate value for computations (lossy, 52-bit mantissa).
-    ///   On ARM64/RISC-V, this f64 approximation is also used for data section emission
-    ///   and runtime codegen since those backends carry f128 values as f64 internally.
-    /// - `[u8; 16]`: raw x87 80-bit extended precision bytes (first 10 bytes used, 6 padding).
-    ///   Used by x86 for full-precision `fstpt`/`fldt` data section emission and by
-    ///   ARM64/RISC-V backends for function call argument expansion via `f64_to_f128_bytes`.
+    /// - `[u8; 16]`: IEEE 754 binary128 (f128) bytes with full 112-bit mantissa precision.
+    ///   For ARM64/RISC-V, these bytes are used directly for data emission.
+    ///   For x86, they are converted to x87 80-bit format at emission time.
     LongDouble(f64, [u8; 16]),
     Zero,
 }
@@ -669,45 +667,45 @@ impl IrConst {
     /// Create a LongDouble constant from an f64 value (low precision - bytes derived from f64).
     /// Use this when no full-precision source text is available.
     pub fn long_double(v: f64) -> IrConst {
-        IrConst::LongDouble(v, crate::common::long_double::f64_to_x87_bytes_simple(v))
+        IrConst::LongDouble(v, crate::common::long_double::f64_to_f128_bytes_lossless(v))
     }
 
-    /// Create a LongDouble constant with full-precision x87 bytes.
+    /// Create a LongDouble constant with full-precision f128 bytes.
     pub fn long_double_with_bytes(v: f64, bytes: [u8; 16]) -> IrConst {
         IrConst::LongDouble(v, bytes)
     }
 
     /// Create a LongDouble constant from a signed i64 with full precision.
-    /// Uses direct integer-to-x87 conversion to preserve all 64 bits of precision.
+    /// Uses direct integer-to-f128 conversion to preserve all 64 bits of precision.
     pub fn long_double_from_i64(val: i64) -> IrConst {
-        let bytes = crate::common::long_double::i64_to_x87_bytes(val);
+        let bytes = crate::common::long_double::i64_to_f128_bytes(val);
         IrConst::LongDouble(val as f64, bytes)
     }
 
     /// Create a LongDouble constant from an unsigned u64 with full precision.
-    /// Uses direct integer-to-x87 conversion to preserve all 64 bits of precision.
+    /// Uses direct integer-to-f128 conversion to preserve all 64 bits of precision.
     pub fn long_double_from_u64(val: u64) -> IrConst {
-        let bytes = crate::common::long_double::u64_to_x87_bytes(val);
+        let bytes = crate::common::long_double::u64_to_f128_bytes(val);
         IrConst::LongDouble(val as f64, bytes)
     }
 
     /// Create a LongDouble constant from an unsigned u128 with maximum precision.
-    /// Uses direct integer-to-x87 conversion. Values up to 2^64-1 are exact;
-    /// larger values are rounded to nearest-even (x87 has 64-bit mantissa).
+    /// Uses direct integer-to-f128 conversion. Values up to 2^112 are exact;
+    /// larger values are rounded (f128 has 112-bit mantissa).
     pub fn long_double_from_u128(val: u128) -> IrConst {
-        let bytes = crate::common::long_double::u128_to_x87_bytes(val);
+        let bytes = crate::common::long_double::u128_to_f128_bytes(val);
         IrConst::LongDouble(val as f64, bytes)
     }
 
     /// Create a LongDouble constant from a signed i128 with maximum precision.
-    /// Uses direct integer-to-x87 conversion. Values with magnitude up to 2^63
-    /// are exact; larger values are rounded to nearest-even.
+    /// Uses direct integer-to-f128 conversion. Values with magnitude up to 2^112
+    /// are exact; larger values are rounded.
     pub fn long_double_from_i128(val: i128) -> IrConst {
-        let bytes = crate::common::long_double::i128_to_x87_bytes(val);
+        let bytes = crate::common::long_double::i128_to_f128_bytes(val);
         IrConst::LongDouble(val as f64, bytes)
     }
 
-    /// Get the raw x87 bytes from a LongDouble constant.
+    /// Get the raw f128 bytes from a LongDouble constant.
     pub fn long_double_bytes(&self) -> Option<&[u8; 16]> {
         match self {
             IrConst::LongDouble(_, bytes) => Some(bytes),
@@ -716,12 +714,14 @@ impl IrConst {
     }
 
     /// Get the x87 80-bit byte representation for any float constant.
-    /// For LongDouble, returns the stored full-precision bytes.
+    /// For LongDouble, converts stored f128 bytes to x87 format (lossy: 112→64 bit mantissa).
     /// For F64/F32, converts to x87 format (widening, zero-fills lower mantissa bits).
     /// For integer types, converts to f64 first then to x87 bytes.
     pub fn x87_bytes(&self) -> [u8; 16] {
         match self {
-            IrConst::LongDouble(_, bytes) => *bytes,
+            IrConst::LongDouble(_, f128_bytes) => {
+                crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes)
+            }
             _ => {
                 if let Some(v) = self.to_f64() {
                     crate::common::long_double::f64_to_x87_bytes_simple(v)
@@ -794,26 +794,25 @@ impl IrConst {
         })
     }
 
-    /// Cast a long double (with raw x87 bytes) to the target IR type.
-    /// Uses full 80-bit precision for integer conversions, unlike cast_float_to_target
-    /// which only uses the f64 approximation (52-bit mantissa).
+    /// Cast a long double (with f128 bytes) to the target IR type.
+    /// Uses full precision for integer conversions.
     pub fn cast_long_double_to_target(fv: f64, bytes: &[u8; 16], target: IrType) -> Option<IrConst> {
-        use crate::common::long_double::{x87_bytes_to_i64, x87_bytes_to_u64, x87_bytes_to_i128, x87_bytes_to_u128};
+        use crate::common::long_double::{f128_bytes_to_i64, f128_bytes_to_u64, f128_bytes_to_i128, f128_bytes_to_u128};
         Some(match target {
             IrType::F64 => IrConst::F64(fv),
             IrType::F128 => IrConst::long_double_with_bytes(fv, *bytes),
             IrType::F32 => IrConst::F32(fv as f32),
-            // For integer targets, use full x87 precision
-            IrType::I8 => IrConst::I8(x87_bytes_to_i64(bytes)? as i8),
-            IrType::U8 => IrConst::I8(x87_bytes_to_u64(bytes)? as u8 as i8),
-            IrType::I16 => IrConst::I16(x87_bytes_to_i64(bytes)? as i16),
-            IrType::U16 => IrConst::I16(x87_bytes_to_u64(bytes)? as u16 as i16),
-            IrType::I32 => IrConst::I32(x87_bytes_to_i64(bytes)? as i32),
-            IrType::U32 => IrConst::I64(x87_bytes_to_u64(bytes)? as u32 as i64),
-            IrType::I64 | IrType::Ptr => IrConst::I64(x87_bytes_to_i64(bytes)?),
-            IrType::U64 => IrConst::I64(x87_bytes_to_u64(bytes)? as i64),
-            IrType::I128 => IrConst::I128(x87_bytes_to_i128(bytes)?),
-            IrType::U128 => IrConst::I128(x87_bytes_to_u128(bytes)? as i128),
+            // For integer targets, use full precision via f128 bytes
+            IrType::I8 => IrConst::I8(f128_bytes_to_i64(bytes)? as i8),
+            IrType::U8 => IrConst::I8(f128_bytes_to_u64(bytes)? as u8 as i8),
+            IrType::I16 => IrConst::I16(f128_bytes_to_i64(bytes)? as i16),
+            IrType::U16 => IrConst::I16(f128_bytes_to_u64(bytes)? as u16 as i16),
+            IrType::I32 => IrConst::I32(f128_bytes_to_i64(bytes)? as i32),
+            IrType::U32 => IrConst::I64(f128_bytes_to_u64(bytes)? as u32 as i64),
+            IrType::I64 | IrType::Ptr => IrConst::I64(f128_bytes_to_i64(bytes)?),
+            IrType::U64 => IrConst::I64(f128_bytes_to_u64(bytes)? as i64),
+            IrType::I128 => IrConst::I128(f128_bytes_to_i128(bytes)?),
+            IrType::U128 => IrConst::I128(f128_bytes_to_u128(bytes)? as i128),
             _ => return None,
         })
     }
@@ -882,12 +881,10 @@ impl IrConst {
             IrConst::F64(v) => {
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
             }
-            IrConst::LongDouble(f64_val, _) => {
-                // ARM64: store f64 approximation in the low 8 bytes of the 16-byte slot.
-                // The ARM64 codegen carries f128 values as f64 internally, converting
-                // to/from full f128 only at ABI boundaries via __extenddftf2/__trunctfdf2.
-                out.extend_from_slice(&f64_val.to_bits().to_le_bytes());
-                out.extend_from_slice(&[0u8; 8]);
+            IrConst::LongDouble(_, f128_bytes) => {
+                // Default: emit full f128 bytes. For architecture-specific emission,
+                // use push_le_bytes_x86 (x87 format) or push_le_bytes_riscv (f128 format).
+                out.extend_from_slice(f128_bytes);
             }
             IrConst::I128(v) => {
                 let le_bytes = v.to_le_bytes();
@@ -911,24 +908,24 @@ impl IrConst {
     /// type-puns long doubles through unions or integer arrays (e.g., TCC's CValue).
     pub fn push_le_bytes_x86(&self, out: &mut Vec<u8>, size: usize) {
         match self {
-            IrConst::LongDouble(_, bytes) => {
-                // x86-64: emit stored x87 80-bit bytes (10 bytes) + 6 zero padding bytes.
-                out.extend_from_slice(&bytes[..10]);
+            IrConst::LongDouble(_, f128_bytes) => {
+                // x86-64: convert f128 bytes to x87 80-bit format, emit 10 bytes + 6 padding.
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
+                out.extend_from_slice(&x87[..10]);
                 out.extend_from_slice(&[0u8; 6]); // pad to 16 bytes
             }
             _ => self.push_le_bytes(out, size),
         }
     }
 
-    /// Convert to bytes for RISC-V targets, using IEEE 754 binary128 format for
-    /// long doubles. The RISC-V backend stores full 16-byte f128 in allocas/memory,
-    /// so global data must also be proper binary128.
+    /// Convert to bytes for RISC-V/ARM64 targets, using IEEE 754 binary128 format for
+    /// long doubles. The f128 bytes are stored directly since they are already in
+    /// IEEE binary128 format.
     pub fn push_le_bytes_riscv(&self, out: &mut Vec<u8>, size: usize) {
         match self {
-            IrConst::LongDouble(_, bytes) => {
-                // RISC-V: convert x87 80-bit bytes to IEEE 754 binary128 format.
-                let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(bytes);
-                out.extend_from_slice(&f128_bytes);
+            IrConst::LongDouble(_, f128_bytes) => {
+                // ARM64/RISC-V: f128 bytes are already in IEEE binary128 format.
+                out.extend_from_slice(f128_bytes);
             }
             _ => self.push_le_bytes(out, size),
         }

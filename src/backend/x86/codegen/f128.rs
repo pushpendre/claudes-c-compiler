@@ -578,10 +578,11 @@ impl X86Codegen {
         match operand {
             Operand::Const(ref c) => {
                 match c {
-                    IrConst::LongDouble(_, raw) => {
-                        // Full-precision x87 bytes available; push to stack and fldt
-                        let lo = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-                        let hi = u16::from_le_bytes(raw[8..10].try_into().unwrap());
+                    IrConst::LongDouble(_, f128_raw) => {
+                        // Convert f128 bytes to x87, push to stack and fldt
+                        let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_raw);
+                        let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                        let hi = u16::from_le_bytes(x87[8..10].try_into().unwrap());
                         self.state.emit("    subq $16, %rsp");
                         self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                         self.state.emit("    movq %rax, (%rsp)");

@@ -969,19 +969,16 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
         IrConst::F64(v) => {
             out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), v.to_bits()));
         }
-        IrConst::LongDouble(f64_val, bytes) => {
+        IrConst::LongDouble(f64_val, f128_bytes) => {
             if ptr_dir.is_x86() {
-                // x86-64: emit stored x87 80-bit extended precision bytes (full precision).
-                // The raw bytes are in bytes[0..10], with bytes[10..16] = 0 padding.
-                let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                let hi = u64::from_le_bytes([bytes[8], bytes[9], 0, 0, 0, 0, 0, 0]);
+                // x86-64: convert f128 bytes to x87 80-bit extended precision for emission.
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
+                let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                let hi = u64::from_le_bytes([x87[8], x87[9], 0, 0, 0, 0, 0, 0]);
                 out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), lo as i64));
                 out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), hi as i64));
             } else if ptr_dir.is_riscv() || ptr_dir.is_arm() {
-                // RISC-V and ARM64: convert x87 80-bit bytes to IEEE 754 binary128 format.
-                // Both backends store full 16-byte f128 in allocas/memory,
-                // so global data must also be proper binary128.
-                let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(bytes);
+                // RISC-V and ARM64: f128 bytes are already in IEEE 754 binary128 format.
                 let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
                 let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
                 out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), lo as i64));

@@ -1,0 +1,13 @@
+Fix inline __attribute__((vector_size(N))) variable declarations
+================================================================
+Status: in_progress
+Started: 2026-01-28
+
+Problem:
+When vector_size attribute is used inline on variable declarations (not typedefs),
+the vector_size is not applied to the CType. Only the typedef path wraps the
+base type in CType::Vector.
+
+Fix:
+After analyze_declaration() in both global_decl.rs and stmt.rs (non-typedef paths),
+check decl.vector_size and wrap the c_type in CType::Vector.

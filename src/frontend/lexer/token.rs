@@ -10,13 +10,14 @@ pub enum TokenKind {
     ULongLiteral(u64),     // ul/UL suffix (unsigned long/long long)
     FloatLiteral(f64),             // no suffix (double)
     FloatLiteralF32(f64),          // f/F suffix (float, 32-bit)
-    /// Long double literal (l/L suffix). Stores (f64_approx, x87_bytes).
+    /// Long double literal (l/L suffix). Stores (f64_approx, f128_bytes).
+    /// f128_bytes is IEEE 754 binary128 format with full 112-bit mantissa precision.
     FloatLiteralLongDouble(f64, [u8; 16]),
     /// Imaginary double literal (e.g. 1.0i) - GCC extension
     ImaginaryLiteral(f64),
     /// Imaginary float literal (e.g. 1.0fi or 1.0if) - GCC extension
     ImaginaryLiteralF32(f64),
-    /// Imaginary long double literal (e.g. 1.0Li or 1.0il) - GCC extension. Stores (f64_approx, x87_bytes).
+    /// Imaginary long double literal (e.g. 1.0Li or 1.0il) - GCC extension. Stores (f64_approx, f128_bytes).
     ImaginaryLiteralLongDouble(f64, [u8; 16]),
     StringLiteral(String),
     /// Wide string literal (L"..."), stores content as Rust chars (each becomes wchar_t = i32)

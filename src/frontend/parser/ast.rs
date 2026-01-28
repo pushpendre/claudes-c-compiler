@@ -385,13 +385,14 @@ pub enum Expr {
     ULongLiteral(u64, Span),
     FloatLiteral(f64, Span),            // double literal (no suffix)
     FloatLiteralF32(f64, Span),         // float literal (f/F suffix)
-    /// Long double literal (l/L suffix). Stores (f64_approx, x87_bytes, span).
+    /// Long double literal (l/L suffix). Stores (f64_approx, f128_bytes, span).
+    /// f128_bytes is IEEE 754 binary128 with full 112-bit mantissa precision.
     FloatLiteralLongDouble(f64, [u8; 16], Span),
     /// Imaginary literal: value * I (double imaginary, e.g. 1.0i)
     ImaginaryLiteral(f64, Span),
     /// Float imaginary literal (e.g. 1.0fi)
     ImaginaryLiteralF32(f64, Span),
-    /// Long double imaginary literal (e.g. 1.0Li). Stores (f64_approx, x87_bytes, span).
+    /// Long double imaginary literal (e.g. 1.0Li). Stores (f64_approx, f128_bytes, span).
     ImaginaryLiteralLongDouble(f64, [u8; 16], Span),
     StringLiteral(String, Span),
     /// Wide string literal (L"...") - each char is a wchar_t (32-bit int)

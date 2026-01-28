@@ -1799,10 +1799,11 @@ impl ArchCodegen for X86Codegen {
     /// Non-F128 types delegate to the shared default implementation.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
         if ty == IrType::F128 {
-            // LongDouble constant: store raw x87 bytes directly.
-            if let Operand::Const(IrConst::LongDouble(_, bytes)) = val {
-                let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                let hi_bytes: [u8; 8] = [bytes[8], bytes[9], 0, 0, 0, 0, 0, 0];
+            // LongDouble constant: convert f128 bytes to x87, then store.
+            if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = val {
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
+                let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                let hi_bytes: [u8; 8] = [x87[8], x87[9], 0, 0, 0, 0, 0, 0];
                 let hi = u64::from_le_bytes(hi_bytes);
                 if let Some(addr) = self.state.resolve_slot_addr(ptr.0) {
                     self.emit_f128_store_raw_bytes(&addr, ptr.0, 0, lo, hi);
@@ -1971,10 +1972,11 @@ impl ArchCodegen for X86Codegen {
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
         use crate::backend::state::SlotAddr;
         if ty == IrType::F128 {
-            // LongDouble constant: store raw x87 bytes directly.
-            if let Operand::Const(IrConst::LongDouble(_, bytes)) = val {
-                let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                let hi_bytes: [u8; 8] = [bytes[8], bytes[9], 0, 0, 0, 0, 0, 0];
+            // LongDouble constant: convert f128 bytes to x87, then store.
+            if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = val {
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
+                let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                let hi_bytes: [u8; 8] = [x87[8], x87[9], 0, 0, 0, 0, 0, 0];
                 let hi = u64::from_le_bytes(hi_bytes);
                 if let Some(addr) = self.state.resolve_slot_addr(base.0) {
                     self.emit_f128_store_raw_bytes(&addr, base.0, offset, lo, hi);
@@ -2929,10 +2931,11 @@ impl ArchCodegen for X86Codegen {
                     match &args[si] {
                         Operand::Const(ref c) => {
                             let x87_bytes: [u8; 10] = match c {
-                                IrConst::LongDouble(_, raw) => {
-                                    // Use the stored full-precision x87 bytes
+                                IrConst::LongDouble(_, f128_bytes) => {
+                                    // Convert f128 bytes to x87 format for x86 emission
+                                    let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
                                     let mut b = [0u8; 10];
-                                    b.copy_from_slice(&raw[..10]);
+                                    b.copy_from_slice(&x87[..10]);
                                     b
                                 }
                                 _ => {
@@ -3387,11 +3390,12 @@ impl ArchCodegen for X86Codegen {
                 }
             }
             // Also handle constant LongDouble operands with raw bytes
-            if let Operand::Const(IrConst::LongDouble(_, bytes)) = src {
-                // Store x87 bytes to stack, fldt, then fisttp
+            if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = src {
+                // Convert f128 to x87, store to stack, fldt, then fisttp
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
                 self.state.emit("    subq $16, %rsp");
-                let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                let hi = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+                let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                let hi = u16::from_le_bytes(x87[8..10].try_into().unwrap());
                 self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                 self.state.emit("    movq %rax, (%rsp)");
                 self.state.out.emit_instr_imm_reg("    movq", hi as i64, "rax");
@@ -3646,11 +3650,12 @@ impl ArchCodegen for X86Codegen {
                     }
                 }
                 // Also handle constant LongDouble returns
-                if let Operand::Const(IrConst::LongDouble(_, bytes)) = val {
-                    // Store x87 bytes to stack and fldt
+                if let Operand::Const(IrConst::LongDouble(_, f128_bytes)) = val {
+                    // Convert f128 to x87, store to stack and fldt
+                    let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(f128_bytes);
                     self.state.emit("    subq $16, %rsp");
-                    let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                    let hi = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+                    let lo = u64::from_le_bytes(x87[0..8].try_into().unwrap());
+                    let hi = u16::from_le_bytes(x87[8..10].try_into().unwrap());
                     self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
                     self.state.emit("    movq %rax, (%rsp)");
                     self.state.out.emit_instr_imm_reg("    movq", hi as i64, "rax");

@@ -152,36 +152,37 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
     let use_long_double = matches!(lhs, IrConst::LongDouble(..)) || matches!(rhs, IrConst::LongDouble(..));
     let use_f32 = matches!(lhs, IrConst::F32(_)) && matches!(rhs, IrConst::F32(_));
 
-    // For long double arithmetic, use full x87 precision on the raw bytes
+    // For long double arithmetic, use x87 precision on the raw bytes.
+    // Constants are stored as f128, converted to x87 for arithmetic, then back to f128.
     if use_long_double {
         let la = lhs.x87_bytes();
         let ra = rhs.x87_bytes();
 
         match op {
             BinOp::Add => {
-                let result_bytes = long_double::x87_add(&la, &ra);
-                let approx = long_double::x87_to_f64(&result_bytes);
-                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+                let result_x87 = long_double::x87_add(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_x87);
+                Some(IrConst::long_double_with_bytes(approx, long_double::x87_bytes_to_f128_bytes(&result_x87)))
             }
             BinOp::Sub => {
-                let result_bytes = long_double::x87_sub(&la, &ra);
-                let approx = long_double::x87_to_f64(&result_bytes);
-                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+                let result_x87 = long_double::x87_sub(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_x87);
+                Some(IrConst::long_double_with_bytes(approx, long_double::x87_bytes_to_f128_bytes(&result_x87)))
             }
             BinOp::Mul => {
-                let result_bytes = long_double::x87_mul(&la, &ra);
-                let approx = long_double::x87_to_f64(&result_bytes);
-                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+                let result_x87 = long_double::x87_mul(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_x87);
+                Some(IrConst::long_double_with_bytes(approx, long_double::x87_bytes_to_f128_bytes(&result_x87)))
             }
             BinOp::Div => {
-                let result_bytes = long_double::x87_div(&la, &ra);
-                let approx = long_double::x87_to_f64(&result_bytes);
-                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+                let result_x87 = long_double::x87_div(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_x87);
+                Some(IrConst::long_double_with_bytes(approx, long_double::x87_bytes_to_f128_bytes(&result_x87)))
             }
             BinOp::Mod => {
-                let result_bytes = long_double::x87_rem(&la, &ra);
-                let approx = long_double::x87_to_f64(&result_bytes);
-                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+                let result_x87 = long_double::x87_rem(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_x87);
+                Some(IrConst::long_double_with_bytes(approx, long_double::x87_bytes_to_f128_bytes(&result_x87)))
             }
             // Comparisons use x87 compare for full precision
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
@@ -364,11 +365,12 @@ pub fn negate_const(val: IrConst) -> Option<IrConst> {
         IrConst::I16(v) => Some(IrConst::I32((v as i32).wrapping_neg())),
         IrConst::F64(v) => Some(IrConst::F64(-v)),
         IrConst::F32(v) => Some(IrConst::F32(-v)),
-        IrConst::LongDouble(v, bytes) => {
-            // Negate by flipping the sign bit in the x87 bytes directly,
-            // preserving full 80-bit precision
-            let neg_bytes = crate::common::long_double::x87_neg(&bytes);
-            Some(IrConst::long_double_with_bytes(-v, neg_bytes))
+        IrConst::LongDouble(v, f128_bytes) => {
+            // Negate by flipping the sign bit in the f128 bytes directly,
+            // preserving full 112-bit precision
+            let val = u128::from_le_bytes(f128_bytes);
+            let neg_val = val ^ (1u128 << 127);
+            Some(IrConst::long_double_with_bytes(-v, neg_val.to_le_bytes()))
         }
         _ => None,
     }

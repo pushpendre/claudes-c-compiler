@@ -472,25 +472,25 @@ impl<'a> SemaConstEval<'a> {
         false
     }
 
-    /// Cast a long double value (with raw x87 bytes) to a target CType.
-    /// Uses full 80-bit precision for integer conversions.
+    /// Cast a long double value (with f128 bytes) to a target CType.
+    /// Uses full precision for integer conversions.
     fn cast_long_double_to_ctype(&self, fv: f64, bytes: &[u8; 16], target: &CType) -> Option<IrConst> {
-        use crate::common::long_double::{x87_bytes_to_i64, x87_bytes_to_u64, x87_bytes_to_i128, x87_bytes_to_u128};
+        use crate::common::long_double::{f128_bytes_to_i64, f128_bytes_to_u64, f128_bytes_to_i128, f128_bytes_to_u128};
         Some(match target {
             CType::Float => IrConst::F32(fv as f32),
             CType::Double => IrConst::F64(fv),
             CType::LongDouble => IrConst::long_double_with_bytes(fv, *bytes),
-            CType::Char => IrConst::I8(x87_bytes_to_i64(bytes)? as i8),
-            CType::UChar => IrConst::I32(x87_bytes_to_u64(bytes)? as u8 as i32),
-            CType::Short => IrConst::I16(x87_bytes_to_i64(bytes)? as i16),
-            CType::UShort => IrConst::I32(x87_bytes_to_u64(bytes)? as u16 as i32),
-            CType::Int => IrConst::I32(x87_bytes_to_i64(bytes)? as i32),
-            CType::UInt => IrConst::I32(x87_bytes_to_u64(bytes)? as u32 as i32),
-            CType::Long | CType::LongLong => IrConst::I64(x87_bytes_to_i64(bytes)?),
-            CType::ULong | CType::ULongLong => IrConst::I64(x87_bytes_to_u64(bytes)? as i64),
+            CType::Char => IrConst::I8(f128_bytes_to_i64(bytes)? as i8),
+            CType::UChar => IrConst::I32(f128_bytes_to_u64(bytes)? as u8 as i32),
+            CType::Short => IrConst::I16(f128_bytes_to_i64(bytes)? as i16),
+            CType::UShort => IrConst::I32(f128_bytes_to_u64(bytes)? as u16 as i32),
+            CType::Int => IrConst::I32(f128_bytes_to_i64(bytes)? as i32),
+            CType::UInt => IrConst::I32(f128_bytes_to_u64(bytes)? as u32 as i32),
+            CType::Long | CType::LongLong => IrConst::I64(f128_bytes_to_i64(bytes)?),
+            CType::ULong | CType::ULongLong => IrConst::I64(f128_bytes_to_u64(bytes)? as i64),
             CType::Bool => IrConst::I8(if fv != 0.0 { 1 } else { 0 }),
-            CType::Int128 => IrConst::I128(x87_bytes_to_i128(bytes)?),
-            CType::UInt128 => IrConst::I128(x87_bytes_to_u128(bytes)? as i128),
+            CType::Int128 => IrConst::I128(f128_bytes_to_i128(bytes)?),
+            CType::UInt128 => IrConst::I128(f128_bytes_to_u128(bytes)? as i128),
             _ => return None,
         })
     }
