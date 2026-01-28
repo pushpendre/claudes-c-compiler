@@ -1,0 +1,19 @@
+Task: Fix missing %n inline asm modifier for x86
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+The x86 inline asm template substitution does not recognize the %n modifier,
+which negates an immediate constant value. When encountering %n[name] or %nN,
+the template emitter outputs the literal text "%n[name]" instead of the
+negated value (e.g., -50 for an input of 50).
+
+The %n modifier is part of the GCC inline asm specification and is used in
+the Linux kernel and other real-world code.
+
+Fix locations:
+- src/backend/x86/codegen/inline_asm.rs: Add 'n' to modifier recognition
+  and handle it in emit_operand_with_modifier to negate the immediate value.
+
+Affected tests:
+- asm-percent-a-modifier-x86 (compile error: assembler rejects %n[val] literal)
