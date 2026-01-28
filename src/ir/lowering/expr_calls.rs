@@ -474,16 +474,20 @@ impl Lowerer {
             // Use pre-registered struct sizes from function metadata.
             // For variadic _Complex long double args beyond fixed params, infer size
             // (param_struct_sizes only covers declared parameters).
+            // Also override None entries for vector types, since the first-pass
+            // registration may not have resolved vector typedefs yet.
             let decomposes_cld = self.decomposes_complex_long_double();
             args.iter().enumerate().map(|(i, a)| {
-                if i < sizes.len() {
-                    sizes[i]
-                } else if !decomposes_cld && matches!(self.get_expr_ctype(a), Some(CType::ComplexLongDouble)) {
-                    Some(32)
-                } else {
-                    // TODO: also infer struct_arg_sizes for variadic Struct/Union args
-                    // (currently they pass as pointers which works but is ABI-incorrect)
-                    None
+                let registered = if i < sizes.len() { sizes[i] } else { None };
+                if registered.is_some() {
+                    return registered;
+                }
+                // Fall back to expression-based inference for unregistered types
+                let ctype = self.get_expr_ctype(a);
+                match ctype {
+                    Some(CType::Vector(_, total_size)) => Some(total_size),
+                    Some(CType::ComplexLongDouble) if !decomposes_cld => Some(32),
+                    _ => None,
                 }
             }).collect()
         } else {
@@ -494,6 +498,9 @@ impl Lowerer {
                 match ctype {
                     Some(CType::Struct(_)) | Some(CType::Union(_)) => {
                         self.struct_value_size(a)
+                    }
+                    Some(CType::Vector(_, total_size)) => {
+                        Some(total_size) // Vector types are passed by value like structs
                     }
                     Some(CType::ComplexLongDouble) if !decomposes_cld => {
                         Some(32) // 2 x 16-byte long double components

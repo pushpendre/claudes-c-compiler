@@ -1,6 +1,6 @@
 Fix vector-to-scalar and scalar-to-vector cast codegen
 =======================================================
-Status: in_progress
+Status: completed
 
 Problem:
 Casting from a vector type (e.g., `(long long)(V2SI){2,2}`) returns the
@@ -12,7 +12,16 @@ regular pointer-to-integer cast.
 Similarly, casting from scalar to vector (e.g., `(V2SI)(long long)val`) needs
 to store the scalar value into the vector's alloca.
 
-Affected tests (x86): gcc_torture_20050316_1, 20050316_2, 20050316_3, and others
-Affected tests (all arches): vector type related tests
+Additionally, vector parameters were being passed incorrectly: the caller
+emitted `leaq` (address of alloca) instead of loading the data, because
+vectors were not classified as struct-like aggregates for call ABI purposes.
 
-Fix location: src/ir/lowering/expr_access.rs, lower_cast() function
+Fix locations:
+- src/ir/lowering/expr_access.rs: vector cast handling in lower_cast()
+- src/ir/lowering/func_lowering.rs: classify vector params as struct-like
+- src/ir/lowering/expr_calls.rs: vector call arg size classification
+- src/ir/lowering/lowering.rs: vector param_struct_sizes registration
+- src/ir/lowering/stmt_init.rs: vector param_struct_sizes registration
+
+Verification: All x86/ARM/RISC-V test suites pass with no regressions.
+Kernel builds and boots successfully.

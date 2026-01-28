@@ -89,6 +89,55 @@ impl Lowerer {
             return src;
         }
 
+        // Vector-to-scalar cast: load the vector data as the target scalar type.
+        // Vectors are stored in stack allocas and lower_expr returns a pointer.
+        // A cast like `(long long)(V2SI){2,2}` must load the 8 bytes of vector
+        // data as an integer, not return the alloca pointer itself.
+        if inner_ctype.is_vector() && !target_ctype.is_vector() {
+            let src = self.lower_expr(inner);
+            let ptr = self.operand_to_value(src);
+            let to_ty = self.type_spec_to_ir(target_type);
+            let dest = self.fresh_value();
+            self.emit(Instruction::Load { dest, ptr, ty: to_ty, seg_override: AddressSpace::Default });
+            return Operand::Value(dest);
+        }
+
+        // Scalar-to-vector cast: store the scalar value into a vector-sized alloca.
+        // A cast like `(V2SI)(long long)val` stores the 8-byte integer into an
+        // alloca so the result is a pointer to vector data (matching vector repr).
+        if !inner_ctype.is_vector() && target_ctype.is_vector() {
+            let vec_size = self.ctype_size(&target_ctype);
+            let src = self.lower_expr(inner);
+            let from_ty = self.get_expr_type(inner);
+
+            let alloca = self.fresh_value();
+            self.emit(Instruction::Alloca { dest: alloca, size: vec_size, ty: IrType::Ptr, align: vec_size, volatile: false });
+            // Zero-initialize in case source is smaller than vector
+            self.zero_init_alloca(alloca, vec_size);
+            // Store scalar at offset 0 (bitwise reinterpretation)
+            self.emit(Instruction::Store { val: src, ptr: alloca, ty: from_ty, seg_override: AddressSpace::Default });
+            return Operand::Value(alloca);
+        }
+
+        // Vector-to-vector cast: memcpy between allocas if sizes match.
+        if inner_ctype.is_vector() && target_ctype.is_vector() {
+            let src = self.lower_expr(inner);
+            let src_size = self.ctype_size(&inner_ctype);
+            let dst_size = self.ctype_size(&target_ctype);
+            if src_size == dst_size {
+                // Same size: reinterpret cast, just pass through the pointer
+                return src;
+            }
+            // Different sizes: allocate new vector, memcpy what fits
+            let src_val = self.operand_to_value(src);
+            let alloca = self.fresh_value();
+            self.emit(Instruction::Alloca { dest: alloca, size: dst_size, ty: IrType::Ptr, align: dst_size, volatile: false });
+            self.zero_init_alloca(alloca, dst_size);
+            let copy_size = src_size.min(dst_size);
+            self.emit(Instruction::Memcpy { dest: alloca, src: src_val, size: copy_size });
+            return Operand::Value(alloca);
+        }
+
         let src = self.lower_expr(inner);
         let mut from_ty = self.get_expr_type(inner);
         let to_ty = self.type_spec_to_ir(target_type);

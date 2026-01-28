@@ -140,12 +140,15 @@ impl Lowerer {
                 }
             }
 
-            // Struct/union parameter (pass by value), including ComplexLongDouble
+            // Struct/union/vector parameter (pass by value), including ComplexLongDouble
             // on x86-64/RISC-V where it's not decomposed.
             // Transparent unions are passed as their first member (a pointer),
             // not as a by-value aggregate, so struct_size is None for them.
+            // Vector types (e.g. __attribute__((vector_size(N)))) are passed by value
+            // like structs: the data is copied into the callee's stack slot.
             if self.is_type_struct_or_union(&param.type_spec)
                 || matches!(param_ctype, CType::ComplexLongDouble)
+                || param_ctype.is_vector()
             {
                 let ir_idx = params.len();
                 let struct_size = if self.is_transparent_union(&param.type_spec) {

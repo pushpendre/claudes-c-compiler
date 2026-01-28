@@ -188,9 +188,13 @@ impl Lowerer {
         }).collect();
         let decomposes_cld = self.decomposes_complex_long_double();
         let param_struct_sizes: Vec<Option<usize>> = params.iter().map(|p| {
+            let ctype = self.type_spec_to_ctype(&p.type_spec);
             if self.is_type_struct_or_union(&p.type_spec) {
                 Some(self.sizeof_type(&p.type_spec))
-            } else if !decomposes_cld && matches!(self.type_spec_to_ctype(&p.type_spec), CType::ComplexLongDouble) {
+            } else if ctype.is_vector() {
+                // Vector types are passed by value like structs
+                Some(self.sizeof_type(&p.type_spec))
+            } else if !decomposes_cld && matches!(ctype, CType::ComplexLongDouble) {
                 Some(self.sizeof_type(&p.type_spec))
             } else {
                 None
