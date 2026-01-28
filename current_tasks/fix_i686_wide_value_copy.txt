@@ -1,0 +1,27 @@
+Task: Fix i686 wide value (F64/I64) Copy instruction handling
+Status: in_progress
+
+Problem:
+On the i686 backend, Copy instructions for 64-bit values (F64 doubles, I64/U64
+long longs) were incorrectly going through the 32-bit accumulator (eax) path,
+which only copied the low 32 bits. This caused double values to be truncated,
+producing wrong results (0, -nan, or corrupted values) in any code with
+floating-point loop variables, accumulators, or intermediate values.
+
+Fix:
+1. Register allocator (regalloc.rs): Add non-GPR value type propagation through
+   Copy chains. Build a set of values whose types don't fit in a single GPR
+   (floats, i128, i64 on 32-bit), and propagate through Copy sources.
+
+2. CodegenState (state.rs): Add wide_values tracking set for values that are
+   64-bit on 32-bit targets (F64, I64, U64).
+
+3. Stack layout (stack_layout.rs): Populate wide_values during stack allocation.
+
+4. Generation (generation.rs): Propagate wide_values through Copy chains.
+
+5. i686 codegen (codegen.rs): Override emit_copy_value to detect wide values
+   and emit 8-byte copies (two movl instructions) instead of the 32-bit
+   accumulator path.
+
+Impact: ~84 additional tests pass on i686 (75.9% -> 77.4%).
