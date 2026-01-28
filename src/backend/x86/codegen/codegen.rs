@@ -1270,7 +1270,7 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        use crate::backend::traits::build_jump_table;
         let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
@@ -1296,31 +1296,26 @@ impl ArchCodegen for X86Codegen {
         }
         self.state.out.emit_jcc_label("    jae", &default_label);
 
-        // Jump through the table (PIC uses relative offsets; non-PIC uses shared rodata)
-        if self.state.pic_mode {
-            // PIC mode: use relative 32-bit offsets to avoid R_X86_64_64 relocations.
-            self.state.out.emit_instr_sym_base_reg("    leaq", &table_label, "rip", "rcx");
-            self.state.emit("    movslq (%rcx,%rax,4), %rdx");
-            self.state.emit("    addq %rcx, %rdx");
-            self.state.emit("    jmp *%rdx");
+        // Always use relative 32-bit offsets for jump tables on x86-64.
+        // Absolute .quad entries produce R_X86_64_64 relocations in .rodata
+        // which may not be resolved by the Linux kernel linker (the kernel
+        // expects position-independent code in many contexts).
+        // Relative entries (.long target - table_base) are resolved at link time.
+        self.state.out.emit_instr_sym_base_reg("    leaq", &table_label, "rip", "rcx");
+        self.state.emit("    movslq (%rcx,%rax,4), %rdx");
+        self.state.emit("    addq %rcx, %rdx");
+        self.state.emit("    jmp *%rdx");
 
-            // PIC jump table uses relative .long entries (can't use shared rodata helper)
-            self.state.emit(".section .rodata");
-            self.state.emit(".align 4");
-            self.state.out.emit_named_label(&table_label);
-            for target in &table {
-                let target_label = target.as_label();
-                self.state.emit_fmt(format_args!("    .long {} - {}", target_label, table_label));
-            }
-            let sect = self.state.current_text_section.clone();
-            self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-        } else {
-            // Non-PIC: absolute 64-bit addresses via shared rodata helper
-            self.state.out.emit_instr_sym_base_reg("    leaq", &table_label, "rip", "rcx");
-            self.state.emit("    movq (%rcx,%rax,8), %rcx");
-            self.state.emit("    jmp *%rcx");
-            emit_jump_table_rodata(self, &table_label, &table);
+        // Emit jump table with relative .long entries
+        self.state.emit(".section .rodata");
+        self.state.emit(".align 4");
+        self.state.out.emit_named_label(&table_label);
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .long {} - {}", target_label, table_label));
         }
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 
         self.state.reg_cache.invalidate_all();
     }

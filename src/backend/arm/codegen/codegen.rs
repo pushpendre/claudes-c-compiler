@@ -1232,7 +1232,7 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        use crate::backend::traits::build_jump_table;
         let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
@@ -1260,34 +1260,28 @@ impl ArchCodegen for ArmCodegen {
         }
         self.state.emit_fmt(format_args!("    b.hs {}", default_label));
 
-        if self.state.pic_mode {
-            // PIC mode: use relative 32-bit offsets to avoid R_AARCH64_ABS64 relocations.
-            // Each entry is .word (target - table_base), a signed 32-bit offset.
-            // Load table base address (PC-relative), read the 32-bit offset, add, branch.
-            self.state.emit_fmt(format_args!("    adrp x17, {}", table_label));
-            self.state.emit_fmt(format_args!("    add x17, x17, :lo12:{}", table_label));
-            self.state.emit("    ldr w16, [x17, x0, lsl #2]");  // 4-byte relative entries
-            self.state.emit("    add x17, x17, w16, sxtw");      // base + sign-extended offset
-            self.state.emit("    br x17");
+        // Always use relative 32-bit offsets for jump tables on AArch64.
+        // Absolute .xword entries produce R_AARCH64_ABS64 relocations in .rodata
+        // which are not resolved by the Linux kernel linker, leaving jump table
+        // entries as zeros and causing branches to address 0 (boot hang).
+        // Relative entries (.word target - table_base) use R_AARCH64_PREL32 which
+        // are resolved at link time and need no runtime fixup.
+        self.state.emit_fmt(format_args!("    adrp x17, {}", table_label));
+        self.state.emit_fmt(format_args!("    add x17, x17, :lo12:{}", table_label));
+        self.state.emit("    ldr w16, [x17, x0, lsl #2]");  // 4-byte relative entries
+        self.state.emit("    add x17, x17, w16, sxtw");      // base + sign-extended offset
+        self.state.emit("    br x17");
 
-            // Emit PIC jump table with relative .word entries
-            self.state.emit(".section .rodata");
-            self.state.emit(".align 2");
-            self.state.emit_fmt(format_args!("{}:", table_label));
-            for target in &table {
-                let target_label = target.as_label();
-                self.state.emit_fmt(format_args!("    .word {} - {}", target_label, table_label));
-            }
-            let sect = self.state.current_text_section.clone();
-            self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-        } else {
-            // Non-PIC: absolute 64-bit addresses
-            self.state.emit_fmt(format_args!("    adrp x17, {}", table_label));
-            self.state.emit_fmt(format_args!("    add x17, x17, :lo12:{}", table_label));
-            self.state.emit("    ldr x17, [x17, x0, lsl #3]");
-            self.state.emit("    br x17");
-            emit_jump_table_rodata(self, &table_label, &table);
+        // Emit jump table with relative .word entries
+        self.state.emit(".section .rodata");
+        self.state.emit(".align 2");
+        self.state.emit_fmt(format_args!("{}:", table_label));
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .word {} - {}", target_label, table_label));
         }
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
         self.state.reg_cache.invalidate_all();
     }
 

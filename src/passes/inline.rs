@@ -118,22 +118,24 @@ const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 2000;
 /// (~8 bytes each), so we must be more conservative.
 const MAX_CALLER_INSTRUCTIONS_HARD_CAP: usize = 500;
 
-/// Absolute hard cap on caller instruction count for ALL inlining, including
-/// always_inline callees. When a caller exceeds this threshold, even
-/// __attribute__((always_inline)) callees are stopped — only tiny/small callees
-/// (handled by the first pass) continue to be inlined.
+/// Absolute hard cap on caller instruction count for normal inlining.
+/// When a caller exceeds this threshold, normal inlining stops — only
+/// always_inline callees and tiny/small callees continue to be inlined.
 ///
 /// This prevents catastrophic stack frame bloat in functions like the kernel's
-/// shrink_folio_list (mm/vmscan.c), which calls hundreds of small always_inline
+/// shrink_folio_list (mm/vmscan.c), which calls hundreds of small inline
 /// helpers. CCC's accumulator-based codegen creates one stack slot per SSA value,
-/// so inlining 200+ always_inline calls can produce 2000+ multi-block values
+/// so inlining many calls can produce thousands of multi-block values
 /// with wide liveness intervals, creating 16KB+ stack frames that overflow the
 /// kernel's 16KB stack.
 ///
-/// GCC does not need this limit because its register allocator keeps most values
-/// in registers. CCC must cap inlining more aggressively to compensate.
+/// always_inline callees are exempt because not inlining them violates C
+/// semantics and causes section mismatch errors in the kernel (e.g., __init
+/// callers referencing __initconst data through always_inline helpers that
+/// end up as standalone .text functions). GCC always inlines them regardless
+/// of caller size.
 ///
-/// Tiny/small callees (≤ MAX_SMALL_INLINE_INSTRUCTIONS) are exempt because:
+/// Tiny/small callees (≤ MAX_SMALL_INLINE_INSTRUCTIONS) are also exempt because:
 /// 1. They have negligible impact on code/stack size
 /// 2. Not inlining them can cause linker errors (conditional references to
 ///    undefined symbols, inline asm "i" constraints, section mismatches)
@@ -273,15 +275,19 @@ pub fn run(module: &mut IrModule) -> usize {
                             continue;
                         }
                     }
-                    // Absolute cap: when the caller is extremely large, stop ALL
-                    // inlining including always_inline to prevent kernel stack
-                    // overflow. CCC's accumulator codegen creates one stack slot
-                    // per SSA value (~8 bytes), so functions with 1000+ instructions
-                    // produce 8KB+ stack frames that overflow the kernel's 16KB stack.
-                    // Tiny/small callees are still allowed (handled in first pass
-                    // above) — they're critical for linker correctness and have
-                    // negligible stack impact.
-                    if caller_at_absolute_cap {
+                    // Absolute cap: when the caller is extremely large, stop normal
+                    // inlining to prevent kernel stack overflow. CCC's accumulator
+                    // codegen creates one stack slot per SSA value (~8 bytes), so
+                    // functions with 1000+ instructions produce 8KB+ stack frames.
+                    // always_inline callees MUST still be inlined — this is a C
+                    // semantic requirement. Not inlining them causes section mismatch
+                    // errors in the kernel when an __init caller's always_inline
+                    // helper references __initconst data but gets emitted as a
+                    // standalone .text function. GCC always inlines these regardless
+                    // of caller size.
+                    // Tiny/small callees are also still allowed (handled in first
+                    // pass above) — they're critical for linker correctness.
+                    if caller_at_absolute_cap && !callee_data.is_always_inline {
                         continue;
                     }
                     // Hard cap: when the caller is extremely large, stop normal

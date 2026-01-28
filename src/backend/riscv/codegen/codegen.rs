@@ -186,17 +186,43 @@ impl RiscvCodegen {
         self.operand_to_t0(rhs);
         self.state.emit("    mv t2, t0");
 
-        let is_sub64 = ty == IrType::I32 || ty == IrType::U32
-            || ty == IrType::I8 || ty == IrType::U8
-            || ty == IrType::I16 || ty == IrType::U16;
-        if is_sub64 && ty.is_unsigned() {
-            self.state.emit("    slli t1, t1, 32");
-            self.state.emit("    srli t1, t1, 32");
-            self.state.emit("    slli t2, t2, 32");
-            self.state.emit("    srli t2, t2, 32");
-        } else if is_sub64 {
-            self.state.emit("    sext.w t1, t1");
-            self.state.emit("    sext.w t2, t2");
+        // Sign/zero-extend operands to 64 bits based on their actual type width.
+        // The narrow optimization pass can produce I8/I16/U8/U16 typed comparisons,
+        // so we must extend at the correct width, not just 32-bit for all sub-64 types.
+        match ty {
+            IrType::U8 => {
+                self.state.emit("    andi t1, t1, 0xff");
+                self.state.emit("    andi t2, t2, 0xff");
+            }
+            IrType::U16 => {
+                self.state.emit("    slli t1, t1, 48");
+                self.state.emit("    srli t1, t1, 48");
+                self.state.emit("    slli t2, t2, 48");
+                self.state.emit("    srli t2, t2, 48");
+            }
+            IrType::U32 => {
+                self.state.emit("    slli t1, t1, 32");
+                self.state.emit("    srli t1, t1, 32");
+                self.state.emit("    slli t2, t2, 32");
+                self.state.emit("    srli t2, t2, 32");
+            }
+            IrType::I8 => {
+                self.state.emit("    slli t1, t1, 56");
+                self.state.emit("    srai t1, t1, 56");
+                self.state.emit("    slli t2, t2, 56");
+                self.state.emit("    srai t2, t2, 56");
+            }
+            IrType::I16 => {
+                self.state.emit("    slli t1, t1, 48");
+                self.state.emit("    srai t1, t1, 48");
+                self.state.emit("    slli t2, t2, 48");
+                self.state.emit("    srai t2, t2, 48");
+            }
+            IrType::I32 => {
+                self.state.emit("    sext.w t1, t1");
+                self.state.emit("    sext.w t2, t2");
+            }
+            _ => {} // I64/U64/Ptr: no extension needed
         }
     }
 
@@ -652,7 +678,7 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
-        use crate::backend::traits::{build_jump_table, emit_jump_table_rodata};
+        use crate::backend::traits::build_jump_table;
         let (table, min_val, range) = build_jump_table(cases, default);
         let table_label = self.state.fresh_label("jt");
         let default_label = default.as_label();
@@ -679,38 +705,30 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit_fmt(format_args!("    jump {}, t6", default_label));
         self.state.emit_fmt(format_args!("{}:", range_ok));
 
-        if self.state.pic_mode {
-            // PIC mode: use relative 32-bit offsets to avoid R_RISCV_64 relocations.
-            // Each entry is .word (target - table_base), a signed 32-bit offset.
-            // Use `lla` for the local jump table label to avoid GOT indirection.
-            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
-            self.state.emit("    slli t0, t0, 2");  // index * 4 (32-bit entries)
-            self.state.emit("    add t1, t1, t0");
-            self.state.emit("    lw t0, 0(t1)");    // load 32-bit signed offset
-            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
-            self.state.emit("    add t1, t1, t0");   // base + offset
-            self.state.emit("    jr t1");
+        // Always use relative 32-bit offsets for jump tables on RISC-V.
+        // Absolute .dword entries produce R_RISCV_64 relocations in .rodata
+        // which are not resolved by the Linux kernel linker, leaving jump table
+        // entries as zeros and causing branches to address 0 (boot hang).
+        // Relative entries (.word target - table_base) are resolved at link time.
+        // Use `lla` for the local jump table label to avoid GOT indirection.
+        self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
+        self.state.emit("    slli t0, t0, 2");  // index * 4 (32-bit entries)
+        self.state.emit("    add t1, t1, t0");
+        self.state.emit("    lw t0, 0(t1)");    // load 32-bit signed offset
+        self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
+        self.state.emit("    add t1, t1, t0");   // base + offset
+        self.state.emit("    jr t1");
 
-            // Emit PIC jump table with relative .word entries
-            self.state.emit(".section .rodata");
-            self.state.emit(".align 2");
-            self.state.emit_fmt(format_args!("{}:", table_label));
-            for target in &table {
-                let target_label = target.as_label();
-                self.state.emit_fmt(format_args!("    .word {} - {}", target_label, table_label));
-            }
-            let sect = self.state.current_text_section.clone();
-            self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-        } else {
-            // Non-PIC: absolute 64-bit addresses
-            // Use `lla` since the jump table label is always local.
-            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
-            self.state.emit("    slli t0, t0, 3");  // index * 8
-            self.state.emit("    add t1, t1, t0");
-            self.state.emit("    ld t1, 0(t1)");
-            self.state.emit("    jr t1");
-            emit_jump_table_rodata(self, &table_label, &table);
+        // Emit jump table with relative .word entries
+        self.state.emit(".section .rodata");
+        self.state.emit(".align 2");
+        self.state.emit_fmt(format_args!("{}:", table_label));
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .word {} - {}", target_label, table_label));
         }
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
         self.state.reg_cache.invalidate_all();
     }
 

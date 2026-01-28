@@ -1323,7 +1323,9 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             LineKind::SetCC { reg } => {
                 // setCC writes to a byte register. Inline asm can use any
                 // register (e.g., sete %cl writes to rcx family 1), not just %al.
-                invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, reg);
+                if reg != REG_NONE && reg <= REG_GP_MAX {
+                    invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, reg);
+                }
                 prev_was_unconditional_jump = false;
             }
 

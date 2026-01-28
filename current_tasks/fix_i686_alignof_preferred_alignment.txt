@@ -1,0 +1,19 @@
+Fix __alignof__ to return preferred alignment on i686
+=====================================================
+Status: in_progress
+
+Problem:
+GCC distinguishes between __alignof__ (preferred alignment) and _Alignof (minimum ABI alignment):
+- __alignof__(long long) = 8 on i686 (preferred)
+- _Alignof(long long) = 4 on i686 (minimum ABI)
+- __alignof__(double) = 8 on i686 (preferred)
+- _Alignof(double) = 4 on i686 (minimum ABI)
+
+Our compiler currently expands __alignof/__alignof__ as macros to _Alignof,
+so they both return 4. This causes test failures in compiler_suite_0077_0002.
+
+Fix: Make __alignof/__alignof__ a separate token that returns preferred alignment,
+keeping _Alignof as C11 standard minimum alignment.
+
+Note: struct member alignment is still 4 (unchanged). Only the standalone
+__alignof__ query changes.

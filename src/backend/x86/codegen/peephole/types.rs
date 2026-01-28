@@ -228,34 +228,35 @@ pub(super) fn classify_line(raw: &str) -> LineInfo {
     if first == b'm' && sb.len() >= 4 && sb[1] == b'o' && sb[2] == b'v' {
         if let Some((reg_str, offset_str, size)) = parse_store_to_rbp_str(s) {
             let reg = register_family_fast(reg_str);
-            let offset = fast_parse_i32(offset_str);
-            // Store to rbp references both the source reg and rbp(5)
-            let rr = (1u16 << reg) | (1u16 << 5);
-            return line_info_with_regs(LineKind::StoreRbp { reg, offset, size }, ts, rr);
+            // Only classify as StoreRbp for GP registers (0..15).
+            // XMM/MMX stores to stack fall through to generic Other classification
+            // since the store forwarding pass only tracks GP registers.
+            if reg <= REG_GP_MAX {
+                let offset = fast_parse_i32(offset_str);
+                let rr = (1u16 << reg) | (1u16 << 5);
+                return line_info_with_regs(LineKind::StoreRbp { reg, offset, size }, ts, rr);
+            }
         }
         if let Some((offset_str, reg_str, size)) = parse_load_from_rbp_str(s) {
             let reg = register_family_fast(reg_str);
-            let offset = fast_parse_i32(offset_str);
-            // Classify loads that produce results making subsequent extensions redundant:
-            // - movslq offset(%rbp), %rax -> producer for cltq elimination
-            // - movl offset(%rbp), %eax   -> producer for movl %eax,%eax elimination
-            //   (movl already zero-extends to 64 bits)
-            // - movzbl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
-            // - movzwl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
-            let ext = if reg == 0 {
-                match size {
-                    MoveSize::SLQ => ExtKind::ProducerMovslqToRax,
-                    MoveSize::L => ExtKind::ProducerMovlToEax,
-                    _ => ExtKind::None,
-                }
-            } else {
-                ExtKind::None
-            };
-            // Load from rbp references both the dest reg and rbp(5)
-            let rr = (1u16 << reg) | (1u16 << 5);
-            let mut info = line_info_ext(LineKind::LoadRbp { reg, offset, size }, ext, ts);
-            info.reg_refs = rr;
-            return info;
+            // Only classify as LoadRbp for GP registers (0..15).
+            // XMM/MMX loads from stack fall through to generic Other classification.
+            if reg <= REG_GP_MAX {
+                let offset = fast_parse_i32(offset_str);
+                let ext = if reg == 0 {
+                    match size {
+                        MoveSize::SLQ => ExtKind::ProducerMovslqToRax,
+                        MoveSize::L => ExtKind::ProducerMovlToEax,
+                        _ => ExtKind::None,
+                    }
+                } else {
+                    ExtKind::None
+                };
+                let rr = (1u16 << reg) | (1u16 << 5);
+                let mut info = line_info_ext(LineKind::LoadRbp { reg, offset, size }, ext, ts);
+                info.reg_refs = rr;
+                return info;
+            }
         }
         // Check for self-move: movq %reg, %reg (same src and dst)
         if sb[3] == b'q' && sb.len() >= 6 && sb[4] == b' ' {
@@ -339,11 +340,14 @@ pub(super) fn classify_line(raw: &str) -> LineInfo {
     if first == b'p' {
         if s.starts_with("pushq ") {
             let reg = register_family_fast(s[6..].trim());
-            return line_info_with_regs(LineKind::Push { reg }, ts, 1u16 << reg);
+            // Only use reg for bitmask if it's a GP register; otherwise use full scan
+            let rr = if reg <= REG_GP_MAX { 1u16 << reg } else { scan_register_refs(sb) };
+            return line_info_with_regs(LineKind::Push { reg }, ts, rr);
         }
         if s.starts_with("popq ") {
             let reg = register_family_fast(s[5..].trim());
-            return line_info_with_regs(LineKind::Pop { reg }, ts, 1u16 << reg);
+            let rr = if reg <= REG_GP_MAX { 1u16 << reg } else { scan_register_refs(sb) };
+            return line_info_with_regs(LineKind::Pop { reg }, ts, rr);
         }
     }
 

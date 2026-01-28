@@ -1,0 +1,14 @@
+Task: Fix RISC-V emit_cmp_operand_load wrong sign/zero extension for I8/I16/U8/U16 types
+
+Bug: The emit_cmp_operand_load function in the RISC-V backend applies the same
+32-bit extension to all sub-64-bit types. For U8/U16, it uses slli/srli by 32
+(zero-extends from 32 bits) instead of proper 8/16-bit zero-extension. For I8/I16,
+it uses sext.w (sign-extends from 32 bits) instead of proper 8/16-bit sign-extension.
+
+This affects integer comparisons and conditional branches for sub-word types,
+which can be produced by the narrow optimization pass.
+
+Fix: Use per-type sign/zero-extension matching the existing patterns in
+sign_extend_riscv and IntWiden cast code.
+
+Status: in_progress

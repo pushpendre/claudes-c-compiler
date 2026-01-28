@@ -46,7 +46,7 @@ Per-architecture backends:
   - **Control flow**: Compose `jump_mnemonic()`, `emit_branch_nonzero()`, etc.
   - **Call result storage**: `emit_call_store_result` dispatches by return type (i128/F128/F32/F64/int) to 4 primitives (`emit_call_store_i128_result`, `emit_call_store_f128_result`, `emit_call_move_f32_to_acc`, `emit_call_move_f64_to_acc`). x86 overrides for F128 x87 handling.
   - **Value copy**: `emit_copy_value` is register-allocation-aware via `get_phys_reg_for_value()`, `emit_reg_to_reg_move()`, `emit_acc_to_phys_reg()`. Direct reg-to-reg copies avoid accumulator round-trips. x86 overrides for F128 x87 precision.
-  - **Jump tables**: `build_jump_table()` and `emit_jump_table_rodata()` shared free functions extract the table construction and .rodata emission from all 3 backends. x86 PIC mode uses separate relative .long entries.
+  - **Jump tables**: `build_jump_table()` shared free function extracts the table construction. All 64-bit backends (x86-64, ARM, RISC-V) always use relative 32-bit offsets (.long/.word target - table_base) to avoid unresolved R_*_ABS64 relocations in .rodata (which the Linux kernel linker does not resolve). Only i686 uses `emit_jump_table_rodata()` with absolute 4-byte entries.
 
 - **Call argument classification**: `classify_call_args()` captures the shared arg-walking algorithm. `CallAbiConfig` parameterizes per-arch details (register counts, pair alignment, F128 handling, variadic float rules). Each backend implements `call_abi_config()` to provide its ABI parameters.
 
