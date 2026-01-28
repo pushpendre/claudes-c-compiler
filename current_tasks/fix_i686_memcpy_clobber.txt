@@ -1,0 +1,17 @@
+Task: Fix i686 rep movsb clobbering callee-saved registers (esi/edi)
+Status: in_progress
+
+Problem:
+On i686, `rep movsb` implicitly clobbers esi, edi, and ecx. On x86-64,
+these registers (rsi, rdi, rcx) are caller-saved so this is not an issue.
+But on i686, esi (PhysReg 1) and edi (PhysReg 2) are callee-saved registers
+that the register allocator may assign to hold live values across the loop
+containing the memcpy.
+
+When a value is allocated to esi/edi and is live across a Memcpy instruction,
+the rep movsb will overwrite the register, leading to use of corrupted values.
+This manifests as crashes in many projects (Lua, mquickjs, sqlite, etc).
+
+Fix:
+Override emit_memcpy in the i686 backend to save/restore esi and edi
+around the entire memcpy operation (push before, pop after).
