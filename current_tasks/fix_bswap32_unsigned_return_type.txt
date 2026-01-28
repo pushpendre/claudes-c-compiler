@@ -1,0 +1,21 @@
+Fix __builtin_bswap16/32 return types to unsigned
+
+Problem:
+__builtin_bswap16 and __builtin_bswap32 were typed as returning signed int
+in both the sema type checker (CType::Int) and the IR lowering
+(IrType::I32). GCC documents these as returning unsigned short and
+unsigned int respectively.
+
+The signed return type caused the expression (__builtin_bswap32(x)) >> 16
+to use arithmetic right shift (sarq) instead of logical right shift (shrq),
+producing wrong results when the high bit of the bswap result was set.
+
+This broke mbedTLS's ARIA cipher self-test on both x86 and i686, because
+the ARIA_P1 macro on x86 is defined as ARIA_P2(ARIA_P3(x)) where
+ARIA_P3 = __builtin_bswap32 and ARIA_P2 = ((x)>>16)^((x)<<16).
+
+Fix:
+1. type_checker.rs: Changed bswap16 -> CType::UShort, bswap32 -> CType::UInt
+2. expr_builtins_intrin.rs: Changed bswap IR types to U16/U32/U64
+
+Status: in_progress
