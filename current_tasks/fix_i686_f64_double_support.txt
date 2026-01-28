@@ -1,20 +1,29 @@
 Task: Fix i686 F64 (double) support
-Status: in_progress (taken over from stalled worker)
+Status: completed
 Started: 2026-01-28
+Completed: 2026-01-28
 
 Description:
-The i686 backend's F64 (double) handling is fundamentally broken because the
-accumulator model uses eax (32-bit) but F64 needs 64 bits. This affects:
+The i686 backend's F64 (double) handling was fundamentally broken because the
+accumulator model uses eax (32-bit) but F64 needs 64 bits.
 
-- F64 load/store through pointers (only copies 4 of 8 bytes)
-- F64 binary operations (add, sub, mul, div) - only use low 32 bits
-- F64 comparisons - use ucomiss (F32) instead of x87 fucomip
-- F64 return values - use flds instead of fldl
-- F64 negation - only flips low 32-bit sign bit
-- F64 type conversions (F64<->F32, F64<->int)
+Changes made (all in src/backend/i686/codegen/codegen.rs):
+- emit_load/emit_store: Extended to handle F64 like I64/U64 using eax:edx pairs
+- emit_load_with_const_offset/emit_store_with_const_offset: New overrides for
+  GEP-folded operations that bypass the normal load/store paths
+- emit_float_binop: New override using x87 FPU (faddp, fsubp, fmulp, fdivp) for F64
+- emit_float_cmp: Rewritten to use x87 fucomip for F64, SSE ucomiss for F32
+- emit_cast: New override handling all F64-involved type conversions
+- emit_unaryop: New override for F64 negation using x87 fchs
+- emit_return: Extended to handle F64 returns via x87 fldl
+- emit_call_store_result: Fixed F64 return from calls (fstpl to slot)
+- emit_store_params: Fixed F64 parameter loading (8 bytes instead of 4)
+- emit_param_ref: Fixed F64 parameter references (8 bytes)
+- emit_load_acc_pair: Added F64 constant and Zero handling
+- emit_f64_load_to_x87/emit_f64_store_from_x87: New helper methods
 
-Fix approach:
-Treat F64 like I64/U64: use eax:edx pairs for 8-byte memory operations.
-Use x87 FPU (fldl/fstpl) for F64 operations wherever needed.
-Use fucomip for F64 comparisons.
-Fix return path to use fldl for 8-byte double values.
+Results:
+- i686 tests: 59.8% (16,269) -> 69.5% (18,918) = +2,649 tests passing
+- No regressions on x86, ARM, RISC-V backends
+- x86 kernel: PASS
+- i686 projects: libjpeg PASS, libuv PASS

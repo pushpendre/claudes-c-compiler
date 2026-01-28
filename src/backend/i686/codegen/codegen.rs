@@ -380,6 +380,56 @@ impl I686Codegen {
         }
     }
 
+    /// Load an F64 (double) operand onto the x87 FPU stack.
+    /// F64 values occupy 8-byte stack slots on i686, so we use fldl to load
+    /// them directly from memory rather than going through the 32-bit accumulator.
+    fn emit_f64_load_to_x87(&mut self, op: &Operand) {
+        match op {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    emit!(self.state, "    fldl {}(%ebp)", slot.0);
+                }
+            }
+            Operand::Const(IrConst::F64(fval)) => {
+                let bits = fval.to_bits();
+                let low = (bits & 0xFFFFFFFF) as i32;
+                let high = ((bits >> 32) & 0xFFFFFFFF) as i32;
+                self.state.emit("    subl $8, %esp");
+                emit!(self.state, "    movl ${}, (%esp)", low);
+                emit!(self.state, "    movl ${}, 4(%esp)", high);
+                self.state.emit("    fldl (%esp)");
+                self.state.emit("    addl $8, %esp");
+            }
+            Operand::Const(IrConst::F32(fval)) => {
+                emit!(self.state, "    movl ${}, %eax", fval.to_bits() as i32);
+                self.state.emit("    pushl %eax");
+                self.state.emit("    flds (%esp)");
+                self.state.emit("    addl $4, %esp");
+            }
+            Operand::Const(IrConst::Zero) => {
+                self.state.emit("    fldz");
+            }
+            _ => {
+                // Fallback: load integer bits and convert
+                self.operand_to_eax(op);
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildl (%esp)");
+                self.state.emit("    addl $4, %esp");
+            }
+        }
+    }
+
+    /// Store the x87 st(0) value as F64 into a destination stack slot.
+    /// Pops st(0).
+    fn emit_f64_store_from_x87(&mut self, dest: &Value) {
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            emit!(self.state, "    fstpl {}(%ebp)", slot.0);
+        } else {
+            // No slot available, pop x87 stack to discard
+            self.state.emit("    fstp %st(0)");
+        }
+    }
+
     /// Load an operand into a named register.
     #[allow(dead_code)]
     fn operand_to_reg(&mut self, op: &Operand, reg: &str) {
@@ -609,11 +659,19 @@ impl ArchCodegen for I686Codegen {
             match class {
                 ParamClass::StackScalar { offset } => {
                     let src_offset = stack_base + offset;
-                    let load_instr = self.mov_load_for_type(ty);
-                    let store_instr = self.mov_store_for_type(ty);
-                    emit!(self.state, "    {} {}(%ebp), %eax", load_instr, src_offset);
-                    let dest_reg = self.eax_for_type(ty);
-                    emit!(self.state, "    {} {}, {}(%ebp)", store_instr, dest_reg, slot.0);
+                    if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
+                        // 8-byte types: copy both halves
+                        emit!(self.state, "    movl {}(%ebp), %eax", src_offset);
+                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
+                        emit!(self.state, "    movl {}(%ebp), %eax", src_offset + 4);
+                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + 4);
+                    } else {
+                        let load_instr = self.mov_load_for_type(ty);
+                        let store_instr = self.mov_store_for_type(ty);
+                        emit!(self.state, "    {} {}(%ebp), %eax", load_instr, src_offset);
+                        let dest_reg = self.eax_for_type(ty);
+                        emit!(self.state, "    {} {}, {}(%ebp)", store_instr, dest_reg, slot.0);
+                    }
                 }
                 ParamClass::StructStack { offset, size } => {
                     let src = stack_base + offset;
@@ -695,6 +753,14 @@ impl ArchCodegen for I686Codegen {
                     emit!(self.state, "    movl {}(%ebp), %eax", param_offset + i as i64);
                     emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + i as i64);
                 }
+            }
+        } else if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
+            // 8-byte types: load both halves
+            if let Some(slot) = self.state.get_slot(dest.0) {
+                emit!(self.state, "    movl {}(%ebp), %eax", param_offset);
+                emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
+                emit!(self.state, "    movl {}(%ebp), %eax", param_offset + 4);
+                emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + 4);
             }
         } else {
             let load_instr = self.mov_load_for_type(ty);
@@ -856,6 +922,46 @@ impl ArchCodegen for I686Codegen {
         self.store_eax_to(dest);
     }
 
+    /// Override float binop to use x87 for F64 (the default path uses emit_load_operand
+    /// which only loads 32 bits into eax, losing the high half of F64 values).
+    fn emit_float_binop(&mut self, dest: &Value, op: crate::backend::cast::FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty == IrType::F64 {
+            // Use x87 FPU for F64 binary operations.
+            // Load lhs onto x87 stack first, then rhs, then operate.
+            let mnemonic = self.emit_float_binop_mnemonic(op);
+            self.emit_f64_load_to_x87(lhs);
+            self.emit_f64_load_to_x87(rhs);
+            // x87 stack: st(0)=rhs, st(1)=lhs
+            // faddp/fmulp: st(1) = st(1) op st(0), pop st(0)
+            // fsubp/fdivp: st(1) = st(1) op st(0), pop st(0) (lhs - rhs / lhs / rhs)
+            emit!(self.state, "    f{}p %st, %st(1)", mnemonic);
+            // Result is in st(0), store to dest's 8-byte stack slot
+            self.emit_f64_store_from_x87(dest);
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
+        if ty == IrType::F128 {
+            // Use x87 FPU for F128 (long double) binary operations
+            let mnemonic = self.emit_float_binop_mnemonic(op);
+            self.emit_f128_load_to_x87(lhs);
+            self.emit_f128_load_to_x87(rhs);
+            emit!(self.state, "    f{}p %st, %st(1)", mnemonic);
+            // Store F128 result to dest
+            if let Some(slot) = self.state.get_slot(dest.0) {
+                emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            }
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
+        // F32: use default path (SSE via eax)
+        let mnemonic = self.emit_float_binop_mnemonic(op);
+        self.emit_load_operand(lhs);
+        self.emit_acc_to_secondary();
+        self.emit_load_operand(rhs);
+        self.emit_float_binop_impl(mnemonic, ty);
+        self.emit_store_result(dest);
+    }
+
     fn emit_float_binop_mnemonic(&self, op: crate::backend::cast::FloatOp) -> &'static str {
         match op {
             crate::backend::cast::FloatOp::Add => "add",
@@ -866,42 +972,245 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_float_binop_impl(&mut self, mnemonic: &str, ty: IrType) {
-        // Use SSE for float/double operations
+        // Use SSE for F32, x87 for F64 (handled via emit_float_binop override)
         if ty == IrType::F32 {
             self.state.emit("    movd %ecx, %xmm1");
             self.state.emit("    movd %eax, %xmm0");
             emit!(self.state, "    {}ss %xmm1, %xmm0", mnemonic);
             self.state.emit("    movd %xmm0, %eax");
         } else if ty == IrType::F64 {
-            // For F64 on i686, we need to use the x87 FPU or SSE2
-            // Use x87 for simplicity
-            self.state.emit("    subl $16, %esp");
-            self.state.emit("    movl %ecx, (%esp)");  // secondary (rhs)
-            self.state.emit("    movl %eax, 8(%esp)"); // acc (lhs)
-            // But wait - we only have low 32 bits. For F64 we need both halves.
-            // TODO: proper 64-bit float handling. For now use x87.
-            // Actually, the framework loads F64 into eax which only gives us 32 bits.
-            // We need to handle F64 through stack/x87.
-            self.state.emit("    fldl 8(%esp)");
-            emit!(self.state, "    f{}l (%esp)", mnemonic);
-            self.state.emit("    fstpl 8(%esp)");
-            self.state.emit("    movl 8(%esp), %eax");
-            self.state.emit("    addl $16, %esp");
+            // F64 binops are handled by emit_float_binop override which uses x87.
+            // This path shouldn't normally be reached for F64, but handle it defensively.
+            // The x87 stack should have: st(0)=rhs, st(1)=lhs after the override loads.
+            emit!(self.state, "    f{}p %st, %st(1)", mnemonic);
         } else if ty == IrType::F128 {
             // F128 (x87 long double) - use x87 directly
             // Both operands should already be on x87 stack from the load path
-            // TODO: proper F128 handling via x87
-            self.state.emit("    faddp %st, %st(1)");
-            self.state.emit("    subl $12, %esp");
-            self.state.emit("    fstpt (%esp)");
-            self.state.emit("    movl (%esp), %eax");
-            self.state.emit("    addl $12, %esp");
+            emit!(self.state, "    f{}p %st, %st(1)", mnemonic);
         }
         self.state.reg_cache.invalidate_acc();
     }
 
     fn emit_acc_to_secondary(&mut self) {
         self.state.emit("    movl %eax, %ecx");
+    }
+
+    /// Override emit_cast to handle F64 source/destination specially on i686.
+    /// F64 values are 8 bytes but the accumulator is only 32 bits, so we use
+    /// x87 FPU for all F64 conversions, bypassing the default emit_load_operand path.
+    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+        use crate::backend::cast::{CastKind, classify_cast};
+
+        // Let the default handle i128 conversions
+        if crate::backend::generation::is_i128_type(from_ty) || crate::backend::generation::is_i128_type(to_ty) {
+            crate::backend::traits::emit_cast_default(self, dest, src, from_ty, to_ty);
+            return;
+        }
+
+        match classify_cast(from_ty, to_ty) {
+            // --- Casts where F64 is the destination (result needs 8-byte slot) ---
+            CastKind::SignedToFloat { to_f64: true, from_ty: src_ty } => {
+                // int → F64: load int into eax, convert via x87, store 8-byte result
+                self.operand_to_eax(src);
+                match src_ty {
+                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                    _ => {}
+                }
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildl (%esp)");
+                self.state.emit("    addl $4, %esp");
+                // st(0) = F64 result, store to dest's 8-byte slot
+                self.emit_f64_store_from_x87(dest);
+                self.state.reg_cache.invalidate_acc();
+            }
+            CastKind::UnsignedToFloat { to_f64: true, from_u64 } => {
+                // unsigned → F64
+                self.operand_to_eax(src);
+                if from_u64 {
+                    // U64: load both halves from slot, use fildq
+                    self.emit_load_acc_pair(src);
+                    self.state.emit("    pushl %edx");
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    addl $8, %esp");
+                } else {
+                    // U32: handle high-bit-set values
+                    let big_label = self.state.fresh_label("u2f_big");
+                    let done_label = self.state.fresh_label("u2f_done");
+                    self.state.emit("    testl %eax, %eax");
+                    self.state.out.emit_jcc_label("    js", &big_label);
+                    // Positive (< 2^31): fildl works directly
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildl (%esp)");
+                    self.state.emit("    addl $4, %esp");
+                    self.state.out.emit_jmp_label(&done_label);
+                    self.state.out.emit_named_label(&big_label);
+                    // Bit 31 set: push as u64 (zero-extend), use fildq
+                    self.state.emit("    pushl $0");
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    addl $8, %esp");
+                    self.state.out.emit_named_label(&done_label);
+                }
+                self.emit_f64_store_from_x87(dest);
+                self.state.reg_cache.invalidate_acc();
+            }
+            CastKind::FloatToFloat { widen: true } => {
+                // F32 → F64: load F32 from eax, x87 will auto-extend
+                self.operand_to_eax(src);
+                self.state.emit("    pushl %eax");
+                self.state.emit("    flds (%esp)");
+                self.state.emit("    addl $4, %esp");
+                // st(0) is now the F64 value, store to 8-byte slot
+                self.emit_f64_store_from_x87(dest);
+                self.state.reg_cache.invalidate_acc();
+            }
+
+            // --- Casts where F64 is the source (need to load 8-byte value) ---
+            CastKind::FloatToSigned { from_f64: true } => {
+                // F64 → signed int: load full 8-byte F64, convert via x87 fisttpl
+                self.emit_f64_load_to_x87(src);
+                self.state.emit("    subl $4, %esp");
+                self.state.emit("    fisttpl (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+                self.state.emit("    addl $4, %esp");
+                self.state.reg_cache.invalidate_acc();
+                self.store_eax_to(dest);
+            }
+            CastKind::FloatToUnsigned { from_f64: true, to_u64 } => {
+                if to_u64 {
+                    // F64 → U64: load F64 via x87, convert to 64-bit int
+                    self.emit_f64_load_to_x87(src);
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
+                    self.state.emit("    addl $8, %esp");
+                    self.emit_store_acc_pair(dest);
+                } else {
+                    // F64 → unsigned 32-bit: load F64, convert via x87
+                    // Use fisttpq to get full range (values > 2^31)
+                    self.emit_f64_load_to_x87(src);
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    addl $8, %esp");
+                    self.state.reg_cache.invalidate_acc();
+                    self.store_eax_to(dest);
+                }
+            }
+            CastKind::FloatToFloat { widen: false } => {
+                // F64 → F32: load full 8-byte F64, convert to F32 on x87
+                self.emit_f64_load_to_x87(src);
+                self.state.emit("    subl $4, %esp");
+                self.state.emit("    fstps (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+                self.state.emit("    addl $4, %esp");
+                self.state.reg_cache.invalidate_acc();
+                self.store_eax_to(dest);
+            }
+
+            // --- F128 ↔ F64/F32 conversions (native F128 variants from ARM/RISC-V) ---
+            // On x86/i686, classify_cast treats F128 as F64, so these native variants
+            // are only reached when classify_cast_with_f128(..., true) is used.
+            // Handle them properly in case they appear.
+            CastKind::FloatToF128 { from_f32 } => {
+                if from_f32 {
+                    // F32 → F128: load F32 onto x87, store as F128
+                    self.operand_to_eax(src);
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    flds (%esp)");
+                    self.state.emit("    addl $4, %esp");
+                } else {
+                    // F64 → F128: load F64 onto x87
+                    self.emit_f64_load_to_x87(src);
+                }
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                }
+                self.state.reg_cache.invalidate_acc();
+            }
+            CastKind::F128ToFloat { to_f32 } => {
+                self.emit_f128_load_to_x87(src);
+                if to_f32 {
+                    // F128 → F32
+                    self.state.emit("    subl $4, %esp");
+                    self.state.emit("    fstps (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    addl $4, %esp");
+                    self.state.reg_cache.invalidate_acc();
+                    self.store_eax_to(dest);
+                } else {
+                    // F128 → F64
+                    self.emit_f64_store_from_x87(dest);
+                    self.state.reg_cache.invalidate_acc();
+                }
+            }
+
+            // --- F128 ↔ int conversions ---
+            CastKind::SignedToF128 { from_ty: src_ty } => {
+                self.operand_to_eax(src);
+                match src_ty {
+                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                    _ => {}
+                }
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildl (%esp)");
+                self.state.emit("    addl $4, %esp");
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                }
+                self.state.reg_cache.invalidate_acc();
+            }
+            CastKind::UnsignedToF128 { .. } => {
+                self.operand_to_eax(src);
+                let big_label = self.state.fresh_label("u2f128_big");
+                let done_label = self.state.fresh_label("u2f128_done");
+                self.state.emit("    testl %eax, %eax");
+                self.state.out.emit_jcc_label("    js", &big_label);
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildl (%esp)");
+                self.state.emit("    addl $4, %esp");
+                self.state.out.emit_jmp_label(&done_label);
+                self.state.out.emit_named_label(&big_label);
+                self.state.emit("    pushl $0");
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildq (%esp)");
+                self.state.emit("    addl $8, %esp");
+                self.state.out.emit_named_label(&done_label);
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                }
+                self.state.reg_cache.invalidate_acc();
+            }
+            CastKind::F128ToSigned { .. } => {
+                self.emit_f128_load_to_x87(src);
+                self.state.emit("    subl $4, %esp");
+                self.state.emit("    fisttpl (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+                self.state.emit("    addl $4, %esp");
+                self.state.reg_cache.invalidate_acc();
+                self.store_eax_to(dest);
+            }
+            CastKind::F128ToUnsigned { .. } => {
+                self.emit_f128_load_to_x87(src);
+                self.state.emit("    subl $8, %esp");
+                self.state.emit("    fisttpq (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+                self.state.emit("    addl $8, %esp");
+                self.state.reg_cache.invalidate_acc();
+                self.store_eax_to(dest);
+            }
+
+            // --- All other casts use the default path (emit_load_operand → eax → cast → store) ---
+            _ => {
+                self.operand_to_eax(src);
+                self.emit_cast_instrs(from_ty, to_ty);
+                self.store_eax_to(dest);
+            }
+        }
     }
 
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
@@ -941,163 +1250,67 @@ impl ArchCodegen for I686Codegen {
                 }
             }
 
-            CastKind::SignedToFloat { to_f64, from_ty } => {
-                // Sign-extend sub-32-bit types to 32-bit first
-                match from_ty {
-                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
-                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
-                    _ => {}
-                }
-                if to_f64 {
-                    // Signed int -> F64 via x87
-                    // fstpl writes 8 bytes, so allocate 8 bytes of stack space
-                    self.state.emit("    subl $8, %esp");
-                    self.state.emit("    movl %eax, (%esp)");
-                    self.state.emit("    fildl (%esp)");
-                    self.state.emit("    fstpl (%esp)");
-                    // F64 result low 32 bits in eax (the accumulator model only carries low 32 bits)
-                    self.state.emit("    movl (%esp), %eax");
-                    self.state.emit("    addl $8, %esp");
-                } else {
-                    // Signed int -> F32 via SSE
-                    self.state.emit("    cvtsi2ssl %eax, %xmm0");
-                    self.state.emit("    movd %xmm0, %eax");
-                }
+            CastKind::SignedToFloat { to_f64: false, .. } => {
+                // Signed int -> F32 via SSE
+                self.state.emit("    cvtsi2ssl %eax, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
             }
 
-            CastKind::UnsignedToFloat { to_f64, from_u64 } => {
-                if from_u64 {
-                    // U64 -> float: rare on i686, use x87 with special handling
-                    // TODO: proper U64 -> float conversion
-                    self.state.emit("    subl $8, %esp");
-                    self.state.emit("    movl %eax, (%esp)");
-                    self.state.emit("    fildl (%esp)");
-                    if to_f64 {
-                        self.state.emit("    fstpl (%esp)");
-                    } else {
-                        self.state.emit("    fstps (%esp)");
-                    }
-                    self.state.emit("    movl (%esp), %eax");
-                    self.state.emit("    addl $8, %esp");
-                } else {
-                    // U8/U16/U32 -> float
-                    // For U32, cvtsi2ss treats eax as signed. For values with bit 31 set,
-                    // we zero-extend to 64-bit and use x87 fildq.
-                    let big_label = self.state.fresh_label("u2f_big");
-                    let done_label = self.state.fresh_label("u2f_done");
-                    self.state.emit("    testl %eax, %eax");
-                    self.state.out.emit_jcc_label("    js", &big_label);
-                    // Positive (< 2^31): cvtsi2ss/cvtsi2sd works directly
-                    if to_f64 {
-                        self.state.emit("    subl $8, %esp");
-                        self.state.emit("    movl %eax, (%esp)");
-                        self.state.emit("    fildl (%esp)");
-                        self.state.emit("    fstpl (%esp)");
-                        self.state.emit("    movl (%esp), %eax");
-                        self.state.emit("    addl $8, %esp");
-                    } else {
-                        self.state.emit("    cvtsi2ssl %eax, %xmm0");
-                        self.state.emit("    movd %xmm0, %eax");
-                    }
-                    self.state.out.emit_jmp_label(&done_label);
-                    self.state.out.emit_named_label(&big_label);
-                    // Bit 31 set: push as u64 (zero-extend), use fildq
-                    self.state.emit("    pushl $0");       // high 32 bits = 0
-                    self.state.emit("    pushl %eax");     // low 32 bits
-                    self.state.emit("    fildq (%esp)");   // load as 64-bit signed (value < 2^32, so positive)
-                    if to_f64 {
-                        self.state.emit("    fstpl (%esp)");
-                        self.state.emit("    popl %eax");
-                        self.state.emit("    addl $4, %esp");
-                    } else {
-                        self.state.emit("    fstps (%esp)");
-                        self.state.emit("    popl %eax");
-                        self.state.emit("    addl $4, %esp");
-                    }
-                    self.state.out.emit_named_label(&done_label);
-                }
+            CastKind::UnsignedToFloat { to_f64: false, from_u64: false } => {
+                // U8/U16/U32 -> F32
+                let big_label = self.state.fresh_label("u2f_big");
+                let done_label = self.state.fresh_label("u2f_done");
+                self.state.emit("    testl %eax, %eax");
+                self.state.out.emit_jcc_label("    js", &big_label);
+                self.state.emit("    cvtsi2ssl %eax, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                self.state.out.emit_jmp_label(&done_label);
+                self.state.out.emit_named_label(&big_label);
+                self.state.emit("    pushl $0");
+                self.state.emit("    pushl %eax");
+                self.state.emit("    fildq (%esp)");
+                self.state.emit("    fstps (%esp)");
+                self.state.emit("    popl %eax");
+                self.state.emit("    addl $4, %esp");
+                self.state.out.emit_named_label(&done_label);
             }
 
-            CastKind::FloatToSigned { from_f64 } => {
-                if from_f64 {
-                    // F64 -> signed: need x87 (eax only has low 32 bits of F64)
-                    // The F64 value is in the stack slot, not in eax properly.
-                    // Use fisttpl for truncation toward zero.
-                    // For now, use SSE2 cvttsd2si if we can load both halves.
-                    // Since eax only has low 32 bits, we need the slot.
-                    // TODO: proper F64 -> int via stack slot access
-                    // Fallback: treat as F32 conversion (lossy)
-                    self.state.emit("    subl $8, %esp");
-                    self.state.emit("    movl %eax, (%esp)");
-                    // We'd need the high 32 bits too. For now, use x87 approach:
-                    // Push eax as an integer and convert (this is wrong for actual F64 values)
-                    // Actually, since emit_cast loads the operand via operand_to_eax, and for F64
-                    // that only gets the low 32 bits, we need a different approach.
-                    // Use the x87 FPU: load from source slot directly.
-                    self.state.emit("    flds (%esp)");   // Load as F32 (only low 32 bits available)
-                    self.state.emit("    fisttpl (%esp)"); // Truncate to int
-                    self.state.emit("    movl (%esp), %eax");
-                    self.state.emit("    addl $8, %esp");
-                }  else {
-                    // F32 -> signed int via SSE
-                    self.state.emit("    movd %eax, %xmm0");
-                    self.state.emit("    cvttss2si %xmm0, %eax");
-                }
+            CastKind::UnsignedToFloat { to_f64: false, from_u64: true } => {
+                // U64 -> F32: use x87
+                self.state.emit("    subl $8, %esp");
+                self.state.emit("    movl %eax, (%esp)");
+                self.state.emit("    fildl (%esp)");
+                self.state.emit("    fstps (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+                self.state.emit("    addl $8, %esp");
             }
 
-            CastKind::FloatToUnsigned { from_f64, to_u64 } => {
+            CastKind::FloatToSigned { from_f64: false } => {
+                // F32 -> signed int via SSE
+                self.state.emit("    movd %eax, %xmm0");
+                self.state.emit("    cvttss2si %xmm0, %eax");
+            }
+
+            CastKind::FloatToUnsigned { from_f64: false, to_u64 } => {
                 if to_u64 {
-                    // Float -> U64: rare on i686, use x87
-                    // TODO: proper float -> U64 conversion
-                    self.state.emit("    movd %eax, %xmm0");
-                    self.state.emit("    cvttss2si %xmm0, %eax");
-                } else if from_f64 {
-                    // F64 -> unsigned 32-bit
-                    // Same issue as FloatToSigned with F64
-                    self.state.emit("    subl $8, %esp");
-                    self.state.emit("    movl %eax, (%esp)");
+                    // F32 -> U64: use x87
+                    self.state.emit("    pushl %eax");
                     self.state.emit("    flds (%esp)");
-                    self.state.emit("    fisttpl (%esp)");
+                    self.state.emit("    addl $4, %esp");
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
                     self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
                     self.state.emit("    addl $8, %esp");
                 } else {
                     // F32 -> unsigned int: cvttss2si treats result as signed
-                    // For values < 2^31, this works fine
-                    // For values >= 2^31, we need special handling
                     self.state.emit("    movd %eax, %xmm0");
                     self.state.emit("    cvttss2si %xmm0, %eax");
                 }
             }
 
-            CastKind::FloatToFloat { widen } => {
-                if widen {
-                    // F32 -> F64: convert via SSE, result low 32 bits in eax
-                    self.state.emit("    movd %eax, %xmm0");
-                    self.state.emit("    cvtss2sd %xmm0, %xmm0");
-                    self.state.emit("    subl $8, %esp");
-                    self.state.emit("    movsd %xmm0, (%esp)");
-                    self.state.emit("    movl (%esp), %eax");
-                    self.state.emit("    addl $8, %esp");
-                } else {
-                    // F64 -> F32: requires both halves of the F64 value.
-                    // The accumulator model only carries the low 32 bits in eax,
-                    // so this conversion is inherently lossy until full F64 support
-                    // is implemented with x87-based F64 storage.
-                    // TODO: proper F64->F32 requires full 64-bit F64 values (see fix_i686_f64_double_support)
-                    // For now, treat the low 32 bits as F32 bits (wrong but avoids crash)
-                    // No conversion needed since we're just reinterpreting bits.
-                }
-            }
-
-            // F128 conversions via x87
-            CastKind::SignedToF128 { .. } |
-            CastKind::UnsignedToF128 { .. } |
-            CastKind::F128ToSigned { .. } |
-            CastKind::F128ToUnsigned { .. } |
-            CastKind::FloatToF128 { .. } |
-            CastKind::F128ToFloat { .. } => {
-                // TODO: F128 conversions via x87
-            }
+            // F64/F128 casts are handled by emit_cast override above
+            _ => {}
         }
     }
 
@@ -1174,22 +1387,49 @@ impl ArchCodegen for I686Codegen {
     // --- Comparison ---
 
     fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        // Use SSE for float comparisons
+        if ty == IrType::F64 {
+            // F64: use x87 fucomip for proper 8-byte double comparison
+            let swap = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
+            let (first, second) = if swap { (lhs, rhs) } else { (rhs, lhs) };
+            self.emit_f64_load_to_x87(first);
+            self.emit_f64_load_to_x87(second);
+            // x87 stack: st(0)=second, st(1)=first
+            // fucomip compares st(0) with st(1), sets EFLAGS, pops st(0)
+            self.state.emit("    fucomip %st(1), %st");
+            self.state.emit("    fstp %st(0)"); // pop remaining st(0)
+
+            match op {
+                IrCmpOp::Eq => {
+                    self.state.emit("    setnp %al");
+                    self.state.emit("    sete %cl");
+                    self.state.emit("    andb %cl, %al");
+                }
+                IrCmpOp::Ne => {
+                    self.state.emit("    setp %al");
+                    self.state.emit("    setne %cl");
+                    self.state.emit("    orb %cl, %al");
+                }
+                IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                    self.state.emit("    seta %al");
+                }
+                IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
+                    self.state.emit("    setae %al");
+                }
+            }
+            self.state.emit("    movzbl %al, %eax");
+            self.state.reg_cache.invalidate_acc();
+            self.store_eax_to(dest);
+            return;
+        }
+        // F32: Use SSE for float comparisons
         let swap_operands = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
         let (first, second) = if swap_operands { (rhs, lhs) } else { (lhs, rhs) };
 
         self.operand_to_eax(first);
-        if ty == IrType::F32 {
-            self.state.emit("    movd %eax, %xmm0");
-        }
+        self.state.emit("    movd %eax, %xmm0");
         self.operand_to_ecx(second);
-        if ty == IrType::F32 {
-            self.state.emit("    movd %ecx, %xmm1");
-            self.state.emit("    ucomiss %xmm1, %xmm0");
-        } else {
-            // F64: TODO proper handling
-            self.state.emit("    ucomiss %xmm1, %xmm0");
-        }
+        self.state.emit("    movd %ecx, %xmm1");
+        self.state.emit("    ucomiss %xmm1, %xmm0");
 
         match op {
             IrCmpOp::Eq => {
@@ -1301,6 +1541,31 @@ impl ArchCodegen for I686Codegen {
 
     // --- Unary operations ---
 
+    /// Override unary op to handle F64/F128 negation properly on i686.
+    /// The default path uses emit_load_operand which only gives 32 bits for F64.
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+        if ty == IrType::F64 && op == IrUnaryOp::Neg {
+            // F64 negation: load onto x87, negate, store back
+            self.emit_f64_load_to_x87(src);
+            self.state.emit("    fchs");
+            self.emit_f64_store_from_x87(dest);
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
+        // Delegate to default for all other types/ops
+        crate::backend::traits::emit_unaryop_default(self, dest, op, src, ty);
+    }
+
+    /// F128 (long double) negation on i686 using x87 fchs.
+    fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) {
+        self.emit_f128_load_to_x87(src);
+        self.state.emit("    fchs");
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+        }
+        self.state.reg_cache.invalidate_acc();
+    }
+
     fn emit_float_neg(&mut self, ty: IrType) {
         if ty == IrType::F32 {
             self.state.emit("    movd %eax, %xmm0");
@@ -1309,8 +1574,8 @@ impl ArchCodegen for I686Codegen {
             self.state.emit("    xorps %xmm1, %xmm0");
             self.state.emit("    movd %xmm0, %eax");
         } else {
-            // F64 or F128: flip sign bit
-            // TODO: proper implementation
+            // F64/F128 handled by emit_unaryop/emit_f128_neg overrides above.
+            // Fallback: flip sign bit in eax (only works for low 32 bits).
             self.state.emit("    xorl $0x80000000, %eax");
         }
     }
@@ -1611,9 +1876,10 @@ impl ArchCodegen for I686Codegen {
         } else if return_type == IrType::F32 {
             self.emit_call_move_f32_to_acc();
             self.emit_store_result(dest);
-        } else if return_type.is_float() {
-            self.emit_call_move_f64_to_acc();
-            self.emit_store_result(dest);
+        } else if return_type == IrType::F64 {
+            // F64 returned in st(0) on i686 cdecl — store full 8 bytes to dest slot
+            self.emit_f64_store_from_x87(dest);
+            self.state.reg_cache.invalidate_acc();
         } else {
             self.emit_store_result(dest);
         }
@@ -1665,8 +1931,22 @@ impl ArchCodegen for I686Codegen {
                 self.emit_epilogue_and_ret(frame_size);
                 return;
             }
+            // F64 returns on i686: load full 8-byte double onto x87 st(0).
+            // We use emit_f64_load_to_x87 to load from the 8-byte stack slot,
+            // bypassing the default emit_load_operand which only gives 32 bits.
+            if ret_ty == IrType::F64 {
+                self.emit_f64_load_to_x87(val);
+                self.emit_epilogue_and_ret(frame_size);
+                return;
+            }
+            // F128 returns on i686: load long double onto x87 st(0).
+            if ret_ty.is_long_double() {
+                self.emit_f128_load_to_x87(val);
+                self.emit_epilogue_and_ret(frame_size);
+                return;
+            }
         }
-        // Delegate all other cases (I128, F32, F64, F128, scalar int) to default
+        // Delegate all other cases (I128, F32, scalar int) to default
         crate::backend::traits::emit_return_default(self, val, frame_size);
     }
 
@@ -1675,10 +1955,17 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_return_f128_to_reg(&mut self) {
-        // Load from eax (which is just the low 32 bits) onto x87 stack
-        // TODO: proper long double return
+        // F128 (long double) is 10/12 bytes. The value should be in the stack slot.
+        // The emit_return_default path calls emit_load_operand (which gets eax) then
+        // this function. But for F128, the value is already in the slot from x87 ops.
+        // We need to load it from the source's slot. Since the default path has already
+        // loaded into eax (just low 32 bits), we push both halves and use x87.
+        // Actually, F128 return is handled via the slot-based path in emit_return.
+        // This function is called after emit_load_operand, which only puts low 32 bits
+        // into eax. For proper F128 return, the caller should use the slot directly.
+        // For now, just push as integer (lossy fallback).
         self.state.emit("    pushl %eax");
-        self.state.emit("    flds (%esp)");
+        self.state.emit("    fildl (%esp)");
         self.state.emit("    addl $4, %esp");
     }
 
@@ -1690,11 +1977,14 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_return_f64_to_reg(&mut self) {
-        // Put F64 onto x87 st(0) for return
-        // TODO: need both halves of the F64
+        // Put F64 onto x87 st(0) for return.
+        // The F64 value is in eax:edx (both halves loaded by emit_load_acc_pair
+        // or available from the 8-byte stack slot).
+        // Push both halves and use fldl to load as 8-byte double.
+        self.state.emit("    pushl %edx");
         self.state.emit("    pushl %eax");
-        self.state.emit("    flds (%esp)");
-        self.state.emit("    addl $4, %esp");
+        self.state.emit("    fldl (%esp)");
+        self.state.emit("    addl $8, %esp");
     }
 
     fn emit_return_int_to_reg(&mut self) {
@@ -1708,9 +1998,9 @@ impl ArchCodegen for I686Codegen {
 
     // --- Typed store/load ---
 
-    /// Override emit_load for I64/U64: load 8 bytes via eax:edx pair, then store both halves.
+    /// Override emit_load for I64/U64/F64: load 8 bytes via eax:edx pair, then store both halves.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
-        if ty == IrType::I64 || ty == IrType::U64 {
+        if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             let addr = self.state.resolve_slot_addr(ptr.0);
             if let Some(addr) = addr {
                 match addr {
@@ -1738,9 +2028,9 @@ impl ArchCodegen for I686Codegen {
         crate::backend::traits::emit_load_default(self, dest, ptr, ty);
     }
 
-    /// Override emit_store for I64/U64: store 8 bytes via eax:edx pair.
+    /// Override emit_store for I64/U64/F64: store 8 bytes via eax:edx pair.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
-        if ty == IrType::I64 || ty == IrType::U64 {
+        if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             let addr = self.state.resolve_slot_addr(ptr.0);
             // Load 8-byte value into eax:edx
             self.emit_load_acc_pair(val);
@@ -1774,6 +2064,135 @@ impl ArchCodegen for I686Codegen {
             return;
         }
         crate::backend::traits::emit_store_default(self, val, ptr, ty);
+    }
+
+    /// Override load with GEP-folded constant offset for I64/U64/F64 on i686.
+    /// The default path uses emit_load_operand which only handles 32 bits.
+    fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    movl (%ecx), %eax");
+                        self.state.emit("    movl 4(%ecx), %edx");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        emit!(self.state, "    movl {}(%ebp), %eax", folded);
+                        emit!(self.state, "    movl {}(%ebp), %edx", folded + 4);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    movl (%ecx), %eax");
+                        self.state.emit("    movl 4(%ecx), %edx");
+                    }
+                }
+                self.emit_store_acc_pair(dest);
+            }
+            return;
+        }
+        // Delegate to default for other types
+        let addr = self.state.resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let load_instr = self.load_instr_for_type(ty);
+            match addr {
+                crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_load_indirect(load_instr);
+                }
+                crate::backend::state::SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_load_from_slot(load_instr, folded_slot);
+                }
+                crate::backend::state::SlotAddr::Indirect(slot) => {
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_load_indirect(load_instr);
+                }
+            }
+            self.emit_store_result(dest);
+        }
+    }
+
+    /// Override store with GEP-folded constant offset for I64/U64/F64 on i686.
+    /// The default path uses emit_load_operand which only handles 32 bits.
+    fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
+            self.emit_load_acc_pair(val);
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.state.emit("    pushl %edx");
+                        self.state.emit("    pushl %eax");
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    popl %eax");
+                        self.state.emit("    movl %eax, (%ecx)");
+                        self.state.emit("    popl %edx");
+                        self.state.emit("    movl %edx, 4(%ecx)");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        emit!(self.state, "    movl %eax, {}(%ebp)", folded);
+                        emit!(self.state, "    movl %edx, {}(%ebp)", folded + 4);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.state.emit("    pushl %edx");
+                        self.state.emit("    pushl %eax");
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    popl %eax");
+                        self.state.emit("    movl %eax, (%ecx)");
+                        self.state.emit("    popl %edx");
+                        self.state.emit("    movl %edx, 4(%ecx)");
+                    }
+                }
+            }
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
+        // Delegate to default for other types
+        self.operand_to_eax(val);
+        let addr = self.state.resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let store_instr = self.store_instr_for_type(ty);
+            match addr {
+                crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                    self.emit_save_acc();
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
+                crate::backend::state::SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
+                }
+                crate::backend::state::SlotAddr::Indirect(slot) => {
+                    self.emit_save_acc();
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
+            }
+        }
     }
 
     fn store_instr_for_type(&self, ty: IrType) -> &'static str {
@@ -2186,6 +2605,17 @@ impl ArchCodegen for I686Codegen {
                 let high = ((*v >> 32) & 0xFFFFFFFF) as i32;
                 emit!(self.state, "    movl ${}, %eax", low);
                 emit!(self.state, "    movl ${}, %edx", high);
+            }
+            Operand::Const(IrConst::F64(f)) => {
+                let bits = f.to_bits();
+                let low = (bits & 0xFFFFFFFF) as i32;
+                let high = (bits >> 32) as i32;
+                emit!(self.state, "    movl ${}, %eax", low);
+                emit!(self.state, "    movl ${}, %edx", high);
+            }
+            Operand::Const(IrConst::Zero) => {
+                self.state.emit("    xorl %eax, %eax");
+                self.state.emit("    xorl %edx, %edx");
             }
             _ => {
                 self.operand_to_eax(op);

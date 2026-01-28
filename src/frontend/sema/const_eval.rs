@@ -757,21 +757,10 @@ impl<'a> SemaConstEval<'a> {
                 if let Some(fields) = fields {
                     let union_fields = self.convert_struct_fields(fields);
                     if !union_fields.is_empty() {
-                        let mut layout = crate::common::types::StructLayout::for_union(
-                            &union_fields, &self.types.struct_layouts
+                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
+                        let mut layout = crate::common::types::StructLayout::for_union_with_packing(
+                            &union_fields, max_field_align, &self.types.struct_layouts
                         );
-                        if *is_packed {
-                            layout.align = 1;
-                            layout.size = layout.fields.iter()
-                                .map(|f| f.ty.size_ctx(&self.types.struct_layouts))
-                                .max().unwrap_or(0);
-                        } else if let Some(pack) = pragma_pack {
-                            if *pack < layout.align {
-                                layout.align = *pack;
-                                let mask = layout.align - 1;
-                                layout.size = (layout.size + mask) & !mask;
-                            }
-                        }
                         if let Some(a) = struct_aligned {
                             if *a > layout.align {
                                 layout.align = *a;
@@ -880,7 +869,7 @@ impl<'a> SemaConstEval<'a> {
                 }
                 struct_aligned.unwrap_or(1)
             }
-            TypeSpecifier::Union(tag, fields, is_packed, _pragma_pack, struct_aligned) => {
+            TypeSpecifier::Union(tag, fields, is_packed, pragma_pack, struct_aligned) => {
                 if let Some(tag) = tag {
                     let key = format!("union.{}", tag);
                     if let Some(layout) = self.types.struct_layouts.get(&key) {
@@ -890,12 +879,10 @@ impl<'a> SemaConstEval<'a> {
                 if let Some(fields) = fields {
                     let union_fields = self.convert_struct_fields(fields);
                     if !union_fields.is_empty() {
-                        let mut layout = crate::common::types::StructLayout::for_union(
-                            &union_fields, &self.types.struct_layouts
+                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
+                        let mut layout = crate::common::types::StructLayout::for_union_with_packing(
+                            &union_fields, max_field_align, &self.types.struct_layouts
                         );
-                        if *is_packed {
-                            layout.align = 1;
-                        }
                         if let Some(a) = struct_aligned {
                             if *a > layout.align {
                                 layout.align = *a;

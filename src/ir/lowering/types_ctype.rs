@@ -287,7 +287,7 @@ impl Lowerer {
                 }
             }).collect();
             let mut layout = if is_union {
-                StructLayout::for_union(&struct_fields, &self.types)
+                StructLayout::for_union_with_packing(&struct_fields, max_field_align, &self.types)
             } else {
                 StructLayout::for_struct_with_packing(&struct_fields, max_field_align, &self.types)
             };

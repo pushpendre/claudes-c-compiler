@@ -697,7 +697,7 @@ impl<'a> ExprTypeChecker<'a> {
 
         let max_field_align = if is_packed { Some(1) } else { pragma_pack };
         let mut layout = if is_union {
-            StructLayout::for_union(&struct_fields, &self.types.struct_layouts)
+            StructLayout::for_union_with_packing(&struct_fields, max_field_align, &self.types.struct_layouts)
         } else {
             StructLayout::for_struct_with_packing(&struct_fields, max_field_align, &self.types.struct_layouts)
         };

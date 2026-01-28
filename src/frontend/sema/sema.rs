@@ -1112,26 +1112,12 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
         };
         if !struct_fields.is_empty() {
             let mut layout = if is_union {
-                StructLayout::for_union(&struct_fields, &self.result.type_context.struct_layouts)
+                StructLayout::for_union_with_packing(&struct_fields, max_field_align, &self.result.type_context.struct_layouts)
             } else {
                 StructLayout::for_struct_with_packing(
                     &struct_fields, max_field_align, &self.result.type_context.struct_layouts
                 )
             };
-            if is_packed && is_union {
-                layout.align = 1;
-                layout.size = layout.fields.iter()
-                    .map(|f| f.ty.size_ctx(&self.result.type_context.struct_layouts))
-                    .max().unwrap_or(0);
-            } else if !is_packed && !is_union {
-                // pragma pack for non-packed structs is already handled by for_struct_with_packing
-            } else if let Some(pack) = pragma_pack {
-                if is_union && pack < layout.align {
-                    layout.align = pack;
-                    let mask = layout.align - 1;
-                    layout.size = (layout.size + mask) & !mask;
-                }
-            }
             if let Some(a) = struct_aligned {
                 if a > layout.align {
                     layout.align = a;

@@ -552,7 +552,17 @@ impl StructLayout {
     }
 
     /// Compute the layout for a union (all fields at offset 0, size = max field size).
+    /// Convenience wrapper with no packing.
     pub fn for_union(fields: &[StructField], ctx: &dyn StructLayoutProvider) -> Self {
+        Self::for_union_with_packing(fields, None, ctx)
+    }
+
+    /// Compute the layout for a union with optional packing.
+    /// `max_field_align`: if Some(N), cap each field's alignment to min(natural, N).
+    ///   For __attribute__((packed)), pass Some(1).
+    ///   For #pragma pack(N), pass Some(N).
+    ///   For normal unions, pass None.
+    pub fn for_union_with_packing(fields: &[StructField], max_field_align: Option<usize>, ctx: &dyn StructLayoutProvider) -> Self {
         let mut max_size = 0usize;
         let mut max_align = 1usize;
         let mut field_layouts = Vec::with_capacity(fields.len());
@@ -561,7 +571,10 @@ impl StructLayout {
             let natural_align = field.ty.align_ctx(ctx);
             // Per-field alignment override from _Alignas(N) or __attribute__((aligned(N)))
             let field_align = if let Some(explicit) = field.alignment {
+                // Explicit alignment attribute overrides packing
                 natural_align.max(explicit)
+            } else if let Some(max_a) = max_field_align {
+                natural_align.min(max_a)
             } else {
                 natural_align
             };
