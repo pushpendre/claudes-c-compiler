@@ -30,16 +30,16 @@ use crate::common::fx_hash::FxHashMap;
 
 /// Map from AST expression node identity to its inferred CType.
 ///
-/// Uses the raw pointer address of `Expr` nodes as a stable key. This works
-/// because the AST is allocated once during parsing and is not moved or
-/// reallocated before the lowerer consumes it. The lowerer can look up any
-/// expression node's CType in O(1) without re-computing it.
+/// Keyed by [`ExprId`], a type-safe wrapper around each `Expr` node's identity.
+/// The AST is allocated once during parsing and is not moved or reallocated
+/// before the lowerer consumes it, so node identities are stable throughout
+/// the compilation pipeline.
 ///
 /// This is the core data structure for Step 3 of the typed-AST plan: sema
 /// annotates every expression it can type-check, and the lowerer consults
 /// these annotations as a fallback before doing its own (more expensive)
 /// type inference.
-pub type ExprTypeMap = FxHashMap<usize, CType>;
+pub type ExprTypeMap = FxHashMap<ExprId, CType>;
 
 /// Information about a function collected during semantic analysis.
 #[derive(Debug, Clone)]
@@ -59,13 +59,13 @@ pub struct SemaResult {
     /// Type context populated by sema: typedefs, enum constants, struct layouts,
     /// function typedefs, function pointer typedefs.
     pub type_context: TypeContext,
-    /// Expression type annotations: maps AST Expr node addresses to their
-    /// inferred CTypes. Populated during sema's analyze_expr walk using
+    /// Expression type annotations: maps `ExprId` keys to their inferred
+    /// CTypes. Populated during sema's analyze_expr walk using
     /// ExprTypeChecker. The lowerer consults this as a fallback in
     /// get_expr_ctype() after its own lowering-state-based inference fails.
     pub expr_types: ExprTypeMap,
-    /// Pre-computed constant expression values: maps AST Expr node addresses
-    /// to their compile-time IrConst values. Populated during sema's walk
+    /// Pre-computed constant expression values: maps `ExprId` keys to their
+    /// compile-time IrConst values. Populated during sema's walk
     /// using SemaConstEval (handles float literals, cast chains, sizeof,
     /// binary ops with proper signedness semantics). The lowerer consults
     /// this as an O(1) fast path before its own eval_const_expr.
@@ -734,8 +734,7 @@ impl SemanticAnalyzer {
                 self.analyze_expr(expr);
                 // C11 6.8.4.2: The controlling expression of a switch statement
                 // shall have integer type.
-                let key = expr as *const Expr as usize;
-                if let Some(ctype) = self.result.expr_types.get(&key) {
+                if let Some(ctype) = self.result.expr_types.get(&expr.id()) {
                     if !ctype.is_integer() {
                         let diag = crate::common::error::Diagnostic::error(
                             "switch quantity is not an integer"
@@ -933,7 +932,7 @@ impl SemanticAnalyzer {
     }
 
     /// Infer the CType of an expression via ExprTypeChecker and record it
-    /// in the expr_types annotation map, keyed by the expression's pointer address.
+    /// in the expr_types annotation map, keyed by the expression's `ExprId`.
     fn annotate_expr_type(&mut self, expr: &Expr) {
         let checker = super::type_checker::ExprTypeChecker {
             symbols: &self.symbol_table,
@@ -942,8 +941,7 @@ impl SemanticAnalyzer {
             expr_types: Some(&self.result.expr_types),
         };
         if let Some(ctype) = checker.infer_expr_ctype(expr) {
-            let key = expr as *const Expr as usize;
-            self.result.expr_types.insert(key, ctype);
+            self.result.expr_types.insert(expr.id(), ctype);
         }
     }
 
@@ -959,8 +957,7 @@ impl SemanticAnalyzer {
             expr_types: Some(&self.result.expr_types),
         };
         if let Some(val) = evaluator.eval_const_expr(expr) {
-            let key = expr as *const Expr as usize;
-            self.result.const_values.insert(key, val);
+            self.result.const_values.insert(expr.id(), val);
         }
     }
 

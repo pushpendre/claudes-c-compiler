@@ -1460,8 +1460,7 @@ impl Lowerer {
     /// Returns None if sema did not annotate this expression (e.g., because the
     /// type depends on lowering-specific state like alloca info).
     fn lookup_sema_expr_type(&self, expr: &Expr) -> Option<CType> {
-        let key = expr as *const Expr as usize;
-        self.sema_expr_types.get(&key).cloned()
+        self.sema_expr_types.get(&expr.id()).cloned()
     }
 
     /// Get the full CType of an expression by recursion.
@@ -1476,31 +1475,34 @@ impl Lowerer {
     /// more precise types than sema's symbol-table-only inference.
     pub(super) fn get_expr_ctype(&self, expr: &Expr) -> Option<CType> {
         // For identifiers, always consult the lowerer's local/global state
-        // directly rather than the address-keyed cache.  The cache is keyed
-        // by the raw pointer address of the AST node, and the allocator can
-        // reuse addresses across different expression nodes within the same
-        // function (e.g., a macro-expanded `_old` identifier may be allocated
-        // at the same address previously used by `n`).  The lowerer's
-        // lookup_var_info is O(1) and always reflects the current scope, so
-        // bypassing the cache for identifiers is both correct and cheap.
+        // directly rather than the ExprId-keyed cache.  The allocator can
+        // reuse heap addresses across different expression nodes within the
+        // same function (e.g., a macro-expanded `_old` identifier may be
+        // allocated at the address previously used by `n`), and since ExprId
+        // is currently address-based, this could cause stale hits.  The
+        // lowerer's lookup_var_info is O(1) and always reflects the current
+        // scope, so bypassing the cache for identifiers is both correct and
+        // cheap.
         if let Expr::Identifier(..) = expr {
             let result = self.get_expr_ctype_lowerer(expr);
             if result.is_some() {
                 return result;
             }
-            // Fall back to sema annotation (keyed by the sema_expr_types map
-            // which was populated during the sema pass — its keys are stable
-            // because they were computed before any AST node deallocation).
+            // Fall back to sema annotation (keyed by ExprId from the sema
+            // pass — its keys are stable because they were computed before
+            // any AST node deallocation).
             return self.lookup_sema_expr_type(expr);
         }
 
-        let key = expr as *const Expr as usize;
+        let key = expr.id();
         let disc = std::mem::discriminant(expr);
 
         // Check memoization cache first.
         // Validate discriminant to detect address reuse (ABA): expressions inside
         // TypeSpecifier trees (typeof, _Generic) can share addresses with different
         // Expr variants in the main AST after the TypeSpecifier is dropped.
+        // TODO: Once ExprId uses counter-based IDs instead of pointer addresses,
+        // the discriminant check can be removed entirely.
         if let Some((cached_disc, cached_val)) = self.expr_ctype_cache.borrow().get(&key) {
             if *cached_disc == disc {
                 return cached_val.clone();

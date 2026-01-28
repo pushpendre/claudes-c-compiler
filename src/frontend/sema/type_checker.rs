@@ -56,7 +56,7 @@ pub struct ExprTypeChecker<'a> {
     pub functions: &'a FxHashMap<String, FunctionInfo>,
     /// Pre-computed expression types from bottom-up sema walk (memoization cache).
     /// When set, `infer_expr_ctype` checks this map before recursing.
-    pub expr_types: Option<&'a FxHashMap<usize, CType>>,
+    pub expr_types: Option<&'a FxHashMap<ExprId, CType>>,
 }
 
 impl<'a> ExprTypeChecker<'a> {
@@ -70,8 +70,7 @@ impl<'a> ExprTypeChecker<'a> {
         // the bottom-up sema walk, return it in O(1) instead of re-traversing.
         // This prevents O(2^N) blowup on deep expression chains.
         if let Some(cache) = self.expr_types {
-            let key = expr as *const Expr as usize;
-            if let Some(cached) = cache.get(&key) {
+            if let Some(cached) = cache.get(&expr.id()) {
                 return Some(cached.clone());
             }
         }

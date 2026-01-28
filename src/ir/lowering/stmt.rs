@@ -59,9 +59,11 @@ impl Lowerer {
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
         // Resolve typeof(expr) or __auto_type to a concrete TypeSpecifier.
         // We only resolve the type_spec; we do NOT clone the declarators because
-        // cloning creates new AST node addresses whose expr_ctype_cache entries
-        // become stale when the clone is dropped, poisoning later lookups for
-        // unrelated expressions that reuse those heap addresses.
+        // cloning creates new AST nodes with new ExprIds whose expr_ctype_cache
+        // entries become stale when the clone is dropped, poisoning later lookups
+        // for unrelated expressions that reuse those heap addresses.
+        // TODO: Once ExprId uses counter-based IDs, cloning would produce new
+        // unique IDs and this concern goes away.
         let resolved_type_spec;
         let type_spec = if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_) | TypeSpecifier::AutoType) {
             resolved_type_spec = if matches!(&decl.type_spec, TypeSpecifier::AutoType) {

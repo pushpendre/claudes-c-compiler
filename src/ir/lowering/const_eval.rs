@@ -21,8 +21,7 @@ impl Lowerer {
     /// Returns Some(IrConst) if sema successfully evaluated this expression
     /// at compile time during its pass.
     fn lookup_sema_const(&self, expr: &Expr) -> Option<IrConst> {
-        let key = expr as *const Expr as usize;
-        self.sema_const_values.get(&key).cloned()
+        self.sema_const_values.get(&expr.id()).cloned()
     }
 
     /// Check if an expression tree contains a Sizeof node at any depth.

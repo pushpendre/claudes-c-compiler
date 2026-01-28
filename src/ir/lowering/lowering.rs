@@ -66,12 +66,12 @@ pub struct Lowerer {
     /// reducing the lowerer's need to re-derive type information from the raw AST.
     pub(super) sema_functions: FxHashMap<String, FunctionInfo>,
     /// Expression type annotations from semantic analysis.
-    /// Maps AST Expr node addresses (as usize) to their sema-inferred CTypes.
+    /// Maps `ExprId` keys to their sema-inferred CTypes.
     /// Consulted as a fast O(1) fallback in get_expr_ctype() before the lowerer
     /// does its own (more expensive) type inference using lowering-specific state.
     pub(super) sema_expr_types: ExprTypeMap,
     /// Pre-computed constant expression values from semantic analysis.
-    /// Maps AST Expr node addresses (as usize) to their IrConst values.
+    /// Maps `ExprId` keys to their IrConst values.
     /// Consulted as an O(1) fast path in eval_const_expr() before the lowerer
     /// falls back to its own evaluation (which handles lowering-specific cases
     /// like global addresses, func_state const locals, etc.).
@@ -88,13 +88,16 @@ pub struct Lowerer {
     /// "strerror_r" -> "__xpg_strerror_r". Used to redirect calls/references at IR emission.
     pub(super) asm_label_map: FxHashMap<String, String>,
     /// Memoization cache for get_expr_ctype().
-    /// Maps AST Expr node addresses (as usize) to their resolved CType plus
-    /// the Expr discriminant at insertion time. The discriminant is checked on
-    /// cache hit to detect address reuse (ABA): expressions inside TypeSpecifier
-    /// trees (typeof, _Generic) can share addresses with different Expr variants
-    /// in the main AST, so a stale hit from a prior discriminant must be treated
-    /// as a miss to avoid returning the wrong type.
-    pub(super) expr_ctype_cache: RefCell<FxHashMap<usize, (Discriminant<Expr>, Option<CType>)>>,
+    /// Maps `ExprId` keys to their resolved CType plus the Expr discriminant at
+    /// insertion time. The discriminant is checked on cache hit to detect address
+    /// reuse (ABA): expressions inside TypeSpecifier trees (typeof, _Generic) can
+    /// share addresses with different Expr variants in the main AST, so a stale
+    /// hit from a prior discriminant must be treated as a miss to avoid returning
+    /// the wrong type.
+    ///
+    /// TODO: Once ExprId is backed by a counter-based scheme instead of pointer
+    /// addresses, the ABA discriminant check can be removed entirely.
+    pub(super) expr_ctype_cache: RefCell<FxHashMap<ExprId, (Discriminant<Expr>, Option<CType>)>>,
     /// Diagnostic engine for emitting structured errors and warnings during lowering.
     /// Threaded from the driver through the compilation pipeline so that lowering-phase
     /// diagnostics get the same source location rendering and warning control as

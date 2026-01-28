@@ -31,11 +31,11 @@ use crate::common::fx_hash::FxHashMap;
 
 /// Map from AST expression node identity to its pre-computed compile-time constant.
 ///
-/// Uses the same raw-pointer-address keying strategy as ExprTypeMap. During sema's
-/// AST walk, expressions that can be evaluated at compile time have their IrConst
-/// values stored here. The lowerer consults this map as an O(1) fast path before
-/// falling back to its own eval_const_expr.
-pub type ConstMap = FxHashMap<usize, IrConst>;
+/// Keyed by [`ExprId`], the same type-safe identity key used by `ExprTypeMap`.
+/// During sema's AST walk, expressions that can be evaluated at compile time
+/// have their `IrConst` values stored here. The lowerer consults this map as
+/// an O(1) fast path before falling back to its own `eval_const_expr`.
+pub type ConstMap = FxHashMap<ExprId, IrConst>;
 
 /// Constant expression evaluator using only sema-available state.
 ///
@@ -53,9 +53,9 @@ pub struct SemaConstEval<'a> {
     /// Function signatures for return type resolution in sizeof(expr).
     pub functions: &'a FxHashMap<String, FunctionInfo>,
     /// Pre-computed constant values from bottom-up sema walk (memoization cache).
-    pub const_values: Option<&'a FxHashMap<usize, IrConst>>,
+    pub const_values: Option<&'a FxHashMap<ExprId, IrConst>>,
     /// Pre-computed expression types from bottom-up sema walk.
-    pub expr_types: Option<&'a FxHashMap<usize, CType>>,
+    pub expr_types: Option<&'a FxHashMap<ExprId, CType>>,
 }
 
 impl<'a> SemaConstEval<'a> {
@@ -68,8 +68,7 @@ impl<'a> SemaConstEval<'a> {
         // Memoization: if this expression's constant value was already computed
         // during the bottom-up sema walk, return it in O(1).
         if let Some(cache) = self.const_values {
-            let key = expr as *const Expr as usize;
-            if let Some(cached) = cache.get(&key) {
+            if let Some(cached) = cache.get(&expr.id()) {
                 return Some(cached.clone());
             }
         }
@@ -426,8 +425,7 @@ impl<'a> SemaConstEval<'a> {
     /// Look up the pre-annotated CType for an expression from sema's expr_types map.
     /// This is O(1) and preserves signedness information (e.g. unsigned int from a cast).
     fn lookup_expr_type(&self, expr: &Expr) -> Option<CType> {
-        let key = expr as *const Expr as usize;
-        self.expr_types.and_then(|m| m.get(&key).cloned())
+        self.expr_types.and_then(|m| m.get(&expr.id()).cloned())
     }
 
     /// Derive a CType from an IrConst value.

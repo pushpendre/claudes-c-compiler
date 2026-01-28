@@ -590,6 +590,28 @@ pub enum ForInit {
     Expr(Expr),
 }
 
+/// A type-safe identity key for AST `Expr` nodes, used as a HashMap key for
+/// expression type and constant value caches.
+///
+/// Currently derived from the heap address of the Expr node (`&Expr as *const _
+/// as usize`), which is stable because the AST is allocated once during parsing
+/// and not moved before lowering consumes it.  Wrapping the raw address in a
+/// newtype provides:
+/// - **Type safety**: prevents accidental mixing with other `usize` values.
+/// - **Self-documenting API**: call sites use `expr.id()` instead of a raw cast.
+/// - **Future-proofing**: the underlying representation can be changed to a
+///   counter-based scheme (assigned during parsing) without touching call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExprId(usize);
+
+impl ExprId {
+    /// Create an ExprId from a reference to an Expr node.
+    #[inline]
+    pub fn of(expr: &Expr) -> Self {
+        ExprId(expr as *const Expr as usize)
+    }
+}
+
 /// Expressions.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -730,6 +752,13 @@ pub enum PostfixOp {
 }
 
 impl Expr {
+    /// Returns a type-safe identity key for this expression node.
+    /// Used as a HashMap key for caching expression types and constant values.
+    #[inline]
+    pub fn id(&self) -> ExprId {
+        ExprId::of(self)
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Expr::IntLiteral(_, s) | Expr::UIntLiteral(_, s)
