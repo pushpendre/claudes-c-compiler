@@ -283,6 +283,14 @@ impl Lowerer {
             let var_is_const = decl.is_const() && !da.is_pointer
                 && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
 
+            // Skip emitting storage for alias/weakref declarations. The variable
+            // is still registered in the globals table (line 210) for type lookups,
+            // but no data section entry is needed — the .set directive (emitted from
+            // module.aliases by the backend) handles the symbol binding.
+            if declarator.attrs.alias_target.is_some() {
+                continue;
+            }
+
             self.emitted_global_names.insert(declarator.name.clone());
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),

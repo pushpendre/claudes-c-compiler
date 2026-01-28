@@ -1,0 +1,16 @@
+Fix i686 mode(TI) and __int128 rejection on 32-bit targets
+
+Problem: CCC-i686 silently accepts __attribute__((mode(TI))) and __int128
+on 32-bit targets, while GCC correctly rejects them ("unable to emulate 'TI'"
+and "__int128 is not supported on this target"). This causes libsodium's
+configure script to detect 128-bit integer support and use the fe_51 (64-bit
+field element) code path instead of the correct fe_25_5 (32-bit) path.
+The fe_51 path generates broken 128-bit arithmetic code on i686, causing
+SIGSEGV in Ed25519 sign/verify operations.
+
+Fix:
+1. Reject mode(TI) on 32-bit targets (increment error_count)
+2. Reject __int128/__uint128_t on 32-bit targets
+3. Map mode(word) and mode(pointer) to SI (32-bit) instead of DI on i686
+
+Impact: Fixes libsodium sign and box tests on i686 (7/7 now pass, was 5/7).

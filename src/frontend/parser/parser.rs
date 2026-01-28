@@ -510,6 +510,25 @@ impl Parser {
                                             }
                                         }
                                     }
+                                    TokenKind::Identifier(name) if name == "weakref" || name == "__weakref__" => {
+                                        // weakref("target") is equivalent to weak + alias("target")
+                                        self.attrs.parsing_weak = true;
+                                        self.advance();
+                                        if matches!(self.peek(), TokenKind::LParen) {
+                                            self.advance(); // consume (
+                                            let mut result = String::new();
+                                            while let TokenKind::StringLiteral(s) = self.peek() {
+                                                result.push_str(&s);
+                                                self.advance();
+                                            }
+                                            if !result.is_empty() {
+                                                self.attrs.parsing_alias_target = Some(result);
+                                            }
+                                            if matches!(self.peek(), TokenKind::RParen) {
+                                                self.advance();
+                                            }
+                                        }
+                                    }
                                     TokenKind::Identifier(name) if name == "visibility" || name == "__visibility__" => {
                                         self.advance();
                                         // Parse visibility("hidden"|"default"|"internal"|"protected") - supports string concatenation
