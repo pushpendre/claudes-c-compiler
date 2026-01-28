@@ -1,0 +1,24 @@
+Fix ARM 32-bit shift operations missing sign extension
+======================================================
+
+Problem:
+  On ARM64, when the narrow pass narrows a Shl (or AShr) from I64 to I32,
+  the ARM backend emits `lsl w0, w1, w2` (32-bit) which zero-extends the
+  result to x0. Subsequent 64-bit operations (e.g., AShr I64 by 63 from
+  div_by_const expansion) see the zero-extended value instead of a sign-
+  extended one, producing wrong results for negative numbers.
+
+  Example: `struct.field * 4 / 2` where field=-7 gives 2147483634 instead of -14.
+  This causes PostgreSQL's numeric ln() function to hang on ARM because the
+  local_rscale computation overflows.
+
+Root cause:
+  In codegen.rs emit_int_binop(), the 32-bit path for Add/Sub/Mul includes
+  `sxtw x0, w0` after the operation when the type is signed. But Shl and AShr
+  are missing this sign extension.
+
+Fix:
+  Add `sxtw x0, w0` after `lsl w0, w1, w2` and `asr w0, w1, w2` when the
+  type is signed (i.e., I32 not U32), matching the pattern used by Add/Sub/Mul.
+
+Status: in_progress
