@@ -1,0 +1,18 @@
+Task: Implement __attribute__((weakref("target"))) support
+
+Status: in_progress
+
+Problem:
+The __attribute__((weakref("target"))) attribute is completely unimplemented.
+The parser silently ignores it, causing the declared variable to be emitted as
+a separate zero-initialized static variable instead of being a weak alias for
+the specified target.
+
+This causes test compiler_suite_0059_0087 to fail on all architectures.
+The weakref attribute is semantically equivalent to weak + alias("target").
+
+Fix:
+1. Add "weakref" / "__weakref__" recognition in parser.rs attribute parsing
+2. When encountered, set both parsing_weak = true and parsing_alias_target
+3. The rest of the pipeline (IR lowering + backend emission) already handles
+   weak + alias combinations correctly.

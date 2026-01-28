@@ -73,7 +73,11 @@ impl Lowerer {
                         }
                         // Address of a global variable or function
                         if self.globals.contains_key(name) || self.known_functions.contains(name) {
-                            return Some(GlobalInit::GlobalAddr(name.clone()));
+                            // Apply __asm__("label") redirect (e.g. stat -> stat64)
+                            let resolved = self.asm_label_map.get(name.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| name.clone());
+                            return Some(GlobalInit::GlobalAddr(resolved));
                         }
                         None
                     }
@@ -96,7 +100,15 @@ impl Lowerer {
             // Function name as pointer: void (*fp)(void) = func;
             Expr::Identifier(name, _) => {
                 if self.known_functions.contains(name) {
-                    return Some(GlobalInit::GlobalAddr(name.clone()));
+                    // Apply __asm__("label") linker symbol redirect if present.
+                    // E.g., `stat` declared with __asm__("stat64") should emit "stat64".
+                    // Without this, glibc's __REDIRECT mechanism (used for LFS stat/fstat
+                    // when _FILE_OFFSET_BITS=64) would store the non-redirected symbol
+                    // in global initializers like sqlite's aSyscall[] table.
+                    let resolved = self.asm_label_map.get(name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
+                    return Some(GlobalInit::GlobalAddr(resolved));
                 }
                 // Check static local array names first (they shadow globals)
                 if let Some(ref fs) = self.func_state {

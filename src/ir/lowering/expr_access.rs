@@ -610,7 +610,11 @@ impl Lowerer {
 
         if let Expr::Identifier(name, _) = inner {
             let dest = self.fresh_value();
-            self.emit(Instruction::GlobalAddr { dest, name: name.clone() });
+            // Apply __asm__("label") redirect (e.g. stat -> stat64)
+            let resolved = self.asm_label_map.get(name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+            self.emit(Instruction::GlobalAddr { dest, name: resolved });
             return Operand::Value(dest);
         }
 
