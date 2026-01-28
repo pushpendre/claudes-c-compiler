@@ -1,0 +1,18 @@
+Fix vector-to-scalar and scalar-to-vector cast codegen
+=======================================================
+Status: in_progress
+
+Problem:
+Casting from a vector type (e.g., `(long long)(V2SI){2,2}`) returns the
+alloca stack pointer instead of loading the vector data as the scalar value.
+This is because vectors are represented as IrType::Ptr (pointer to stack slot),
+and the noop check in lower_cast treats vector-ptr-to-integer the same as a
+regular pointer-to-integer cast.
+
+Similarly, casting from scalar to vector (e.g., `(V2SI)(long long)val`) needs
+to store the scalar value into the vector's alloca.
+
+Affected tests (x86): gcc_torture_20050316_1, 20050316_2, 20050316_3, and others
+Affected tests (all arches): vector type related tests
+
+Fix location: src/ir/lowering/expr_access.rs, lower_cast() function
