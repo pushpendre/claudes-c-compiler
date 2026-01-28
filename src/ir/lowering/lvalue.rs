@@ -16,6 +16,12 @@ impl Lowerer {
                 if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     let alloca = info.alloca;
                     let static_global_name = info.static_global_name.clone();
+                    let asm_register = info.asm_register.is_some();
+                    // Local register variables have no addressable storage,
+                    // just like global register variables.
+                    if asm_register {
+                        return None;
+                    }
                     // Static locals: emit fresh GlobalAddr at point of use
                     if let Some(global_name) = static_global_name {
                         let addr = self.fresh_value();

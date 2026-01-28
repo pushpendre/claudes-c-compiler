@@ -1,0 +1,27 @@
+Task: Fix __asm__ label redirect in global initializers and address-of expressions
+
+Problem:
+When a function is declared with __asm__("symbol") (glibc's __REDIRECT mechanism),
+the asm label is correctly applied for direct calls and local identifier expressions,
+but NOT for:
+1. Global/static initializers: (void*)stat in a static array resolves to "stat" not "stat64"
+2. Address-of expressions in lower_address_of: &func uses name directly without redirect
+
+Impact:
+- sqlite3.c defines _FILE_OFFSET_BITS=64, causing glibc to use __REDIRECT to map
+  stat -> stat64, fstat -> fstat64, etc.
+- sqlite stores function pointers in static aSyscall[] array: (sqlite3_syscall_ptr)stat
+- On i686, the non-redirected stat() uses a different struct stat layout (88 bytes)
+  vs stat64 (96 bytes, st_ino at offset 88 instead of 12)
+- This causes fileHasMoved() to read uninitialized memory for st_ino, returning true,
+  which triggers SQLITE_READONLY_DBMOVED error on all INSERT/UPDATE operations
+- 620/622 sqlite tests fail due to this bug
+
+Fix:
+Apply asm_label_map lookup in:
+1. const_eval_global_addr.rs: eval_global_addr_expr() when resolving function names
+2. expr_access.rs: lower_address_of() fallback path for function identifiers
+
+Files:
+- src/ir/lowering/const_eval_global_addr.rs
+- src/ir/lowering/expr_access.rs

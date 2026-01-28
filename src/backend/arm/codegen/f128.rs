@@ -82,6 +82,10 @@ impl F128SoftFloat for ArmCodegen {
         self.operand_to_x0(op);
         self.state.emit("    fmov d0, x0");
         self.state.emit("    bl __extenddftf2");
+        // __extenddftf2 is a function call that clobbers x0 (and all
+        // caller-saved registers). Invalidate the cache so subsequent
+        // operand_to_x0 calls for the same value won't skip the reload.
+        self.state.reg_cache.invalidate_all();
     }
 
     fn f128_move_arg1_to_arg2(&mut self) {

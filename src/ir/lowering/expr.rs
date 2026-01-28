@@ -257,6 +257,15 @@ impl Lowerer {
             let is_complex = info.c_type.as_ref().map_or(false, |ct| ct.is_complex());
             let is_vector = info.c_type.as_ref().map_or(false, |ct| ct.is_vector());
             let static_global_name = info.static_global_name.clone();
+            let asm_register = info.asm_register.clone();
+
+            // Local register variable: read the hardware register directly via inline asm,
+            // just like global register variables. E.g.:
+            //   register unsigned long tp __asm__("tp");
+            //   return tp;  // must read the actual tp hardware register
+            if let Some(ref reg_name) = asm_register {
+                return self.read_global_register(reg_name, ty);
+            }
 
             if let Some(global_name) = static_global_name {
                 let addr = self.fresh_value();

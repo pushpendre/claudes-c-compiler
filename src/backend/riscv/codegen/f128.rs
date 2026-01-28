@@ -67,6 +67,10 @@ impl F128SoftFloat for RiscvCodegen {
         self.operand_to_t0(op);
         self.state.emit("    fmv.d.x fa0, t0");
         self.state.emit("    call __extenddftf2");
+        // __extenddftf2 is a function call that clobbers caller-saved regs
+        // (including t0). Invalidate the cache so subsequent operand loads
+        // for the same value won't skip the reload.
+        self.state.reg_cache.invalidate_all();
     }
 
     fn f128_move_arg1_to_arg2(&mut self) {
