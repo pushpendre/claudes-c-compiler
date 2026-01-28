@@ -1,0 +1,25 @@
+Task: Fix RISC-V inline asm large stack offset (>2047) handling
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+When a function has a large stack frame (>2048 bytes), inline asm operands
+that reference stack slots with offsets exceeding the RISC-V 12-bit signed
+immediate range (-2048..2047) produce invalid assembly instructions.
+
+Three code paths in asm_emitter.rs emit raw `ld reg, offset(s0)` or
+`sd reg, offset(s0)` without checking if the offset fits in 12 bits:
+
+1. resolve_memory_operand (line 93): loads pointer from stack slot for
+   non-alloca memory operands
+2. store_output_from_reg (lines 250, 263): loads pointer through stack
+   slot for non-alloca FP/GP output stores
+
+Additionally, format_operand in inline_asm.rs (line 70) produces
+`{offset}(s0)` for Memory operand template substitution, which is
+invalid for large offsets.
+
+This prevents compilation of kernel/bpf/hashtab.c for RISC-V.
+
+Fix: Use emit_load_from_s0/emit_store_to_s0 which already handle large
+offsets via `li t6, offset; add t6, s0, t6; ld/sd reg, 0(t6)`.
