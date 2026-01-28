@@ -24,4 +24,4 @@ Results:
 - i686 unit tests: 529/531 (99.6%) - same as before, no regressions
 - x86-64 unit tests: 618/620 (99.7%) - same as before, no regressions
 
-Status: in_progress
+Status: completed
