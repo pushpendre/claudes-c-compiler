@@ -1,0 +1,25 @@
+Task: Add Structured Diagnostic Infrastructure (DiagnosticEngine)
+
+Status: in_progress
+
+Description:
+Currently error reporting is ad-hoc across all compiler components:
+- Parser: eprintln! + error_count counter
+- Sema: errors: Vec<String> + bare eprintln! for warnings (no locations)
+- Preprocessor: errors: Vec<String> + bare eprintln! for warnings (no locations)
+
+Plan:
+1. Create a DiagnosticEngine in common/error.rs with:
+   - Diagnostic struct: severity, message, span, optional notes
+   - Severity enum: Error, Warning, Note
+   - Source snippet rendering using SourceManager::get_source_line()
+   - GCC-compatible output format: "file:line:col: error: message"
+   - error_count(), warning_count(), has_errors() helpers
+
+2. Wire it into all compiler phases:
+   - Parser: replace eprintln! + error_count with engine.emit()
+   - Sema: replace errors Vec<String> and bare eprintln! with engine.emit()
+   - Preprocessor: replace errors Vec and bare eprintln! with engine.emit()
+   - Driver: create engine, thread through phases, check has_errors()
+
+3. Add source snippet rendering with caret/underline under error locations
