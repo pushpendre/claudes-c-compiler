@@ -4,6 +4,19 @@
 //! with source locations and renders them in GCC-compatible format with
 //! optional source snippet display.
 //!
+//! # Warning control
+//! The engine supports GCC-compatible warning flags:
+//! - `-Werror`: promote all warnings to errors
+//! - `-Werror=<name>`: promote a specific warning to an error
+//! - `-Wno-error=<name>`: demote a specific warning back from error
+//! - `-Wall`: enable standard warning set
+//! - `-Wextra`: enable additional warnings
+//! - `-W<name>`: enable a specific warning
+//! - `-Wno-<name>`: disable a specific warning
+//!
+//! Flags are processed left-to-right, so `-Wall -Wno-unused-variable` enables
+//! all warnings except unused-variable.
+//!
 //! # Output format
 //! ```text
 //! file.c:10:5: error: expected ';', got '}'
@@ -12,6 +25,223 @@
 //! ```
 
 use crate::common::source::{SourceManager, Span};
+
+/// Categories of warnings, matching GCC's -W<name> flag names.
+///
+/// Each variant corresponds to a `-W<name>` flag. For example,
+/// `WarningKind::ImplicitFunctionDeclaration` maps to
+/// `-Wimplicit-function-declaration`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WarningKind {
+    /// An undeclared identifier was used.
+    /// Not a standard GCC warning category; always enabled.
+    Undeclared,
+    /// A function was called without a prior declaration (C89 implicit int).
+    /// GCC flag: -Wimplicit-function-declaration
+    ImplicitFunctionDeclaration,
+    /// A `#warning` preprocessor directive was encountered.
+    /// GCC flag: -Wcpp
+    Cpp,
+    // Future categories (add as warnings are implemented):
+    // UnusedVariable,         // -Wunused-variable
+    // UnusedFunction,         // -Wunused-function
+    // UnusedParameter,        // -Wunused-parameter
+    // ReturnType,             // -Wreturn-type
+    // UninitializedVariable,  // -Wuninitialized
+    // ImplicitConversion,     // -Wimplicit-int-conversion
+    // SignCompare,            // -Wsign-compare
+    // Parentheses,            // -Wparentheses
+    // Pointer,                // -Wpointer-sign
+}
+
+impl WarningKind {
+    /// The GCC-compatible flag name for this warning (without the -W prefix).
+    pub fn flag_name(self) -> &'static str {
+        match self {
+            WarningKind::Undeclared => "undeclared",
+            WarningKind::ImplicitFunctionDeclaration => "implicit-function-declaration",
+            WarningKind::Cpp => "cpp",
+        }
+    }
+
+    /// Parse a warning flag name (without the -W prefix) into a WarningKind.
+    /// Returns None for unrecognized names (which are silently ignored, matching GCC).
+    pub fn from_flag_name(name: &str) -> Option<Self> {
+        match name {
+            "undeclared" => Some(WarningKind::Undeclared),
+            "implicit-function-declaration" => Some(WarningKind::ImplicitFunctionDeclaration),
+            "implicit" => Some(WarningKind::ImplicitFunctionDeclaration),
+            "cpp" => Some(WarningKind::Cpp),
+            _ => None,
+        }
+    }
+
+    /// All warning kinds that are enabled by -Wall.
+    pub fn wall_set() -> &'static [WarningKind] {
+        &[
+            WarningKind::ImplicitFunctionDeclaration,
+            WarningKind::Cpp,
+            // WarningKind::Undeclared is always enabled, not gated on -Wall
+        ]
+    }
+
+    /// All warning kinds that are enabled by -Wextra (in addition to -Wall).
+    pub fn wextra_set() -> &'static [WarningKind] {
+        // Currently no extra warnings beyond -Wall.
+        &[]
+    }
+
+    /// All known warning kinds.
+    fn all() -> &'static [WarningKind] {
+        &[
+            WarningKind::Undeclared,
+            WarningKind::ImplicitFunctionDeclaration,
+            WarningKind::Cpp,
+        ]
+    }
+}
+
+/// Configuration for warning behavior: which warnings are enabled,
+/// and which are promoted to errors.
+///
+/// Processed from CLI flags in left-to-right order.
+#[derive(Debug, Clone)]
+pub struct WarningConfig {
+    /// Per-warning enabled state. Warnings not in this set are suppressed.
+    enabled: std::collections::HashSet<WarningKind>,
+    /// Per-warning error promotion. Warnings in this set are emitted as errors.
+    errors: std::collections::HashSet<WarningKind>,
+    /// Global -Werror flag: promote ALL warnings to errors.
+    pub werror_all: bool,
+}
+
+impl WarningConfig {
+    /// Create a default config with all warnings enabled and none promoted to errors.
+    pub fn new() -> Self {
+        let mut enabled = std::collections::HashSet::new();
+        for &kind in WarningKind::all() {
+            enabled.insert(kind);
+        }
+        Self {
+            enabled,
+            errors: std::collections::HashSet::new(),
+            werror_all: false,
+        }
+    }
+
+    /// Enable a specific warning.
+    pub fn enable(&mut self, kind: WarningKind) {
+        self.enabled.insert(kind);
+    }
+
+    /// Disable a specific warning (-Wno-<name>).
+    pub fn disable(&mut self, kind: WarningKind) {
+        self.enabled.remove(&kind);
+    }
+
+    /// Enable all -Wall warnings.
+    pub fn enable_wall(&mut self) {
+        for &kind in WarningKind::wall_set() {
+            self.enabled.insert(kind);
+        }
+    }
+
+    /// Enable all -Wextra warnings (superset of -Wall).
+    pub fn enable_wextra(&mut self) {
+        self.enable_wall();
+        for &kind in WarningKind::wextra_set() {
+            self.enabled.insert(kind);
+        }
+    }
+
+    /// Set global -Werror (all warnings become errors).
+    pub fn set_werror_all(&mut self, val: bool) {
+        self.werror_all = val;
+    }
+
+    /// Promote a specific warning to error (-Werror=<name>).
+    pub fn set_werror(&mut self, kind: WarningKind) {
+        self.errors.insert(kind);
+        // -Werror=<name> also implicitly enables the warning
+        self.enabled.insert(kind);
+    }
+
+    /// Demote a specific warning from error (-Wno-error=<name>).
+    pub fn clear_werror(&mut self, kind: WarningKind) {
+        self.errors.remove(&kind);
+    }
+
+    /// Check if a warning of the given kind should be emitted at all.
+    pub fn is_enabled(&self, kind: WarningKind) -> bool {
+        self.enabled.contains(&kind)
+    }
+
+    /// Check if a warning of the given kind should be promoted to an error.
+    pub fn is_error(&self, kind: WarningKind) -> bool {
+        self.werror_all || self.errors.contains(&kind)
+    }
+
+    /// Process a single -W flag argument (the part after -W).
+    /// Returns true if the flag was recognized, false if unknown (silently ignored).
+    pub fn process_flag(&mut self, flag: &str) -> bool {
+        match flag {
+            "error" => {
+                self.werror_all = true;
+                true
+            }
+            "all" => {
+                self.enable_wall();
+                true
+            }
+            "extra" => {
+                self.enable_wextra();
+                true
+            }
+            _ if flag.starts_with("error=") => {
+                let name = &flag[6..];
+                if let Some(kind) = WarningKind::from_flag_name(name) {
+                    self.set_werror(kind);
+                    true
+                } else {
+                    false // unknown warning name, silently ignored
+                }
+            }
+            _ if flag.starts_with("no-error=") => {
+                let name = &flag[9..];
+                if let Some(kind) = WarningKind::from_flag_name(name) {
+                    self.clear_werror(kind);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ if flag.starts_with("no-") => {
+                let name = &flag[3..];
+                if let Some(kind) = WarningKind::from_flag_name(name) {
+                    self.disable(kind);
+                    true
+                } else {
+                    false // unknown warning name, silently ignored
+                }
+            }
+            _ => {
+                // Try as a positive warning name: -W<name> enables it
+                if let Some(kind) = WarningKind::from_flag_name(flag) {
+                    self.enable(kind);
+                    true
+                } else {
+                    false // unknown, silently ignored (matching GCC behavior)
+                }
+            }
+        }
+    }
+}
+
+impl Default for WarningConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Severity level for a diagnostic message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +270,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub span: Option<Span>,
+    /// Optional warning category for filtering and -Werror promotion.
+    pub warning_kind: Option<WarningKind>,
     /// Optional follow-up notes providing additional context.
     pub notes: Vec<Diagnostic>,
 }
@@ -51,16 +283,29 @@ impl Diagnostic {
             severity: Severity::Error,
             message: message.into(),
             span: None,
+            warning_kind: None,
             notes: Vec::new(),
         }
     }
 
-    /// Create a new warning diagnostic.
+    /// Create a new warning diagnostic with a category.
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
             message: message.into(),
             span: None,
+            warning_kind: None,
+            notes: Vec::new(),
+        }
+    }
+
+    /// Create a new warning diagnostic with a specific kind for filtering.
+    pub fn warning_with_kind(message: impl Into<String>, kind: WarningKind) -> Self {
+        Self {
+            severity: Severity::Warning,
+            message: message.into(),
+            span: None,
+            warning_kind: Some(kind),
             notes: Vec::new(),
         }
     }
@@ -71,6 +316,7 @@ impl Diagnostic {
             severity: Severity::Note,
             message: message.into(),
             span: None,
+            warning_kind: None,
             notes: Vec::new(),
         }
     }
@@ -98,22 +344,40 @@ impl Diagnostic {
 ///
 /// Diagnostics are printed to stderr immediately on emit, matching GCC
 /// behavior where errors appear as soon as they are discovered.
+///
+/// Warning filtering and -Werror promotion are controlled by the
+/// `WarningConfig` set on the engine.
 pub struct DiagnosticEngine {
     error_count: usize,
     warning_count: usize,
+    /// Warning configuration: controls which warnings are enabled and
+    /// which are promoted to errors.
+    warning_config: WarningConfig,
     /// Reference to the source manager for span resolution and snippet display.
     /// Set after the preprocessing/lexing phase creates the SourceManager.
     source_manager: Option<SourceManager>,
 }
 
 impl DiagnosticEngine {
-    /// Create a new diagnostic engine with no source manager.
+    /// Create a new diagnostic engine with no source manager and default warning config.
     pub fn new() -> Self {
         Self {
             error_count: 0,
             warning_count: 0,
+            warning_config: WarningConfig::new(),
             source_manager: None,
         }
+    }
+
+    /// Set the warning configuration (parsed from CLI flags).
+    pub fn set_warning_config(&mut self, config: WarningConfig) {
+        self.warning_config = config;
+    }
+
+    /// Get a reference to the warning configuration.
+    #[allow(dead_code)]
+    pub fn warning_config(&self) -> &WarningConfig {
+        &self.warning_config
     }
 
     /// Set the source manager for span resolution and snippet display.
@@ -131,13 +395,73 @@ impl DiagnosticEngine {
         self.source_manager.as_ref()
     }
 
-    /// Emit a diagnostic: print it to stderr and update counts.
+    /// Emit a diagnostic: apply warning filtering/promotion, print to stderr,
+    /// and update counts.
+    ///
+    /// For warnings with a `WarningKind`:
+    /// - If the warning is disabled in the config, it is silently suppressed.
+    /// - If -Werror or -Werror=<name> applies, it is promoted to an error.
+    /// - The GCC-style `[-W<name>]` suffix is appended to the message.
     pub fn emit(&mut self, diag: &Diagnostic) {
-        self.render_diagnostic(diag);
         match diag.severity {
-            Severity::Error => self.error_count += 1,
-            Severity::Warning => self.warning_count += 1,
-            Severity::Note => {} // notes don't count separately
+            Severity::Warning => {
+                if let Some(kind) = diag.warning_kind {
+                    // Check if this warning category is enabled
+                    if !self.warning_config.is_enabled(kind) {
+                        return; // suppressed by -Wno-<name>
+                    }
+
+                    // Check if this warning should be promoted to an error
+                    if self.warning_config.is_error(kind) {
+                        // Promote: render as error with [-Werror=<name>] suffix
+                        let promoted = Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("{} [-Werror={}]", diag.message, kind.flag_name()),
+                            span: diag.span,
+                            warning_kind: diag.warning_kind,
+                            notes: diag.notes.clone(),
+                        };
+                        self.render_diagnostic(&promoted);
+                        self.error_count += 1;
+                        return;
+                    }
+
+                    // Render as warning with [-W<name>] suffix
+                    let annotated = Diagnostic {
+                        severity: Severity::Warning,
+                        message: format!("{} [-W{}]", diag.message, kind.flag_name()),
+                        span: diag.span,
+                        warning_kind: diag.warning_kind,
+                        notes: diag.notes.clone(),
+                    };
+                    self.render_diagnostic(&annotated);
+                    self.warning_count += 1;
+                } else {
+                    // Warning without a kind: always emit, subject to global -Werror
+                    if self.warning_config.werror_all {
+                        let promoted = Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("{} [-Werror]", diag.message),
+                            span: diag.span,
+                            warning_kind: None,
+                            notes: diag.notes.clone(),
+                        };
+                        self.render_diagnostic(&promoted);
+                        self.error_count += 1;
+                    } else {
+                        self.render_diagnostic(diag);
+                        self.warning_count += 1;
+                    }
+                }
+            }
+            Severity::Error => {
+                self.render_diagnostic(diag);
+                self.error_count += 1;
+            }
+            Severity::Note => {
+                self.render_diagnostic(diag);
+                // notes don't count separately
+            }
         }
     }
 
@@ -165,17 +489,29 @@ impl DiagnosticEngine {
         self.emit(&diag);
     }
 
-    /// Returns true if any errors have been emitted.
+    /// Emit a categorized warning with a message, span, and kind.
+    pub fn warning_with_kind(&mut self, message: impl Into<String>, span: Span, kind: WarningKind) {
+        let diag = Diagnostic::warning_with_kind(message, kind).with_span(span);
+        self.emit(&diag);
+    }
+
+    /// Emit a categorized warning with just a message (no span).
+    pub fn warning_with_kind_no_span(&mut self, message: impl Into<String>, kind: WarningKind) {
+        let diag = Diagnostic::warning_with_kind(message, kind);
+        self.emit(&diag);
+    }
+
+    /// Returns true if any errors have been emitted (including promoted warnings).
     pub fn has_errors(&self) -> bool {
         self.error_count > 0
     }
 
-    /// Number of errors emitted so far.
+    /// Number of errors emitted so far (including promoted warnings).
     pub fn error_count(&self) -> usize {
         self.error_count
     }
 
-    /// Number of warnings emitted so far.
+    /// Number of warnings emitted so far (excludes promoted warnings).
     pub fn warning_count(&self) -> usize {
         self.warning_count
     }

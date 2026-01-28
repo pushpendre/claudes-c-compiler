@@ -162,8 +162,15 @@ fn real_main() {
                 // Other -Wp, flags are silently ignored
             }
 
-            // Warning flags (ignored for now)
-            arg if arg.starts_with("-W") => {}
+            // Warning flags: -Werror, -Wall, -Wextra, -Wno-*, -Werror=*, -W<name>
+            // Processed left-to-right into driver.warning_config to match GCC semantics.
+            // Unrecognized warning names are silently ignored (matching GCC behavior).
+            arg if arg.starts_with("-W") => {
+                let flag = &arg[2..];
+                if !flag.is_empty() {
+                    driver.warning_config.process_flag(flag);
+                }
+            }
 
             // Preprocessor defines: -DFOO or -DFOO=bar or -D FOO
             "-D" => {

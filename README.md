@@ -38,6 +38,8 @@ ccc -E input.c              # Preprocess only
 ccc -O2 -o output input.c   # Optimize (O0-O3)
 ccc -g -o output input.c    # Debug info
 ccc -DFOO=1 -Iinclude/ input.c
+ccc -Werror -Wall input.c    # Warning control
+ccc -Werror=implicit-function-declaration input.c
 ccc -x c -E -                # Read from stdin
 
 # Build system integration (reports as GCC 6.5 for compatibility)

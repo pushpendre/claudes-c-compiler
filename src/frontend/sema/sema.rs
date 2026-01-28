@@ -791,7 +791,10 @@ impl SemanticAnalyzer {
                     && name != "__func__" && name != "__FUNCTION__"
                     && name != "__PRETTY_FUNCTION__"
                 {
-                    self.diagnostics.warning_no_span(format!("'{}' undeclared", name));
+                    self.diagnostics.warning_with_kind_no_span(
+                        format!("'{}' undeclared", name),
+                        crate::common::error::WarningKind::Undeclared,
+                    );
                 }
             }
             Expr::FunctionCall(callee, args, _) => {
@@ -803,7 +806,10 @@ impl SemanticAnalyzer {
                         && self.symbol_table.lookup(name).is_none()
                     {
                         // Implicit function declaration (C89 style) - register it
-                        self.diagnostics.warning_no_span(format!("implicit declaration of function '{}'", name));
+                        self.diagnostics.warning_with_kind_no_span(
+                            format!("implicit declaration of function '{}'", name),
+                            crate::common::error::WarningKind::ImplicitFunctionDeclaration,
+                        );
                         let func_info = FunctionInfo {
                             name: name.clone(),
                             return_type: CType::Int, // implicit return int

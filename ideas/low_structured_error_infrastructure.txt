@@ -9,15 +9,24 @@ COMPLETED (2026-01-28):
 - Source snippet rendering with caret/underline using SourceManager::get_source_line()
 - GCC-compatible output format: "file:line:col: error: message"
 
+COMPLETED (2026-01-28):
+- Added WarningKind enum with categorized warnings (Undeclared, ImplicitFunctionDeclaration, Cpp)
+- Added WarningConfig for per-warning enable/disable and error promotion
+- Implemented -Werror (global), -Werror=<name>, -Wno-error=<name> for selective promotion
+- Implemented -Wall, -Wextra, -W<name>, -Wno-<name> for warning control
+- Left-to-right flag processing matching GCC semantics
+- GCC-style [-W<name>] and [-Werror=<name>] suffixes on diagnostic messages
+- Updated sema and preprocessor warning sites with WarningKind tags
+- Wired WarningConfig from CLI through Driver to DiagnosticEngine
+
 REMAINING FOLLOW-UPS:
 1. Add spans to sema errors/warnings (currently use error_no_span/warning_no_span)
 2. Add spans to preprocessor errors (#error directives)
 3. Wire DiagnosticEngine into IR lowering phase (standalone eprintln! with no buffering)
-4. Add -Werror support (treat warnings as errors)
-5. Add -Wall, -Wno-* flag granularity for warning categories
-6. Add error codes (like GCC's -Werror=... or Clang's -W...)
-7. Remove the legacy `errors: Vec<String>` from sema (currently kept for backward compat)
-8. Consider adding "note:" follow-up messages for context (e.g., "previous declaration was here")
+4. Add more WarningKind categories as compiler implements more warnings
+   (UnusedVariable, ReturnType, SignCompare, ImplicitConversion, etc.)
+5. Remove the legacy `errors: Vec<String>` from sema (currently kept for backward compat)
+6. Consider adding "note:" follow-up messages for context (e.g., "previous declaration was here")
 
 Key files:
 - src/common/error.rs (DiagnosticEngine, Diagnostic, Severity)

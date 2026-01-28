@@ -1,5 +1,5 @@
 use crate::backend::Target;
-use crate::common::error::DiagnosticEngine;
+use crate::common::error::{DiagnosticEngine, WarningConfig};
 use crate::common::source::SourceManager;
 use crate::frontend::preprocessor::Preprocessor;
 use crate::frontend::lexer::Lexer;
@@ -133,6 +133,10 @@ pub struct Driver {
     /// Macro undefinitions from -U flags. These need to be forwarded when
     /// delegating preprocessing to gcc (e.g., -Uriscv for kernel linker scripts).
     pub undef_macros: Vec<String>,
+    /// Warning configuration parsed from -W flags. Controls which warnings are
+    /// enabled, disabled, or promoted to errors. Processed left-to-right from
+    /// the command line to match GCC semantics.
+    pub warning_config: WarningConfig,
 }
 
 impl Driver {
@@ -175,6 +179,7 @@ impl Driver {
             suppress_line_markers: false,
             nostdinc: false,
             undef_macros: Vec::new(),
+            warning_config: WarningConfig::new(),
         }
     }
 
@@ -735,10 +740,15 @@ impl Driver {
 
         // Create diagnostic engine for structured error/warning reporting
         let mut diagnostics = DiagnosticEngine::new();
+        diagnostics.set_warning_config(self.warning_config.clone());
 
-        // Emit preprocessor warnings through diagnostic engine
+        // Emit preprocessor warnings through diagnostic engine with Cpp kind
+        // so they can be controlled via -Wcpp / -Wno-cpp / -Werror=cpp
         for warn in preprocessor.warnings() {
-            diagnostics.warning_no_span(warn.clone());
+            diagnostics.warning_with_kind_no_span(
+                warn.clone(),
+                crate::common::error::WarningKind::Cpp,
+            );
         }
 
         // Check for #error directives
@@ -798,6 +808,13 @@ impl Driver {
         let diagnostics = sema.take_diagnostics();
         let sema_result = sema.into_result();
         if time_phases { eprintln!("[TIME] sema: {:.3}s", t3.elapsed().as_secs_f64()); }
+
+        // Check for warnings promoted to errors by -Werror / -Werror=<name>.
+        // The sema pass may have returned Ok (no hard errors), but the diagnostic
+        // engine may have accumulated promoted-warning-errors that should stop compilation.
+        if diagnostics.has_errors() {
+            return Err(format!("{} error(s) (warnings promoted by -Werror)", diagnostics.error_count()));
+        }
 
         // Log diagnostic summary if there were any warnings
         if self.verbose && diagnostics.warning_count() > 0 {
