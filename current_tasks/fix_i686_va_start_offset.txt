@@ -1,0 +1,20 @@
+Task: Fix i686 va_start named parameter offset computation
+Status: in_progress
+Started: 2026-01-28
+
+Problem:
+emit_va_start on i686 always set va_list to 8(%ebp), ignoring the size of
+named parameters. This caused variadic functions to read arguments from
+the wrong stack location (overlapping with named parameters).
+
+For example, `void foo(double i, ...)` has a named double (8 bytes) at
+8(%ebp), so variadic args start at 16(%ebp), not 8(%ebp).
+
+Fix:
+1. Added total_stack_bytes field to ParamClassification to capture the
+   final stack_offset from classify_params_full (the exact byte count
+   of all named parameters).
+2. Added va_named_stack_bytes field to I686Codegen, computed during
+   calculate_stack_space for variadic functions.
+3. Fixed emit_va_start to use leal (8 + va_named_stack_bytes)(%ebp)
+   instead of hardcoded leal 8(%ebp).
