@@ -9,26 +9,42 @@ handles every C language construct. The `mem2reg` pass later promotes allocas to
 |---|---|
 | `definitions.rs` | Shared data structures: `VarInfo`, `LocalInfo`, `GlobalInfo`, `DeclAnalysis`, `LValue`, `SwitchFrame`, `FuncSig`, `FunctionMeta`, `ParamKind`, `IrParamBuildResult` |
 | `func_state.rs` | `FunctionBuildState` (per-function build state) and `FuncScopeFrame` (undo-log scope tracking for locals/statics/consts) |
-| `lowering.rs` | `Lowerer` struct, `lower()` entry point, `lower_function` pipeline, `DeclAnalysis` computation, IR emission helpers |
-| `stmt.rs` | Statement lowering: thin `lower_stmt` dispatcher delegates to per-statement helpers (`lower_if_stmt`, `lower_while_stmt`, `lower_switch_stmt`, etc.), `lower_local_decl`, control flow, inline asm |
+| `func_lowering.rs` | Function lowering pipeline orchestration |
+| `lowering.rs` | `Lowerer` struct, `lower()` entry point, `DeclAnalysis` computation, IR emission helpers |
+| `stmt.rs` | Statement lowering: thin `lower_stmt` dispatcher delegates to per-statement helpers |
 | `stmt_init.rs` | Local variable init helpers: expr-init, list-init, extern/func-decl handling, array init dispatch |
 | `stmt_return.rs` | Return statement: sret, two-reg struct, complex decomposition, scalar returns |
-| `struct_init.rs` | Struct/union initializer list lowering (`emit_struct_init`): field dispatch loop, per-field-type handlers for nested structs, arrays, complex, bitfields, scalars, designated inits |
+| `stmt_switch.rs` | Switch statement lowering |
+| `stmt_control_flow.rs` | Control flow lowering (if/while/for/goto/labels) |
+| `stmt_asm.rs` | Inline assembly lowering |
+| `struct_init.rs` | Struct/union initializer list lowering (`emit_struct_init`): field dispatch loop, per-field-type handlers |
 | `expr.rs` | Expression lowering: binary/unary ops, casts, ternary, sizeof, pointer arithmetic |
+| `expr_ops.rs` | Binary/unary operator lowering |
+| `expr_access.rs` | Member access (struct/union field) lowering |
 | `expr_builtins.rs` | `__builtin_*` intrinsics (fpclassify, clz, ctz, bswap, popcount, etc.) |
+| `expr_builtins_intrin.rs` | Builtin intrinsic helpers |
+| `expr_builtins_overflow.rs` | Overflow builtins (`__builtin_add_overflow`, etc.) |
+| `expr_builtins_fpclass.rs` | FP classification builtins |
 | `expr_atomics.rs` | `__atomic_*` and `__sync_*` operations via table-driven dispatch |
 | `expr_calls.rs` | Function call lowering with ABI handling (sret, complex args, struct passing) |
 | `expr_assign.rs` | Assignment/compound-assign, bitfield read-modify-write, type promotions |
 | `expr_types.rs` | Expression type inference (`get_expr_type`, `expr_ctype`) |
 | `lvalue.rs` | L-value resolution and array address computation |
 | `types.rs` | `TypeSpecifier` to `IrType`/`CType`, sizeof/alignof |
+| `types_ctype.rs` | CType utility functions |
+| `types_seed.rs` | Type seed helpers |
 | `structs.rs` | Struct/union layout cache, field offset resolution |
 | `complex.rs` | `_Complex` arithmetic, assignment, and conversions |
+| `global_decl.rs` | Global declaration lowering |
 | `global_init.rs` | Global initializer dispatch: routes to byte or compound path based on pointer content |
 | `global_init_bytes.rs` | Byte-level global init serialization; shared `drill_designators` for nested designator resolution |
 | `global_init_compound.rs` | Relocation-aware global init for structs/arrays containing pointer fields |
+| `global_init_compound_ptrs.rs` | Compound pointer handling for global init |
+| `global_init_compound_struct.rs` | Compound struct handling for global init |
 | `global_init_helpers.rs` | Shared utilities for the global init subsystem (designator inspection, field resolution, init classification) |
 | `const_eval.rs` | Compile-time constant expression evaluation |
+| `const_eval_global_addr.rs` | Global address constant evaluation |
+| `const_eval_init_size.rs` | Initializer size constant evaluation |
 | `pointer_analysis.rs` | Tracks expressions producing struct addresses vs packed data |
 | `ref_collection.rs` | Pre-pass to collect referenced static/extern symbols |
 

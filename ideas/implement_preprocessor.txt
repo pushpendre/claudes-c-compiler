@@ -1,6 +1,0 @@
-Remaining preprocessor work:
-- Complete variadic macro support (named variadic params, ##__VA_ARGS__ GNU extension)
-- _Pragma operator
-- Handle __has_attribute properly (return correct values for common attributes)
-  Currently we define it as a macro returning 0, but GCC supports many attributes
-  and glibc headers check for specific ones.

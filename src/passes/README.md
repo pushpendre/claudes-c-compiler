@@ -16,6 +16,7 @@ SSA-based optimization passes that improve the IR before code generation.
 - **iv_strength_reduce.rs** - Loop induction variable strength reduction: replaces expensive per-iteration multiply/shift-based array index computations (`GEP(base, iv * stride)`) with pointer induction variables that increment by stride each iteration (`ptr += stride`). Detects basic IVs (phi + add with cast lookthrough for C integer promotion), finds derived expressions (mul/shl of IV used in GEP offsets), and replaces them with pointer phi nodes. Run after LICM so loop-invariant bases are already in preheaders
 - **simplify.rs** - Algebraic simplification: identity removal (`x + 0` -> `x`), strength reduction (`x * 2` -> `x << 1`), boolean simplification, math call optimization (`sqrt`/`fabs` -> hardware intrinsics, `pow(x,2)` -> `x*x`, `pow(x,0.5)` -> `sqrt`). Float-unsafe simplifications (e.g., `x + 0`, `x * 0`, `x - x`) are restricted to integer types to preserve IEEE 754 semantics
 - **div_by_const.rs** - Division by constant strength reduction: replaces div/idiv by constants with multiply-and-shift sequences
+- **inline.rs** - Function inlining: always_inline, small static inline, and small static (non-inline) functions. See Phase 0 below for details
 
 ## Pass Pipeline
 

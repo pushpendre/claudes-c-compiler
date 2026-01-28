@@ -6,8 +6,8 @@ Orchestrates the compilation pipeline from command-line arguments through to fin
 
 - Parse GCC-compatible command-line flags (`-o`, `-S`, `-c`, `-E`, `-P`, `-D`, `-I`, `-O`, `-g`, etc.)
 - Determine compilation mode (preprocess-only, assembly, object, full executable)
-- Chain together: preprocessor → lexer → parser → sema → lowering → optimization → codegen → assembler → linker
-- Select target architecture based on binary name (ccc-arm, ccc-riscv, or default x86)
+- Chain together: preprocessor -> lexer -> parser -> sema -> lowering -> optimization -> codegen -> assembler -> linker
+- Select target architecture based on binary name (ccc-arm/ccc-aarch64, ccc-riscv, ccc-i686/ccc-i386, or default x86-64)
 
 ## CLI Compatibility
 
