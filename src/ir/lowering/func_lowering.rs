@@ -81,7 +81,8 @@ impl Lowerer {
         self.lower_compound_stmt(&func.body);
 
         // Step 7: Finalize
-        self.finalize_function(func, return_type, param_info.params);
+        let uses_sret = param_info.uses_sret;
+        self.finalize_function(func, return_type, param_info.params, uses_sret);
     }
 
     /// Compute the IR return type for a function, applying ABI overrides.
@@ -463,7 +464,7 @@ impl Lowerer {
     }
 
     /// Finalize a function: add implicit return, build IrFunction, push to module.
-    fn finalize_function(&mut self, func: &FunctionDef, return_type: IrType, params: Vec<IrParam>) {
+    fn finalize_function(&mut self, func: &FunctionDef, return_type: IrType, params: Vec<IrParam>, uses_sret: bool) {
         if !self.func_mut().instrs.is_empty() || self.func_mut().blocks.is_empty()
            || !matches!(self.func_mut().blocks.last().map(|b| &b.terminator), Some(Terminator::Return(_)))
         {
@@ -519,6 +520,7 @@ impl Lowerer {
             is_used: func.attrs.is_used(),
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,
+            uses_sret,
         };
         self.module.functions.push(ir_func);
         self.pop_scope();

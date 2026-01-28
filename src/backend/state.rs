@@ -174,6 +174,10 @@ pub struct CodegenState {
     /// parameter value from its alloca slot (where emit_store_params saved it)
     /// instead of reading from ABI registers that may have been clobbered.
     pub param_alloca_slots: Vec<Option<(StackSlot, IrType)>>,
+    /// Whether the current function returns a struct via hidden pointer (sret).
+    /// On i386 SysV ABI, such functions must use `ret $4` to pop the hidden
+    /// pointer argument from the caller's stack.
+    pub uses_sret: bool,
 }
 
 impl CodegenState {
@@ -209,6 +213,7 @@ impl CodegenState {
             num_params: 0,
             func_is_variadic: false,
             param_alloca_slots: Vec::new(),
+            uses_sret: false,
         }
     }
 
@@ -272,6 +277,7 @@ impl CodegenState {
         self.f128_direct_slots.clear();
         self.f128_load_sources.clear();
         self.reg_assigned_values.clear();
+        self.uses_sret = false;
     }
 
     /// Get the over-alignment requirement for an alloca (> 16 bytes), or None.

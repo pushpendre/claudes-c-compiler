@@ -183,6 +183,7 @@ impl Lowerer {
                     args: arg_vals, arg_types, return_type, is_variadic: variadic, num_fixed_args: n_fixed,
                     struct_arg_sizes,
                     struct_arg_classes: Vec::new(),
+                    is_sret: false,
                 });
                 Some(Operand::Value(dest))
             }

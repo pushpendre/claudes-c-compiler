@@ -1343,7 +1343,7 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
             rhs: remap_operand(rhs, vo),
             ty: *ty,
         },
-        Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes } => Instruction::Call {
+        Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret } => Instruction::Call {
             dest: dest.map(|v| remap_value(v, vo)),
             func: func.clone(),
             args: args.iter().map(|a| remap_operand(a, vo)).collect(),
@@ -1353,8 +1353,9 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
             num_fixed_args: *num_fixed_args,
             struct_arg_sizes: struct_arg_sizes.clone(),
             struct_arg_classes: struct_arg_classes.clone(),
+            is_sret: *is_sret,
         },
-        Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes } => Instruction::CallIndirect {
+        Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret } => Instruction::CallIndirect {
             dest: dest.map(|v| remap_value(v, vo)),
             func_ptr: remap_operand(func_ptr, vo),
             args: args.iter().map(|a| remap_operand(a, vo)).collect(),
@@ -1364,6 +1365,7 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
             num_fixed_args: *num_fixed_args,
             struct_arg_sizes: struct_arg_sizes.clone(),
             struct_arg_classes: struct_arg_classes.clone(),
+            is_sret: *is_sret,
         },
         Instruction::GetElementPtr { dest, base, offset, ty } => Instruction::GetElementPtr {
             dest: remap_value(*dest, vo),

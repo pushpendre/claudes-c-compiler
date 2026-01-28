@@ -641,7 +641,7 @@ impl Lowerer {
         is_variadic: bool,
         num_fixed_args: usize,
         two_reg_size: Option<usize>,
-        _sret_size: Option<usize>,
+        sret_size: Option<usize>,
     ) -> IrType {
         let mut indirect_ret_ty = self.get_func_ptr_return_ir_type(func);
         if two_reg_size.is_some() {
@@ -658,6 +658,7 @@ impl Lowerer {
                         args: arg_vals, arg_types, return_type: indirect_ret_ty, is_variadic, num_fixed_args,
                         struct_arg_sizes,
                         struct_arg_classes,
+                        is_sret: sret_size.is_some(),
                     });
                     indirect_ret_ty
                 } else {
@@ -689,6 +690,7 @@ impl Lowerer {
                         args: arg_vals, arg_types, return_type: ret_ty, is_variadic, num_fixed_args,
                         struct_arg_sizes,
                         struct_arg_classes,
+                        is_sret: sret_size.is_some(),
                     });
                     ret_ty
                 }
@@ -715,6 +717,7 @@ impl Lowerer {
                     return_type: indirect_ret_ty, is_variadic: false, num_fixed_args: n,
                     struct_arg_sizes: sas,
                     struct_arg_classes: sac,
+                    is_sret: sret_size.is_some(),
                 });
                 indirect_ret_ty
             }
@@ -728,6 +731,7 @@ impl Lowerer {
                     return_type: indirect_ret_ty, is_variadic, num_fixed_args,
                     struct_arg_sizes: sas,
                     struct_arg_classes: sac,
+                    is_sret: sret_size.is_some(),
                 });
                 indirect_ret_ty
             }

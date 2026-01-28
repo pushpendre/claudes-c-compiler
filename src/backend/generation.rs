@@ -740,6 +740,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
         block.instructions.iter().any(|inst| matches!(inst, Instruction::DynAlloca { .. } | Instruction::StackRestore { .. }))
     });
     cg.state().has_dyn_alloca = has_dyn_alloca;
+    cg.state().uses_sret = func.uses_sret;
 
     // Calculate stack space and emit prologue
     let raw_space = cg.calculate_stack_space(func);
@@ -1098,10 +1099,10 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                         cg.emit_store(val, ptr, *ty);
                     }
                 }
-                Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes } =>
-                    cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes),
-                Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes } =>
-                    cg.emit_call(args, arg_types, None, Some(func_ptr), *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes),
+                Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret } =>
+                    cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes, *is_sret),
+                Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret } =>
+                    cg.emit_call(args, arg_types, None, Some(func_ptr), *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes, *is_sret),
                 Instruction::Memcpy { dest, src, size } => cg.emit_memcpy(dest, src, *size),
                 Instruction::VaArg { dest, va_list_ptr, result_ty } => cg.emit_va_arg(dest, va_list_ptr, *result_ty),
                 Instruction::VaStart { va_list_ptr } => cg.emit_va_start(va_list_ptr),

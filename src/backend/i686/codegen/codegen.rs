@@ -2672,6 +2672,13 @@ impl ArchCodegen for I686Codegen {
         }
     }
 
+    fn callee_pops_bytes_for_sret(&self, is_sret: bool) -> usize {
+        // i386 SysV ABI: when a function returns a struct via hidden pointer (sret),
+        // the callee pops the hidden pointer with `ret $4`. The caller must subtract
+        // 4 from its stack cleanup to compensate.
+        if is_sret { 4 } else { 0 }
+    }
+
     fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
         if return_type == IrType::I64 || return_type == IrType::U64 {
             // I64/U64 returned in eax:edx on i686 — save both halves
@@ -2805,7 +2812,13 @@ impl ArchCodegen for I686Codegen {
 
     fn emit_epilogue_and_ret(&mut self, frame_size: i64) {
         self.emit_epilogue(frame_size);
-        self.state.emit("    ret");
+        // i386 SysV ABI: functions returning structs via hidden pointer (sret)
+        // must pop the hidden pointer argument with `ret $4`.
+        if self.state.uses_sret {
+            self.state.emit("    ret $4");
+        } else {
+            self.state.emit("    ret");
+        }
     }
 
     // --- Typed store/load ---

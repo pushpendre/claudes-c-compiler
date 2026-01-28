@@ -219,6 +219,10 @@ pub struct IrFunction {
     /// become unused after optimization. The backend uses this to detect dead
     /// param allocas and skip stack slot allocation, reducing frame size.
     pub param_alloca_values: Vec<Value>,
+    /// True when the function returns a large struct via hidden pointer (sret).
+    /// On i386 SysV ABI, such functions must use `ret $4` to pop the hidden
+    /// pointer argument from the caller's stack.
+    pub uses_sret: bool,
 }
 
 /// A function parameter.
@@ -286,12 +290,13 @@ pub enum Instruction {
     /// are variadic and may need different calling convention handling (e.g., floats in GP regs on AArch64).
     /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct args, None otherwise.
     /// `struct_arg_classes` carries per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class struct passing).
-    Call { dest: Option<Value>, func: String, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>> },
+    /// `is_sret`: true if the call uses a hidden pointer argument for struct returns (i386 SysV ABI).
+    Call { dest: Option<Value>, func: String, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>>, is_sret: bool },
 
     /// Indirect function call through a pointer: %dest = call_indirect ptr(args...)
     /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct args, None otherwise.
     /// `struct_arg_classes` carries per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class struct passing).
-    CallIndirect { dest: Option<Value>, func_ptr: Operand, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>> },
+    CallIndirect { dest: Option<Value>, func_ptr: Operand, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>>, is_sret: bool },
 
     /// Get element pointer (for arrays/structs)
     GetElementPtr { dest: Value, base: Value, offset: Operand, ty: IrType },
@@ -1567,6 +1572,7 @@ impl IrFunction {
             is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
+            uses_sret: false,
         }
     }
 

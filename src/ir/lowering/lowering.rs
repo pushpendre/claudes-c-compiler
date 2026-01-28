@@ -323,6 +323,7 @@ impl Lowerer {
                 num_fixed_args: 1,
                 struct_arg_sizes: vec![None],
                 struct_arg_classes: Vec::new(),
+                is_sret: false,
             });
         }
     }

@@ -360,7 +360,8 @@ pub trait ArchCodegen {
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
                  is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
-                 struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>]) {
+                 struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
+                 is_sret: bool) {
         use super::call_abi::*;
         let config = self.call_abi_config();
         let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, &config);
@@ -395,7 +396,11 @@ pub trait ArchCodegen {
         self.emit_call_instruction(direct_name, func_ptr, indirect, stack_arg_space);
 
         // Phase 5: Clean up stack.
-        self.emit_call_cleanup(stack_arg_space, f128_temp_space, indirect);
+        // On i386 SysV, sret calls have the callee pop the hidden pointer with `ret $4`,
+        // so we subtract those bytes from the caller's cleanup.
+        let callee_pops = self.callee_pops_bytes_for_sret(is_sret);
+        let effective_stack_cleanup = stack_arg_space.saturating_sub(callee_pops);
+        self.emit_call_cleanup(effective_stack_cleanup, f128_temp_space, indirect);
 
         // Phase 6: Store return value.
         if let Some(dest) = dest {
@@ -439,6 +444,11 @@ pub trait ArchCodegen {
 
     /// Clean up stack space after the call returns.
     fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, indirect: bool);
+
+    /// Returns the number of bytes the callee pops from the stack on return.
+    /// On i386 SysV, functions returning via sret do `ret $4` to pop the hidden
+    /// pointer. All other architectures and non-sret calls return 0.
+    fn callee_pops_bytes_for_sret(&self, _is_sret: bool) -> usize { 0 }
 
     /// Store the function's return value from ABI registers to the destination slot.
     ///
