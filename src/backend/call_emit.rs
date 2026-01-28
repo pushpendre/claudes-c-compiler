@@ -89,7 +89,7 @@ impl ParamClass {
             ParamClass::StackScalar { .. } => slot_size,
             ParamClass::I128Stack { .. } => 16,
             ParamClass::F128Stack { .. } => 16,
-            ParamClass::F128AlwaysStack { .. } => if slot_size == 4 { 12 } else { 16 }, // x87 long double = 12 bytes on i686
+            ParamClass::F128AlwaysStack { .. } => if slot_size == 4 { 12 } else { 16 },
             ParamClass::StructStack { size, .. } => (*size + align_mask) & !align_mask,
             ParamClass::LargeStructStack { size, .. } => (*size + align_mask) & !align_mask,
             ParamClass::LargeStructByRefStack { .. } => slot_size, // pointer on stack
@@ -137,7 +137,6 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
     let mut int_reg_idx = 0usize;
     let mut float_reg_idx = 0usize;
     let mut stack_offset: i64 = 0;
-
     // Minimum stack slot size: 8 bytes on LP64 (x86-64/ARM/RISC-V), 4 bytes on ILP32 (i686).
     let slot_size = crate::common::types::target_ptr_size();
     let slot_align_mask = (slot_size - 1) as i64;
@@ -307,7 +306,9 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
             int_reg_idx += 1;
         } else {
             result.push(ParamClass::StackScalar { offset: stack_offset });
-            stack_offset += slot_size as i64;
+            // On i686, I64/U64 take 8 bytes on stack, other scalars take 4
+            let param_size = param.ty.size() as i64;
+            stack_offset += (param_size + slot_align_mask) & !slot_align_mask;
         }
     }
 

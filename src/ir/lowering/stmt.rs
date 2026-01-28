@@ -1242,8 +1242,8 @@ impl Lowerer {
 
         if has_array && (has_pointer || has_func_ptr) && last_is_array {
             // Array of pointers (e.g., int *ap[n], void (*fns[n])(int))
-            // Each element is a pointer: 8 bytes on 64-bit targets.
-            8
+            // Each element is a pointer.
+            crate::common::types::target_ptr_size()
         } else {
             // Plain array of the base type (e.g., int a[n], double b[n][m])
             self.sizeof_type(type_spec)

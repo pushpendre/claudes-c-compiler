@@ -561,9 +561,13 @@ impl Lowerer {
     // expr_is_const_qualified is defined in expr.rs as pub(super)
     /// Get the IR type for an expression (best-effort, based on locals/globals info).
     pub(super) fn get_expr_type(&self, expr: &Expr) -> IrType {
+        use crate::common::types::target_is_32bit;
+        let is_32bit = target_is_32bit();
         match expr {
-            Expr::IntLiteral(_, _) | Expr::LongLiteral(_, _) | Expr::CharLiteral(_, _) => IrType::I64,
-            Expr::UIntLiteral(_, _) | Expr::ULongLiteral(_, _) => IrType::U64,
+            Expr::IntLiteral(_, _) | Expr::CharLiteral(_, _) => if is_32bit { IrType::I32 } else { IrType::I64 },
+            Expr::UIntLiteral(_, _) => if is_32bit { IrType::U32 } else { IrType::U64 },
+            Expr::LongLiteral(_, _) => if is_32bit { IrType::I32 } else { IrType::I64 },
+            Expr::ULongLiteral(_, _) => if is_32bit { IrType::U32 } else { IrType::U64 },
             Expr::FloatLiteral(_, _) => IrType::F64,
             Expr::FloatLiteralF32(_, _) => IrType::F32,
             Expr::FloatLiteralLongDouble(_, _, _) => IrType::F128,
@@ -616,7 +620,7 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => self.get_expr_type(rhs),
             Expr::PostfixOp(_, inner, _) => self.get_expr_type(inner),
             Expr::AddressOf(_, _) => IrType::Ptr,
-            Expr::Sizeof(_, _) => IrType::U64,
+            Expr::Sizeof(_, _) => if is_32bit { IrType::U32 } else { IrType::U64 },
             Expr::GenericSelection(controlling, associations, _) => {
                 self.resolve_generic_selection_type(controlling, associations)
             }
@@ -809,7 +813,7 @@ impl Lowerer {
                 return 1;
             }
         }
-        8 // TODO: better type tracking for nested derefs
+        crate::common::types::target_ptr_size() // TODO: better type tracking for nested derefs
     }
 
     /// Get the sizeof for an array subscript expression.
@@ -877,13 +881,13 @@ impl Lowerer {
             // Comparison/logical: result is int
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le
             | BinOp::Gt | BinOp::Ge | BinOp::LogicalAnd | BinOp::LogicalOr => 4,
-            // Pointer subtraction: result is ptrdiff_t (8 bytes on 64-bit)
+            // Pointer subtraction: result is ptrdiff_t
             BinOp::Sub if self.sizeof_operand_is_pointer_like(lhs)
-                && self.sizeof_operand_is_pointer_like(rhs) => 8,
+                && self.sizeof_operand_is_pointer_like(rhs) => crate::common::types::target_ptr_size(),
             // Pointer arithmetic (ptr + int, int + ptr, ptr - int): result is pointer
             BinOp::Add | BinOp::Sub
                 if self.sizeof_operand_is_pointer_like(lhs)
-                || self.sizeof_operand_is_pointer_like(rhs) => 8,
+                || self.sizeof_operand_is_pointer_like(rhs) => crate::common::types::target_ptr_size(),
             // Shift operators: result type is promoted left operand
             BinOp::Shl | BinOp::Shr => {
                 self.sizeof_expr(lhs).max(4) // integer promotion of left operand only
@@ -930,14 +934,14 @@ impl Lowerer {
                     8
                 }
             }
-            // Long/unsigned long literal: always 8 bytes
-            Expr::LongLiteral(_, _) | Expr::ULongLiteral(_, _) => 8,
+            // Long/unsigned long literal: size depends on target (4 on ILP32, 8 on LP64)
+            Expr::LongLiteral(_, _) | Expr::ULongLiteral(_, _) => crate::common::types::target_ptr_size(),
             // Float literal: type double (8 bytes) by default in C
             Expr::FloatLiteral(_, _) => 8,
             // Float literal with f suffix: type float (4 bytes)
             Expr::FloatLiteralF32(_, _) => 4,
-            // Float literal with L suffix: type long double (16 bytes)
-            Expr::FloatLiteralLongDouble(_, _, _) => 16,
+            // Float literal with L suffix: type long double (16 on LP64, 12 on ILP32)
+            Expr::FloatLiteralLongDouble(_, _, _) => if crate::common::types::target_is_32bit() { 12 } else { 16 },
             // Char literal: type int in C (4 bytes)
             Expr::CharLiteral(_, _) => 4,
             // String literal: array of char, size = length + 1 (null terminator)
@@ -962,8 +966,8 @@ impl Lowerer {
                 self.sizeof_subscript(base, index)
             }
 
-            // sizeof(sizeof(...)) or sizeof(_Alignof(...)) -> size_t = 8 on 64-bit
-            Expr::Sizeof(_, _) | Expr::Alignof(_, _) | Expr::AlignofExpr(_, _) => 8,
+            // sizeof(sizeof(...)) or sizeof(_Alignof(...)) -> size_t
+            Expr::Sizeof(_, _) | Expr::Alignof(_, _) | Expr::AlignofExpr(_, _) => crate::common::types::target_ptr_size(),
 
             // Cast: size of the target type
             Expr::Cast(target_type, _, _) => {
@@ -978,8 +982,8 @@ impl Lowerer {
                 self.sizeof_member_access(base_expr, field_name, true)
             }
 
-            // Address-of: pointer (8 bytes)
-            Expr::AddressOf(_, _) => 8,
+            // Address-of: pointer
+            Expr::AddressOf(_, _) => crate::common::types::target_ptr_size(),
 
             // Unary operations
             Expr::UnaryOp(op, inner, _) => {
@@ -1106,12 +1110,15 @@ impl Lowerer {
         // Fallback: derive alignment from the expression's size
         // (this handles literals and simple cases where CType isn't available)
         let size = self.sizeof_expr(expr);
+        let ptr_sz = crate::common::types::target_ptr_size();
         match size {
             1 => 1,
             2 => 2,
             4 => 4,
-            16 => 16,  // long double, __int128
-            _ => 8,
+            16 => 16,  // __int128
+            // On ILP32, 8-byte types (double, long long) are typically aligned to 4
+            8 if ptr_sz == 4 => 4,
+            _ => ptr_sz,
         }
     }
 

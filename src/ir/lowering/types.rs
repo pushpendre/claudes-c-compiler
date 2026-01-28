@@ -162,6 +162,8 @@ impl Lowerer {
     }
 
     pub(super) fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
+        use crate::common::types::target_is_32bit;
+        let is_32bit = target_is_32bit();
         match ts {
             TypeSpecifier::Void => IrType::Void,
             TypeSpecifier::Bool => IrType::U8,
@@ -171,8 +173,10 @@ impl Lowerer {
             TypeSpecifier::UnsignedShort => IrType::U16,
             TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,
             TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => IrType::U32,
-            TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
-            TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
+            TypeSpecifier::Long => if is_32bit { IrType::I32 } else { IrType::I64 },
+            TypeSpecifier::UnsignedLong => if is_32bit { IrType::U32 } else { IrType::U64 },
+            TypeSpecifier::LongLong => IrType::I64,
+            TypeSpecifier::UnsignedLongLong => IrType::U64,
             TypeSpecifier::Int128 => IrType::I128,
             TypeSpecifier::UnsignedInt128 => IrType::U128,
             TypeSpecifier::Float => IrType::F32,
@@ -193,7 +197,7 @@ impl Lowerer {
                 if let Some(ctype) = self.types.typedefs.get(name) {
                     IrType::from_ctype(ctype)
                 } else {
-                    IrType::I64 // fallback for unresolved typedef
+                    if is_32bit { IrType::I32 } else { IrType::I64 } // fallback for unresolved typedef
                 }
             }
             TypeSpecifier::Typeof(expr) => {
@@ -206,58 +210,59 @@ impl Lowerer {
                 if let Some(ctype) = ctype {
                     IrType::from_ctype(&ctype)
                 } else {
-                    IrType::I64
+                    if is_32bit { IrType::I32 } else { IrType::I64 }
                 }
             }
             TypeSpecifier::TypeofType(inner) => self.type_spec_to_ir(inner),
             TypeSpecifier::FunctionPointer(_, _, _) => IrType::Ptr, // function pointer is a pointer
             TypeSpecifier::BareFunction(_, _, _) => IrType::Ptr, // bare function type decays to pointer
             // AutoType should be resolved before reaching here (in lower_local_decl)
-            TypeSpecifier::AutoType => IrType::I64,
+            TypeSpecifier::AutoType => if is_32bit { IrType::I32 } else { IrType::I64 },
         }
     }
 
     /// Get the (size, alignment) for a scalar type specifier. Returns None for
     /// compound types (arrays, structs, unions) that need recursive computation.
     fn scalar_type_size_align(ts: &TypeSpecifier) -> Option<(usize, usize)> {
-        // For scalar types, size == alignment on x86-64 (except LongDouble).
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
+        // On i686 (ILP32): long=4, pointer=4, double aligned to 4, long double=12 aligned to 4
         match ts {
             TypeSpecifier::Void | TypeSpecifier::Bool => Some((1, 1)),
             TypeSpecifier::Char | TypeSpecifier::UnsignedChar => Some((1, 1)),
             TypeSpecifier::Short | TypeSpecifier::UnsignedShort => Some((2, 2)),
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned => Some((4, 4)),
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => {
-                let ptr_sz = crate::common::types::target_ptr_size();
-                Some((ptr_sz, ptr_sz)) // ILP32: 4 bytes, LP64: 8 bytes
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => Some((ptr_sz, ptr_sz)),
+            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => {
+                // On i686, long long is 8 bytes but aligned to 4
+                let align = if ptr_sz == 4 { 4 } else { 8 };
+                Some((8, align))
             }
-            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => Some((8, 8)),
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => Some((16, 16)),
             TypeSpecifier::Float => Some((4, 4)),
-            TypeSpecifier::Double => Some((8, 8)),
+            TypeSpecifier::Double => {
+                let align = if ptr_sz == 4 { 4 } else { 8 };
+                Some((8, align))
+            }
             TypeSpecifier::LongDouble => {
-                let ptr_sz = crate::common::types::target_ptr_size();
                 if ptr_sz == 4 { Some((12, 4)) } else { Some((16, 16)) }
             }
             TypeSpecifier::ComplexFloat => Some((8, 4)),
-            TypeSpecifier::ComplexDouble => Some((16, 8)),
+            TypeSpecifier::ComplexDouble => {
+                let align = if ptr_sz == 4 { 4 } else { 8 };
+                Some((16, align))
+            }
             TypeSpecifier::ComplexLongDouble => {
-                let ptr_sz = crate::common::types::target_ptr_size();
                 if ptr_sz == 4 { Some((24, 4)) } else { Some((32, 16)) }
             }
-            TypeSpecifier::Pointer(_, _) => {
-                let ptr_sz = crate::common::types::target_ptr_size();
-                Some((ptr_sz, ptr_sz))
-            }
+            TypeSpecifier::Pointer(_, _) => Some((ptr_sz, ptr_sz)),
             TypeSpecifier::Enum(_, _, false) => Some((4, 4)),
             TypeSpecifier::Enum(_, _, true) => {
                 // Packed enums need type context to resolve; let caller handle via CType path
                 None
             }
-            TypeSpecifier::TypedefName(_) => {
-                let ptr_sz = crate::common::types::target_ptr_size();
-                Some((ptr_sz, ptr_sz)) // fallback for unresolved typedefs
-            }
+            TypeSpecifier::TypedefName(_) => Some((ptr_sz, ptr_sz)), // fallback for unresolved typedefs
             _ => None,
         }
     }
@@ -505,6 +510,8 @@ impl Lowerer {
     /// For multi-dimensional arrays like int a[2][3], array_dim_strides = [12, 4]
     /// (stride for dim 0 = 3*4=12, stride for dim 1 = 4).
     pub(super) fn compute_decl_info(&self, ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool, Vec<usize>) {
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
         let ts = self.resolve_type_spec(ts);
         // Resolve the type spec through CType for typedef detection
         let resolved_ctype = self.type_spec_to_ctype(ts);
@@ -522,23 +529,23 @@ impl Lowerer {
             let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
             let elem_size = if let TypeSpecifier::Pointer(inner, _) = ts {
                 if ptr_count >= 1 {
-                    8
+                    ptr_sz
                 } else {
                     self.sizeof_type(inner)
                 }
             } else if let CType::Pointer(ref inner_ct, _) = resolved_ctype {
                 // Pointer from typedef resolution
                 if ptr_count >= 1 {
-                    8
+                    ptr_sz
                 } else {
                     inner_ct.size_ctx(&self.types.struct_layouts)
                 }
             } else if ptr_count >= 2 {
-                8
+                ptr_sz
             } else {
                 self.sizeof_type(ts)
             };
-            return (8, elem_size, false, true, vec![]);
+            return (ptr_sz, elem_size, false, true, vec![]);
         }
         if has_pointer && has_array {
             // Determine whether this is "array of pointers" or "pointer to array"
@@ -602,7 +609,6 @@ impl Lowerer {
                     self.collect_derived_array_dims(derived)
                 };
                 let resolved_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256)).collect();
-                let ptr_sz = crate::common::types::target_ptr_size();
                 let total_size: usize = resolved_dims.iter().product::<usize>() * ptr_sz;
                 let strides = if resolved_dims.len() > 1 {
                     Self::compute_strides_from_dims(&resolved_dims, ptr_sz)
@@ -640,7 +646,6 @@ impl Lowerer {
             // Treat as a simple pointer with no array strides, so subscript operations
             // will use CType-based stride resolution for correct behavior.
             if ptr_count >= 2 {
-                let ptr_sz = crate::common::types::target_ptr_size();
                 return (ptr_sz, ptr_sz, false, true, vec![]);
             }
 
@@ -650,7 +655,7 @@ impl Lowerer {
                 strides.extend(Self::compute_strides_from_dims(&array_dims, base_elem_size));
             }
             let elem_size = full_array_size;
-            return (crate::common::types::target_ptr_size(), elem_size, false, true, strides);
+            return (ptr_sz, elem_size, false, true, strides);
         }
 
         // If the resolved type itself is an Array (e.g., va_list = Array(Char, 24),

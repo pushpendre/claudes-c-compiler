@@ -695,29 +695,31 @@ impl<'a> SemaConstEval<'a> {
     /// Compute sizeof for a type specifier.
     /// Returns None if the type cannot be sized (e.g., typeof(expr) without expr type info).
     fn sizeof_type_spec(&self, spec: &TypeSpecifier) -> Option<usize> {
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
         match spec {
             TypeSpecifier::Void => Some(0),
             TypeSpecifier::Char | TypeSpecifier::UnsignedChar => Some(1),
             TypeSpecifier::Short | TypeSpecifier::UnsignedShort => Some(2),
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned => Some(4),
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => Some(8),
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => Some(ptr_sz),
+            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => Some(8),
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => Some(16),
             TypeSpecifier::Float => Some(4),
             TypeSpecifier::Double => Some(8),
-            TypeSpecifier::LongDouble => Some(16),
+            TypeSpecifier::LongDouble => Some(if ptr_sz == 4 { 12 } else { 16 }),
             TypeSpecifier::Bool => Some(1),
             TypeSpecifier::ComplexFloat => Some(8),
             TypeSpecifier::ComplexDouble => Some(16),
-            TypeSpecifier::ComplexLongDouble => Some(32),
-            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => Some(8),
+            TypeSpecifier::ComplexLongDouble => Some(if ptr_sz == 4 { 24 } else { 32 }),
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => Some(ptr_sz),
             TypeSpecifier::Array(elem, Some(size)) => {
                 let elem_size = self.sizeof_type_spec(elem)?;
                 let n = self.eval_const_expr(size)?.to_i64()?;
                 Some(elem_size * n as usize)
             }
-            TypeSpecifier::Array(_, None) => Some(8), // incomplete array
+            TypeSpecifier::Array(_, None) => Some(ptr_sz), // incomplete array
             TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
                 // Look up cached layout for tagged structs
                 if let Some(tag) = tag {
@@ -834,22 +836,25 @@ impl<'a> SemaConstEval<'a> {
 
     /// Compute alignof for a type specifier.
     fn alignof_type_spec(&self, spec: &TypeSpecifier) -> usize {
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
         match spec {
             TypeSpecifier::Void | TypeSpecifier::Bool => 1,
             TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
             TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => ptr_sz,
+            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => if ptr_sz == 4 { 4 } else { 8 },
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
             TypeSpecifier::Float => 4,
-            TypeSpecifier::Double => 8,
-            TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::Double => if ptr_sz == 4 { 4 } else { 8 },
+            // On i686, long double is 80-bit x87 aligned to 4 bytes
+            TypeSpecifier::LongDouble => if ptr_sz == 4 { 4 } else { 16 },
             TypeSpecifier::ComplexFloat => 4,
-            TypeSpecifier::ComplexDouble => 8,
-            TypeSpecifier::ComplexLongDouble => 16,
-            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            TypeSpecifier::ComplexDouble => if ptr_sz == 4 { 4 } else { 8 },
+            TypeSpecifier::ComplexLongDouble => if ptr_sz == 4 { 4 } else { 16 },
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => ptr_sz,
             TypeSpecifier::Array(elem, _) => self.alignof_type_spec(elem),
             TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
                 if let Some(tag) = tag {

@@ -34,6 +34,9 @@ impl Lowerer {
         let mut plus_input_types = Vec::new();
         let mut plus_input_segs = Vec::new();
         let mut plus_input_symbols: Vec<Option<String>> = Vec::new();
+        // Track outputs that use a temporary alloca so we can copy back afterwards.
+        // Each entry: (temp_alloca, original_alloca, type, address_space).
+        let mut temp_output_copies: Vec<(Value, Value, IrType, AddressSpace)> = Vec::new();
         for out in outputs {
             let mut constraint = out.constraint.clone();
             let name = out.name.clone();
@@ -78,6 +81,34 @@ impl Lowerer {
             } else {
                 continue;
             };
+            // For register-based output constraints ("=r", "=g", etc.), use a
+            // temporary alloca for the InlineAsm output instead of the variable's own
+            // alloca. This allows mem2reg to promote the variable's alloca to SSA form
+            // (since it will only have Load/Store users, not InlineAsm).
+            //
+            // Without this, when the same variable is used as both output and input
+            // (e.g., Linux kernel's csr_swap: `"=r"(__v) : "rK"(__v)`), the variable's
+            // alloca is disqualified from mem2reg promotion because the InlineAsm
+            // instruction references it directly. This forces stores/loads through the
+            // stack between consecutive inline asm blocks, which causes page faults in
+            // the kernel when the stack isn't identity-mapped (e.g., between enabling
+            // and disabling the MMU in set_satp_mode).
+            let stripped_for_output_check = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+            let is_memory_output = constraint_is_memory_only(stripped_for_output_check)
+                || constraint_needs_address(stripped_for_output_check);
+            let is_specific_reg = stripped_for_output_check.starts_with('{') && stripped_for_output_check.ends_with('}');
+            let asm_ptr = if !is_memory_output && !is_specific_reg {
+                // Create a temporary alloca for the InlineAsm output
+                let tmp = self.fresh_value();
+                self.emit(Instruction::Alloca {
+                    dest: tmp, ty: out_ty, size: out_ty.size(),
+                    align: out_ty.align(), volatile: false,
+                });
+                temp_output_copies.push((tmp, ptr, out_ty, out_seg));
+                tmp
+            } else {
+                ptr
+            };
             if constraint.contains('+') {
                 // For global register variables (e.g., `register long x asm("rsp")`),
                 // the alloca is just a placeholder and is uninitialized. We must read
@@ -107,8 +138,10 @@ impl Lowerer {
                     // in the Linux kernel) -- the Load would dereference the raw pointer
                     // without the segment prefix, causing a page fault.
                     // We still need a placeholder operand for correct operand numbering.
-                    Operand::Value(ptr)
+                    Operand::Value(asm_ptr)
                 } else {
+                    // Load current value from the ORIGINAL variable alloca (not the temp),
+                    // so the "+" input sees the variable's current value.
                     let cur_val = self.fresh_value();
                     self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
                     Operand::Value(cur_val)
@@ -125,7 +158,7 @@ impl Lowerer {
                     plus_input_symbols.push(None);
                 }
             }
-            ir_outputs.push((constraint, ptr, name));
+            ir_outputs.push((constraint, asm_ptr, name));
             operand_types.push(out_ty);
             seg_overrides.push(out_seg);
         }
@@ -218,6 +251,15 @@ impl Lowerer {
             input_symbols,
             seg_overrides,
         });
+
+        // Copy results from temporary output allocas back to the original variable
+        // allocas. This makes the original allocas eligible for mem2reg promotion
+        // (they only have Load/Store users, not InlineAsm).
+        for (tmp_alloca, orig_alloca, ty, seg) in temp_output_copies {
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: tmp_alloca, ty, seg_override: seg });
+            self.emit(Instruction::Store { val: Operand::Value(loaded), ptr: orig_alloca, ty, seg_override: seg });
+        }
     }
 
     /// Extract a global symbol name (possibly with offset) from an expression,

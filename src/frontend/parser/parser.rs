@@ -977,6 +977,8 @@ impl Parser {
     /// Compute sizeof (in bytes) for a type specifier.
     /// Used by sizeof(type) in parser-level constant evaluation.
     pub(super) fn sizeof_type_spec(ts: &TypeSpecifier) -> usize {
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
         match ts {
             TypeSpecifier::Void | TypeSpecifier::Bool
             | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
@@ -984,15 +986,15 @@ impl Parser {
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned
             | TypeSpecifier::Float => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
-            | TypeSpecifier::Double
-            | TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
-            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
-            | TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => ptr_sz,
+            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
+            | TypeSpecifier::Double => 8,
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => ptr_sz,
+            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
+            TypeSpecifier::LongDouble => if ptr_sz == 4 { 12 } else { 16 },
             TypeSpecifier::ComplexFloat => 8,
             TypeSpecifier::ComplexDouble => 16,
-            TypeSpecifier::ComplexLongDouble => 32,
+            TypeSpecifier::ComplexLongDouble => if ptr_sz == 4 { 24 } else { 32 },
             TypeSpecifier::Array(elem, Some(size_expr)) => {
                 let elem_size = Self::sizeof_type_spec(elem);
                 let count = Self::eval_const_int_expr(size_expr).unwrap_or(0) as usize;
@@ -1000,13 +1002,15 @@ impl Parser {
             }
             TypeSpecifier::Array(_, None) => 0,
             TypeSpecifier::Enum(_, _, _) => 4,
-            _ => 8, // conservative default for struct/union/typedef
+            _ => ptr_sz, // conservative default for struct/union/typedef
         }
     }
 
     /// Compute alignment (in bytes) for a type specifier.
     /// Used by _Alignas(type) to determine the alignment value.
     pub(super) fn alignof_type_spec(ts: &TypeSpecifier) -> usize {
+        use crate::common::types::target_ptr_size;
+        let ptr_sz = target_ptr_size();
         match ts {
             TypeSpecifier::Void | TypeSpecifier::Bool
             | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
@@ -1014,15 +1018,17 @@ impl Parser {
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned
             | TypeSpecifier::Float => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
-            | TypeSpecifier::Double
-            | TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
-            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
-            | TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => ptr_sz,
+            // On i686 (ILP32), long long and double are aligned to 4 bytes per i386 SysV ABI
+            TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
+            | TypeSpecifier::Double => if ptr_sz == 4 { 4 } else { 8 },
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => ptr_sz,
+            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
+            // On i686, long double is 80-bit x87 but aligned to 4 bytes
+            TypeSpecifier::LongDouble => if ptr_sz == 4 { 4 } else { 16 },
             TypeSpecifier::ComplexFloat => 4,
-            TypeSpecifier::ComplexDouble => 8,
-            TypeSpecifier::ComplexLongDouble => 16,
+            TypeSpecifier::ComplexDouble => if ptr_sz == 4 { 4 } else { 8 },
+            TypeSpecifier::ComplexLongDouble => if ptr_sz == 4 { 4 } else { 16 },
             TypeSpecifier::Array(elem, _) => Self::alignof_type_spec(elem),
             TypeSpecifier::Struct(_, fields, is_packed, _, struct_aligned)
             | TypeSpecifier::Union(_, fields, is_packed, _, struct_aligned) => {
@@ -1041,11 +1047,11 @@ impl Parser {
                     }
                 }
                 // Fallback for empty struct/union or tag-only (no fields available)
-                if align == 0 { 8 } else { align }
+                if align == 0 { ptr_sz } else { align }
             }
             TypeSpecifier::Enum(_, _, _) => 4,
-            TypeSpecifier::TypedefName(_) => 8, // conservative default
-            _ => 8,
+            TypeSpecifier::TypedefName(_) => ptr_sz, // conservative default
+            _ => ptr_sz,
         }
     }
 }

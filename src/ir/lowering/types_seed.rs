@@ -12,78 +12,98 @@ impl Lowerer {
     /// Pre-populate typedef mappings for builtin/standard types.
     /// Now inserts CType values directly.
     pub(super) fn seed_builtin_typedefs(&mut self) {
+        use crate::common::types::target_is_32bit;
+        let is_32bit = target_is_32bit();
+
+        // On ILP32 (i686): long=32bit, so 64-bit types must use LongLong
+        // On LP64 (x86-64, arm64, riscv64): long=64bit
+        let long_s = CType::Long;
+        let long_u = CType::ULong;
+        // Types that are always 64-bit regardless of target
+        let i64_type = if is_32bit { CType::LongLong } else { CType::Long };
+        let u64_type = if is_32bit { CType::ULongLong } else { CType::ULong };
+        // size_t: unsigned long on LP64, unsigned int on ILP32
+        let size_type = if is_32bit { CType::UInt } else { CType::ULong };
+        let ssize_type = if is_32bit { CType::Int } else { CType::Long };
+        let ptrdiff_type = if is_32bit { CType::Int } else { CType::Long };
+        let intptr_type = if is_32bit { CType::Int } else { CType::Long };
+        let uintptr_type = if is_32bit { CType::UInt } else { CType::ULong };
+        // fast types: on ILP32 they map to int, on LP64 to long
+        let fast_s = if is_32bit { CType::Int } else { CType::Long };
+        let fast_u = if is_32bit { CType::UInt } else { CType::ULong };
+
         let builtins: &[(&str, CType)] = &[
             // <stddef.h>
-            ("size_t", CType::ULong),
-            ("ssize_t", CType::Long),
-            ("ptrdiff_t", CType::Long),
+            ("size_t", size_type.clone()),
+            ("ssize_t", ssize_type.clone()),
+            ("ptrdiff_t", ptrdiff_type),
             ("wchar_t", CType::Int),
             ("wint_t", CType::UInt),
             // <stdint.h> - exact width types
             ("int8_t", CType::Char),
             ("int16_t", CType::Short),
             ("int32_t", CType::Int),
-            ("int64_t", CType::Long),
+            ("int64_t", i64_type.clone()),
             ("uint8_t", CType::UChar),
             ("uint16_t", CType::UShort),
             ("uint32_t", CType::UInt),
-            ("uint64_t", CType::ULong),
-            ("intptr_t", CType::Long),
-            ("uintptr_t", CType::ULong),
-            ("intmax_t", CType::Long),
-            ("uintmax_t", CType::ULong),
+            ("uint64_t", u64_type.clone()),
+            ("intptr_t", intptr_type),
+            ("uintptr_t", uintptr_type),
+            ("intmax_t", i64_type.clone()),
+            ("uintmax_t", u64_type.clone()),
             // least types
             ("int_least8_t", CType::Char),
             ("int_least16_t", CType::Short),
             ("int_least32_t", CType::Int),
-            ("int_least64_t", CType::Long),
+            ("int_least64_t", i64_type.clone()),
             ("uint_least8_t", CType::UChar),
             ("uint_least16_t", CType::UShort),
             ("uint_least32_t", CType::UInt),
-            ("uint_least64_t", CType::ULong),
+            ("uint_least64_t", u64_type.clone()),
             // fast types
             ("int_fast8_t", CType::Char),
-            ("int_fast16_t", CType::Long),
-            ("int_fast32_t", CType::Long),
-            ("int_fast64_t", CType::Long),
+            ("int_fast16_t", fast_s.clone()),
+            ("int_fast32_t", fast_s.clone()),
+            ("int_fast64_t", i64_type.clone()),
             ("uint_fast8_t", CType::UChar),
-            ("uint_fast16_t", CType::ULong),
-            ("uint_fast32_t", CType::ULong),
-            ("uint_fast64_t", CType::ULong),
+            ("uint_fast16_t", fast_u.clone()),
+            ("uint_fast32_t", fast_u),
+            ("uint_fast64_t", u64_type.clone()),
             // <signal.h>
             ("sig_atomic_t", CType::Int),
             // <time.h>
-            ("time_t", CType::Long),
-            ("clock_t", CType::Long),
+            ("time_t", long_s.clone()),
+            ("clock_t", long_s.clone()),
             ("timer_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("clockid_t", CType::Int),
             // <sys/types.h>
-            ("off_t", CType::Long),
+            ("off_t", long_s.clone()),
             ("pid_t", CType::Int),
             ("uid_t", CType::UInt),
             ("gid_t", CType::UInt),
             ("mode_t", CType::UInt),
-            ("dev_t", CType::ULong),
-            ("ino_t", CType::ULong),
-            ("nlink_t", CType::ULong),
-            ("blksize_t", CType::Long),
-            ("blkcnt_t", CType::Long),
+            ("dev_t", u64_type.clone()),
+            ("ino_t", u64_type.clone()),
+            ("nlink_t", u64_type.clone()),
+            ("blksize_t", long_s.clone()),
+            ("blkcnt_t", long_s),
             // GNU/glibc common
-            ("ulong", CType::ULong),
+            ("ulong", long_u),
             ("ushort", CType::UShort),
             ("uint", CType::UInt),
             ("__u8", CType::UChar),
             ("__u16", CType::UShort),
             ("__u32", CType::UInt),
-            ("__u64", CType::ULong),
+            ("__u64", u64_type.clone()),
             ("__s8", CType::Char),
             ("__s16", CType::Short),
             ("__s32", CType::Int),
-            ("__s64", CType::Long),
+            ("__s64", i64_type),
             // <locale.h>
             ("locale_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             // <pthread.h> - opaque types, treat as unsigned long or pointer
-            ("pthread_t", CType::ULong),
+            ("pthread_t", size_type),
             ("pthread_mutex_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("pthread_cond_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("pthread_key_t", CType::UInt),
@@ -96,7 +116,7 @@ impl Lowerer {
             ("sigjmp_buf", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             // <stdio.h>
             ("FILE", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
-            ("fpos_t", CType::Long),
+            ("fpos_t", ssize_type),
             // <dirent.h>
             ("DIR", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
         ];
@@ -135,15 +155,18 @@ impl Lowerer {
             ("__int8_t", CType::Char),
             ("__int16_t", CType::Short),
             ("__int32_t", CType::Int),
-            ("__int64_t", CType::Long),
             ("__uint8_t", CType::UChar),
             ("__uint16_t", CType::UShort),
             ("__uint32_t", CType::UInt),
-            ("__uint64_t", CType::ULong),
         ];
         for (name, ct) in posix_extras {
             self.types.typedefs.insert(name.to_string(), ct.clone());
         }
+        // __int64_t/__uint64_t: must be LongLong on ILP32, Long on LP64
+        let int64_ct = if is_32bit { CType::LongLong } else { CType::Long };
+        let uint64_ct = if is_32bit { CType::ULongLong } else { CType::ULong };
+        self.types.typedefs.insert("__int64_t".to_string(), int64_ct);
+        self.types.typedefs.insert("__uint64_t".to_string(), uint64_ct);
     }
 
     /// Seed known libc math function signatures for correct calling convention.
