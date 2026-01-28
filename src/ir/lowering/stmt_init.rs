@@ -522,7 +522,7 @@ impl Lowerer {
             // is sizeof(pointer) not sizeof(struct), so we must NOT route to lower_array_of_structs_init.
             if da.array_dim_strides.len() > 1 {
                 self.zero_init_alloca(alloca, da.alloc_size);
-                self.lower_array_init_list(items, alloca, IrType::I64, &da.array_dim_strides);
+                self.lower_array_init_list(items, alloca, IrType::Ptr, &da.array_dim_strides);
             } else {
                 self.lower_1d_array_init(items, alloca, da, decl);
             }
@@ -840,7 +840,7 @@ impl Lowerer {
         let is_complex_elem_array = self.is_type_complex(&decl.type_spec);
         let is_bool_elem_array = self.is_type_bool(&decl.type_spec);
 
-        let elem_store_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::I64 } else { da.elem_ir_ty };
+        let elem_store_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::Ptr } else { da.elem_ir_ty };
 
         let mut current_idx = 0usize;
         for item in items.iter() {

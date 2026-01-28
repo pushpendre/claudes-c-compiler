@@ -287,7 +287,7 @@ impl Lowerer {
                 self.emit(Instruction::GetElementPtr {
                     dest: inner_addr,
                     base: inner_base_addr,
-                    offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                    offset: Operand::Const(IrConst::ptr_int(inner_offset as i64)),
                     ty: IrType::Ptr,
                 });
                 inner_addr
@@ -309,7 +309,7 @@ impl Lowerer {
                 self.emit(Instruction::GetElementPtr {
                     dest: inner_addr,
                     base: base_addr,
-                    offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                    offset: Operand::Const(IrConst::ptr_int(inner_offset as i64)),
                     ty: IrType::Ptr,
                 });
                 inner_addr

@@ -786,7 +786,8 @@ impl IrConst {
             IrType::U16 => IrConst::I16(fv as u16 as i16),
             IrType::I32 => IrConst::I32(fv as i32),
             IrType::U32 => IrConst::I64(fv as u32 as i64),
-            IrType::I64 | IrType::Ptr => IrConst::I64(fv as i64),
+            IrType::I64 => IrConst::I64(fv as i64),
+            IrType::Ptr => IrConst::ptr_int(fv as i64),
             IrType::U64 => IrConst::I64(fv as u64 as i64),
             IrType::I128 => IrConst::I128(fv as i128),
             IrType::U128 => IrConst::I128(fv as u128 as i128),
@@ -809,7 +810,8 @@ impl IrConst {
             IrType::U16 => IrConst::I16(f128_bytes_to_u64(bytes)? as u16 as i16),
             IrType::I32 => IrConst::I32(f128_bytes_to_i64(bytes)? as i32),
             IrType::U32 => IrConst::I64(f128_bytes_to_u64(bytes)? as u32 as i64),
-            IrType::I64 | IrType::Ptr => IrConst::I64(f128_bytes_to_i64(bytes)?),
+            IrType::I64 => IrConst::I64(f128_bytes_to_i64(bytes)?),
+            IrType::Ptr => IrConst::ptr_int(f128_bytes_to_i64(bytes)?),
             IrType::U64 => IrConst::I64(f128_bytes_to_u64(bytes)? as i64),
             IrType::I128 => IrConst::I128(f128_bytes_to_i128(bytes)?),
             IrType::U128 => IrConst::I128(f128_bytes_to_u128(bytes)? as i128),
@@ -931,6 +933,17 @@ impl IrConst {
         }
     }
 
+    /// Create a pointer-width integer constant: I32 on ILP32 targets, I64 on LP64.
+    /// Use this instead of hardcoding `IrConst::I64(val)` for pointer arithmetic
+    /// step sizes, element sizes, and other constants in pointer-width operations.
+    pub fn ptr_int(val: i64) -> Self {
+        if crate::common::types::target_is_32bit() {
+            IrConst::I32(val as i32)
+        } else {
+            IrConst::I64(val)
+        }
+    }
+
     /// Construct an IrConst of the given type from an i64 value.
     ///
     /// Store unsigned sub-64-bit types (U8, U16, U32) as I64 with zero-extended
@@ -952,6 +965,8 @@ impl IrConst {
             // Using I32 would sign-extend when loaded as a 64-bit immediate (e.g.,
             // I32(-2147483648) becomes 0xFFFFFFFF80000000 instead of 0x0000000080000000).
             IrType::U32 => IrConst::I64(val as u32 as i64),
+            // Ptr: use target-appropriate width (I32 on ILP32, I64 on LP64)
+            IrType::Ptr => IrConst::ptr_int(val),
             // I128: sign-extend i64 to i128 (preserves signed value)
             IrType::I128 => IrConst::I128(val as i128),
             // U128: zero-extend by first reinterpreting i64 as u64, then widening to u128.
@@ -975,7 +990,20 @@ impl IrConst {
             (IrConst::I32(_), IrType::I32) => return self.clone(),
             // U32 is stored as I64 (zero-extended), so I32 must be converted
             (IrConst::I64(_), IrType::U32) => return self.clone(),
-            (IrConst::I64(_), IrType::I64 | IrType::U64 | IrType::Ptr) => return self.clone(),
+            (IrConst::I64(_), IrType::I64 | IrType::U64) => return self.clone(),
+            // Ptr: on LP64 I64 is already correct; on ILP32 we need I32
+            (IrConst::I64(v), IrType::Ptr) => {
+                if crate::common::types::target_is_32bit() {
+                    return IrConst::I32(*v as i32);
+                }
+                return self.clone();
+            }
+            (IrConst::I32(_), IrType::Ptr) => {
+                if crate::common::types::target_is_32bit() {
+                    return self.clone();
+                }
+                // On LP64, widen I32 to I64 for Ptr
+            }
             (IrConst::I128(_), IrType::I128 | IrType::U128) => return self.clone(),
             (IrConst::F32(_), IrType::F32) => return self.clone(),
             (IrConst::F64(_), IrType::F64) => return self.clone(),

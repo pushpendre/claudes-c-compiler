@@ -215,7 +215,8 @@ impl Lowerer {
         for param in &info.params {
             let alloca = self.fresh_value();
             if info.uses_sret && ir_allocas.is_empty() {
-                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
+                let ptr_size = crate::common::types::target_ptr_size();
+                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: ptr_size, align: 0, volatile: false });
                 self.func_mut().sret_ptr = Some(alloca);
                 ir_allocas.push(alloca);
                 continue;
@@ -561,11 +562,12 @@ impl Lowerer {
             // Process dimensions from innermost to outermost
             for (i, dim_info) in dim_infos.iter().enumerate().rev() {
                 if dim_info.is_vla {
+                    let ptr_int_ty = crate::common::types::target_int_ir_type();
                     let dim_val = self.load_vla_dim_value(&dim_info.dim_expr_name);
                     let stride_val = if let Some(prev) = current_stride {
-                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Value(prev), IrType::I64)
+                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Value(prev), ptr_int_ty)
                     } else {
-                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Const(IrConst::I64(current_const_stride as i64)), IrType::I64)
+                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Const(IrConst::ptr_int(current_const_stride as i64)), ptr_int_ty)
                     };
                     vla_strides[i] = Some(stride_val);
                     current_stride = Some(stride_val);

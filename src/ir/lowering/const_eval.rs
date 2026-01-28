@@ -183,7 +183,8 @@ impl Lowerer {
                     IrType::U16 => IrConst::I64(truncated as u16 as i64),
                     IrType::I32 => IrConst::I32(truncated as i32),
                     IrType::U32 => IrConst::I64(truncated as u32 as i64),
-                    IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(truncated as i64),
+                    IrType::I64 | IrType::U64 => IrConst::I64(truncated as i64),
+                    IrType::Ptr => IrConst::ptr_int(truncated as i64),
                     IrType::I128 | IrType::U128 => unreachable!("handled above"),
                     // For int-to-float, use source signedness (not target) to
                     // determine sign/zero extension before float conversion
@@ -337,10 +338,10 @@ impl Lowerer {
 
     /// Evaluate the offsetof pattern: &((type*)0)->member
     /// Also handles nested member access like &((type*)0)->data.x
-    /// Returns Some(IrConst::I64(offset)) if the expression matches the pattern.
+    /// Returns Some(IrConst with offset) if the expression matches the pattern.
     fn eval_offsetof_pattern(&self, expr: &Expr) -> Option<IrConst> {
         let (offset, _ty) = self.eval_offsetof_pattern_with_type(expr)?;
-        Some(IrConst::I64(offset as i64))
+        Some(IrConst::ptr_int(offset as i64))
     }
 
     /// Evaluate an offsetof sub-expression, returning both the accumulated byte offset
@@ -447,7 +448,8 @@ impl Lowerer {
             IrType::U16 => IrConst::I64(bits_lo as u16 as i64),
             IrType::I32 => IrConst::I32(bits_lo as i32),
             IrType::U32 => IrConst::I64(bits_lo as u32 as i64),
-            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(bits_lo as i64),
+            IrType::I64 | IrType::U64 => IrConst::I64(bits_lo as i64),
+            IrType::Ptr => IrConst::ptr_int(bits_lo as i64),
             IrType::I128 | IrType::U128 => IrConst::I128(v128),
             IrType::F32 => {
                 // int-to-float: signedness comes from the source type

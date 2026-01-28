@@ -393,7 +393,13 @@ impl Lowerer {
     }
 
     /// Determine common type for usual arithmetic conversions.
+    /// On ILP32 targets, Ptr is equivalent to I32 (4 bytes); on LP64, Ptr maps to I64.
     pub(super) fn common_type(a: IrType, b: IrType) -> IrType {
+        // Map Ptr to the target-appropriate signed integer type so that all
+        // the size-based ranking below works correctly on both 32-bit and 64-bit.
+        let a = if a == IrType::Ptr { crate::common::types::target_int_ir_type() } else { a };
+        let b = if b == IrType::Ptr { crate::common::types::target_int_ir_type() } else { b };
+
         if a == IrType::I128 || a == IrType::U128 || b == IrType::I128 || b == IrType::U128 {
             if a == IrType::U128 || b == IrType::U128 { return IrType::U128; }
             return IrType::I128;
@@ -401,8 +407,8 @@ impl Lowerer {
         if a == IrType::F128 || b == IrType::F128 { return IrType::F128; }
         if a == IrType::F64 || b == IrType::F64 { return IrType::F64; }
         if a == IrType::F32 || b == IrType::F32 { return IrType::F32; }
-        if a == IrType::I64 || a == IrType::U64 || a == IrType::Ptr
-            || b == IrType::I64 || b == IrType::U64 || b == IrType::Ptr
+        if a == IrType::I64 || a == IrType::U64
+            || b == IrType::I64 || b == IrType::U64
         {
             if a == IrType::U64 || b == IrType::U64 { return IrType::U64; }
             return IrType::I64;

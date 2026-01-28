@@ -826,7 +826,7 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: addr,
             base,
-            offset: Operand::Const(IrConst::I64(byte_offset as i64)),
+            offset: Operand::Const(IrConst::ptr_int(byte_offset as i64)),
             ty,
         });
         self.emit(Instruction::Store { val, ptr: addr, ty , seg_override: AddressSpace::Default });
@@ -851,7 +851,7 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: addr,
             base,
-            offset: Operand::Const(IrConst::I64(byte_offset as i64)),
+            offset: Operand::Const(IrConst::ptr_int(byte_offset as i64)),
             ty,
         });
         addr
@@ -988,7 +988,7 @@ impl Lowerer {
         let str_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         for (j, &byte) in str_bytes.iter().enumerate() {
             let val = Operand::Const(IrConst::I8(byte as i8));
-            let offset = Operand::Const(IrConst::I64((base_offset + j) as i64));
+            let offset = Operand::Const(IrConst::ptr_int((base_offset + j) as i64));
             let addr = self.fresh_value();
             self.emit(Instruction::GetElementPtr {
                 dest: addr, base: alloca, offset, ty: IrType::I8,
@@ -996,7 +996,7 @@ impl Lowerer {
             self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I8 , seg_override: AddressSpace::Default });
         }
         // Null terminator
-        let null_offset = Operand::Const(IrConst::I64((base_offset + str_bytes.len()) as i64));
+        let null_offset = Operand::Const(IrConst::ptr_int((base_offset + str_bytes.len()) as i64));
         let null_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
@@ -1010,7 +1010,7 @@ impl Lowerer {
         for (j, ch) in s.chars().enumerate() {
             let val = Operand::Const(IrConst::I32(ch as i32));
             let byte_offset = base_offset + j * 4;
-            let offset = Operand::Const(IrConst::I64(byte_offset as i64));
+            let offset = Operand::Const(IrConst::ptr_int(byte_offset as i64));
             let addr = self.fresh_value();
             self.emit(Instruction::GetElementPtr {
                 dest: addr, base: alloca, offset, ty: IrType::I8,
@@ -1019,7 +1019,7 @@ impl Lowerer {
         }
         // Null terminator
         let null_byte_offset = base_offset + s.chars().count() * 4;
-        let null_offset = Operand::Const(IrConst::I64(null_byte_offset as i64));
+        let null_offset = Operand::Const(IrConst::ptr_int(null_byte_offset as i64));
         let null_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
@@ -1033,7 +1033,7 @@ impl Lowerer {
         for (j, ch) in s.chars().enumerate() {
             let val = Operand::Const(IrConst::I16(ch as u16 as i16));
             let byte_offset = base_offset + j * 2;
-            let offset = Operand::Const(IrConst::I64(byte_offset as i64));
+            let offset = Operand::Const(IrConst::ptr_int(byte_offset as i64));
             let addr = self.fresh_value();
             self.emit(Instruction::GetElementPtr {
                 dest: addr, base: alloca, offset, ty: IrType::I8,
@@ -1042,7 +1042,7 @@ impl Lowerer {
         }
         // Null terminator
         let null_byte_offset = base_offset + s.chars().count() * 2;
-        let null_offset = Operand::Const(IrConst::I64(null_byte_offset as i64));
+        let null_offset = Operand::Const(IrConst::ptr_int(null_byte_offset as i64));
         let null_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
@@ -1055,7 +1055,7 @@ impl Lowerer {
     pub(super) fn emit_array_element_store(
         &mut self, alloca: Value, val: Operand, offset: usize, ty: IrType,
     ) {
-        let offset_val = Operand::Const(IrConst::I64(offset as i64));
+        let offset_val = Operand::Const(IrConst::ptr_int(offset as i64));
         let elem_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: elem_addr, base: alloca, offset: offset_val, ty,
@@ -1072,7 +1072,7 @@ impl Lowerer {
             self.emit(Instruction::GetElementPtr {
                 dest: addr,
                 base: alloca,
-                offset: Operand::Const(IrConst::I64(offset as i64)),
+                offset: Operand::Const(IrConst::ptr_int(offset as i64)),
                 ty: IrType::I64,
             });
             self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(0)), ptr: addr, ty: IrType::I64,
@@ -1084,7 +1084,7 @@ impl Lowerer {
             self.emit(Instruction::GetElementPtr {
                 dest: addr,
                 base: alloca,
-                offset: Operand::Const(IrConst::I64(offset as i64)),
+                offset: Operand::Const(IrConst::ptr_int(offset as i64)),
                 ty: IrType::I8,
             });
             self.emit(Instruction::Store { val: Operand::Const(IrConst::I8(0)), ptr: addr, ty: IrType::I8,

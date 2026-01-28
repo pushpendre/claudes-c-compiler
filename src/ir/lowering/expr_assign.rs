@@ -125,7 +125,7 @@ impl Lowerer {
         let field_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: field_addr, base: base_addr,
-            offset: Operand::Const(IrConst::I64(field_offset as i64)),
+            offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
             ty: storage_ty,
         });
 
@@ -660,11 +660,12 @@ impl Lowerer {
         };
 
         // Element-wise operation
+        let ptr_int_ty = crate::common::types::target_int_ir_type();
         for i in 0..num_elems {
             let offset = i * elem_size;
             // GEP to element i for LHS
             let lhs_elem_ptr = if offset > 0 {
-                self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_ptr_val), Operand::Const(IrConst::ptr_int(offset as i64)), ptr_int_ty)
             } else {
                 lhs_ptr_val
             };
@@ -676,7 +677,7 @@ impl Lowerer {
                 scalar_op.clone()
             } else {
                 let rhs_elem_ptr = if offset > 0 {
-                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::ptr_int(offset as i64)), ptr_int_ty)
                 } else {
                     rhs_val
                 };
@@ -738,6 +739,7 @@ impl Lowerer {
         };
 
         // Element-wise operation
+        let ptr_int_ty = crate::common::types::target_int_ir_type();
         for i in 0..num_elems {
             let offset = i * elem_size;
 
@@ -746,7 +748,7 @@ impl Lowerer {
                 scalar_op.clone()
             } else {
                 let lhs_elem_ptr = if offset > 0 {
-                    self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_val), Operand::Const(IrConst::ptr_int(offset as i64)), ptr_int_ty)
                 } else {
                     lhs_val
                 };
@@ -760,7 +762,7 @@ impl Lowerer {
                 scalar_op.clone()
             } else {
                 let rhs_elem_ptr = if offset > 0 {
-                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                    self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_val), Operand::Const(IrConst::ptr_int(offset as i64)), ptr_int_ty)
                 } else {
                     rhs_val
                 };
@@ -770,7 +772,7 @@ impl Lowerer {
             };
 
             let result_elem_ptr = if offset > 0 {
-                self.emit_binop_val(IrBinOp::Add, Operand::Value(result_alloca), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(result_alloca), Operand::Const(IrConst::ptr_int(offset as i64)), ptr_int_ty)
             } else {
                 result_alloca
             };

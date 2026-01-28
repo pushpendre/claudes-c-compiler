@@ -812,7 +812,7 @@ impl Lowerer {
                             let dest = self.fresh_value();
                             self.emit(Instruction::GetElementPtr {
                                 dest, base: base_ptr,
-                                offset: Operand::Const(IrConst::I64(offset as i64)),
+                                offset: Operand::Const(IrConst::ptr_int(offset as i64)),
                                 ty: IrType::I8,
                             });
                             return dest;
@@ -837,7 +837,7 @@ impl Lowerer {
                                 let dest = self.fresh_value();
                                 self.emit(Instruction::GetElementPtr {
                                     dest, base: base_ptr,
-                                    offset: Operand::Const(IrConst::I64(offset as i64)),
+                                    offset: Operand::Const(IrConst::ptr_int(offset as i64)),
                                     ty: IrType::I8,
                                 });
                                 return dest;

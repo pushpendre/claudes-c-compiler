@@ -9,7 +9,7 @@ use crate::ir::ir::BlockId;
 use super::codegen::X86Codegen;
 
 impl X86Codegen {
-    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %P0, %a0, %l[name] etc.
+    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %P0, %a0, %n0, %l[name] etc.
     /// in x86 asm template.
     ///
     /// Modifier summary:
@@ -17,6 +17,7 @@ impl X86Codegen {
     /// - `c`: raw constant (no `$` prefix for immediates, no `%` prefix for registers)
     /// - `P`: raw symbol/constant (like `c` — used for `call %P[func]`)
     /// - `a`: address reference (emits `symbol(%rip)` for symbols, raw value for immediates)
+    /// - `n`: negated immediate constant (emits the negative of the constant value)
     ///
     /// Uses operand_types to determine the default register size when no modifier is given.
     pub(super) fn substitute_x86_asm_operands(
@@ -94,7 +95,7 @@ impl X86Codegen {
                         modifier = Some('P');
                         i += 1;
                     }
-                } else if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l' | 'c' | 'a') {
+                } else if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l' | 'c' | 'a' | 'n') {
                     if i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '[') {
                         modifier = Some(chars[i]);
                         i += 1;
@@ -182,10 +183,19 @@ impl X86Codegen {
     ) {
         let is_raw = matches!(modifier, Some('c') | Some('P'));
         let is_addr = modifier == Some('a');
+        let is_neg = modifier == Some('n');
         let has_symbol = op_imm_symbols.get(idx).and_then(|s| s.as_ref());
         let has_imm = op_imm_values.get(idx).and_then(|v| v.as_ref());
 
-        if is_raw {
+        if is_neg {
+            // %n: emit the negated constant value (no $ prefix)
+            if let Some(&imm) = has_imm {
+                result.push_str(&format!("{}", imm.wrapping_neg()));
+            } else {
+                // Fallback: emit as-is if not an immediate (shouldn't happen with correct usage)
+                result.push_str(&op_regs[idx]);
+            }
+        } else if is_raw {
             // %c / %P: emit raw value without $ or % prefix
             if let Some(sym) = has_symbol {
                 result.push_str(sym);

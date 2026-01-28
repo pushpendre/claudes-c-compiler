@@ -289,7 +289,7 @@ impl Lowerer {
                     if current_idx == 0 && items.len() == 1 && elem_size == size {
                         self.emit(Instruction::Store { val, ptr: alloca, ty , seg_override: AddressSpace::Default });
                     } else {
-                        let offset_val = Operand::Const(IrConst::I64(elem_offset as i64));
+                        let offset_val = Operand::Const(IrConst::ptr_int(elem_offset as i64));
                         let elem_ptr = self.fresh_value();
                         self.emit(Instruction::GetElementPtr {
                             dest: elem_ptr, base: alloca, offset: offset_val, ty,
@@ -328,7 +328,7 @@ impl Lowerer {
                             if let Some(first) = sub_items.first() {
                                 if let Initializer::Expr(expr) = &first.init {
                                     let val = self.lower_expr(expr);
-                                    let offset_val = Operand::Const(IrConst::I64(elem_offset as i64));
+                                    let offset_val = Operand::Const(IrConst::ptr_int(elem_offset as i64));
                                     let elem_ptr = self.fresh_value();
                                     self.emit(Instruction::GetElementPtr {
                                         dest: elem_ptr, base: alloca, offset: offset_val, ty,
@@ -410,7 +410,8 @@ impl Lowerer {
                     // Element is constant, dimension is runtime
                     let elem_size = self.sizeof_type(&elem_clone) as i64;
                     if elem_size > 1 {
-                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(elem_size)), IrType::I64);
+                        let ptr_int_ty = crate::common::types::target_int_ir_type();
+                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::ptr_int(elem_size)), ptr_int_ty);
                         return Some(mul);
                     } else {
                         return Some(dim_value);
@@ -823,7 +824,7 @@ impl Lowerer {
         let field_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: field_addr, base: base_addr,
-            offset: Operand::Const(IrConst::I64(field_offset as i64)),
+            offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
             ty: field_ty,
         });
 

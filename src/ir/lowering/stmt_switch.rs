@@ -19,7 +19,7 @@ impl Lowerer {
         let raw_expr_ty = self.get_expr_type(expr);
         let switch_expr_ty = match raw_expr_ty {
             IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
-            IrType::Ptr => IrType::I64,
+            IrType::Ptr => crate::common::types::target_int_ir_type(),
             _ => raw_expr_ty,
         };
         let val = self.lower_expr(expr);
@@ -31,8 +31,9 @@ impl Lowerer {
 
         // Store switch value in an alloca for dispatch chain reloading
         let switch_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: switch_alloca, ty: IrType::I64, size: 8, align: 0, volatile: false });
-        self.emit(Instruction::Store { val, ptr: switch_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+        let switch_size = switch_expr_ty.size();
+        self.emit(Instruction::Alloca { dest: switch_alloca, ty: switch_expr_ty, size: switch_size, align: 0, volatile: false });
+        self.emit(Instruction::Store { val, ptr: switch_alloca, ty: switch_expr_ty, seg_override: AddressSpace::Default });
 
         let dispatch_label = self.fresh_label();
         let end_label = self.fresh_label();
@@ -117,7 +118,7 @@ impl Lowerer {
         if !cases.is_empty() && case_ranges.is_empty() {
             // Load the switch value once and use Switch terminator
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: switch_ty, seg_override: AddressSpace::Default });
             self.terminate(Terminator::Switch {
                 val: Operand::Value(loaded),
                 cases: cases.to_vec(),
@@ -131,7 +132,7 @@ impl Lowerer {
             // Switch terminator for the simple cases, with fallthrough to range checks
             let range_check_block = if !case_ranges.is_empty() { self.fresh_label() } else { fallback };
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: switch_ty, seg_override: AddressSpace::Default });
             self.terminate(Terminator::Switch {
                 val: Operand::Value(loaded),
                 cases: cases.to_vec(),
@@ -148,11 +149,12 @@ impl Lowerer {
         let ge_op = if is_unsigned { IrCmpOp::Uge } else { IrCmpOp::Sge };
         let le_op = if is_unsigned { IrCmpOp::Ule } else { IrCmpOp::Sle };
         let range_count = case_ranges.len();
+        let make_case_const = |v: i64| -> IrConst { IrConst::from_i64(v, switch_ty) };
         for (ri, (low, high, range_label)) in case_ranges.iter().enumerate() {
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
-            let ge_result = self.emit_cmp_val(ge_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
-            let le_result = self.emit_cmp_val(le_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: switch_ty, seg_override: AddressSpace::Default });
+            let ge_result = self.emit_cmp_val(ge_op, Operand::Value(loaded), Operand::Const(make_case_const(*low)), switch_ty);
+            let le_result = self.emit_cmp_val(le_op, Operand::Value(loaded), Operand::Const(make_case_const(*high)), switch_ty);
             let and_result = self.fresh_value();
             self.emit(Instruction::BinOp {
                 dest: and_result,

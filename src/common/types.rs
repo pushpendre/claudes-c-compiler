@@ -39,7 +39,6 @@ pub fn target_int_ir_type() -> IrType {
     if target_is_32bit() { IrType::I32 } else { IrType::I64 }
 }
 
-
 /// Reference-counted string used for struct/union layout keys in CType.
 /// Cloning is a cheap reference count increment instead of a heap allocation.
 pub type RcStr = Rc<str>;

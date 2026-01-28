@@ -655,7 +655,9 @@ fn ir_type_size(ty: IrType) -> usize {
         IrType::I8 | IrType::U8 => 1,
         IrType::I16 | IrType::U16 => 2,
         IrType::I32 | IrType::U32 | IrType::F32 => 4,
-        IrType::I64 | IrType::U64 | IrType::F64 | IrType::Ptr => 8,
+        IrType::I64 | IrType::U64 | IrType::F64 => 8,
+        // Ptr: target-dependent (4 on ILP32, 8 on LP64)
+        IrType::Ptr => crate::common::types::target_ptr_size(),
         IrType::I128 | IrType::U128 | IrType::F128 => 16,
         IrType::Void => 0,
     }

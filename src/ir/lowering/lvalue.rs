@@ -75,7 +75,7 @@ impl Lowerer {
                 self.emit(Instruction::GetElementPtr {
                     dest: field_addr,
                     base: base_addr,
-                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
                     ty: IrType::Ptr,
                 });
                 Some(LValue::Address(field_addr, addr_space))
@@ -97,7 +97,7 @@ impl Lowerer {
                 self.emit(Instruction::GetElementPtr {
                     dest: field_addr,
                     base: base_addr,
-                    offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                    offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
                     ty: IrType::Ptr,
                 });
                 Some(LValue::Address(field_addr, addr_space))
@@ -194,11 +194,12 @@ impl Lowerer {
             (base, index)
         };
 
+        let ptr_int_ty = crate::common::types::target_int_ir_type();
         let index_ty = self.get_expr_type(actual_index);
         let index_val = self.lower_expr(actual_index);
-        // Widen the index to I64 (sign-extend for signed, zero-extend for unsigned)
+        // Widen the index to pointer width (sign-extend for signed, zero-extend for unsigned)
         // before use in pointer arithmetic.
-        let index_val = self.emit_implicit_cast(index_val, index_ty, IrType::I64);
+        let index_val = self.emit_implicit_cast(index_val, index_ty, ptr_int_ty);
 
         // Check for VLA runtime stride first
         let vla_stride = self.get_vla_stride_for_subscript(actual_base);
@@ -212,12 +213,12 @@ impl Lowerer {
         // Compute offset = index * stride (runtime VLA stride or compile-time elem_size)
         let offset = if let Some(stride_val) = vla_stride {
             // Use runtime VLA stride
-            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Value(stride_val), IrType::I64);
+            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Value(stride_val), ptr_int_ty);
             Operand::Value(mul)
         } else if elem_size == 1 {
             index_val
         } else {
-            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64);
+            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Const(IrConst::ptr_int(elem_size as i64)), ptr_int_ty);
             Operand::Value(mul)
         };
 
@@ -235,7 +236,7 @@ impl Lowerer {
             dest: addr,
             base: base_val,
             offset,
-            ty: IrType::I64,
+            ty: IrType::Ptr,
         });
         addr
     }
@@ -340,7 +341,7 @@ impl Lowerer {
                     self.emit(Instruction::GetElementPtr {
                         dest: field_addr,
                         base: base_addr,
-                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                        offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
                         ty: IrType::Ptr,
                     });
                     return Operand::Value(field_addr);
@@ -369,7 +370,7 @@ impl Lowerer {
                     self.emit(Instruction::GetElementPtr {
                         dest: field_addr,
                         base: base_addr,
-                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                        offset: Operand::Const(IrConst::ptr_int(field_offset as i64)),
                         ty: IrType::Ptr,
                     });
                     return Operand::Value(field_addr);

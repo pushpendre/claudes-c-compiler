@@ -124,37 +124,39 @@ impl Lowerer {
     fn try_lower_pointer_arithmetic(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
         let lhs_is_ptr = self.expr_is_pointer(lhs);
         let rhs_is_ptr = self.expr_is_pointer(rhs);
+        // Use target-appropriate pointer-width type: I32 on ILP32, I64 on LP64
+        let ptr_int_ty = crate::common::types::target_int_ir_type();
 
         if lhs_is_ptr && !rhs_is_ptr {
             let elem_size = self.get_pointer_elem_size_from_expr(lhs);
             let rhs_ty = self.get_expr_type(rhs);
             let lhs_val = self.lower_expr(lhs);
             let rhs_val = self.lower_expr(rhs);
-            // Widen the integer index to I64 (sign-extend for signed types,
+            // Widen the integer index to pointer width (sign-extend for signed types,
             // zero-extend for unsigned) before scaling and adding to the pointer.
-            let rhs_val = self.emit_implicit_cast(rhs_val, rhs_ty, IrType::I64);
+            let rhs_val = self.emit_implicit_cast(rhs_val, rhs_ty, ptr_int_ty);
             let scaled_rhs = self.scale_index(rhs_val, elem_size);
             let ir_op = if *op == BinOp::Add { IrBinOp::Add } else { IrBinOp::Sub };
-            let dest = self.emit_binop_val(ir_op, lhs_val, scaled_rhs, IrType::I64);
+            let dest = self.emit_binop_val(ir_op, lhs_val, scaled_rhs, ptr_int_ty);
             Some(Operand::Value(dest))
         } else if rhs_is_ptr && !lhs_is_ptr && *op == BinOp::Add {
             let elem_size = self.get_pointer_elem_size_from_expr(rhs);
             let lhs_ty = self.get_expr_type(lhs);
             let lhs_val = self.lower_expr(lhs);
-            // Widen the integer index to I64 before scaling and adding to the pointer.
-            let lhs_val = self.emit_implicit_cast(lhs_val, lhs_ty, IrType::I64);
+            // Widen the integer index to pointer width before scaling and adding to the pointer.
+            let lhs_val = self.emit_implicit_cast(lhs_val, lhs_ty, ptr_int_ty);
             let rhs_val = self.lower_expr(rhs);
             let scaled_lhs = self.scale_index(lhs_val, elem_size);
-            let dest = self.emit_binop_val(IrBinOp::Add, scaled_lhs, rhs_val, IrType::I64);
+            let dest = self.emit_binop_val(IrBinOp::Add, scaled_lhs, rhs_val, ptr_int_ty);
             Some(Operand::Value(dest))
         } else if lhs_is_ptr && rhs_is_ptr && *op == BinOp::Sub {
             let elem_size = self.get_pointer_elem_size_from_expr(lhs);
             let lhs_val = self.lower_expr(lhs);
             let rhs_val = self.lower_expr(rhs);
-            let diff = self.emit_binop_val(IrBinOp::Sub, lhs_val, rhs_val, IrType::I64);
+            let diff = self.emit_binop_val(IrBinOp::Sub, lhs_val, rhs_val, ptr_int_ty);
             if elem_size > 1 {
-                let scale = Operand::Const(IrConst::I64(elem_size as i64));
-                let dest = self.emit_binop_val(IrBinOp::SDiv, Operand::Value(diff), scale, IrType::I64);
+                let scale = Operand::Const(IrConst::ptr_int(elem_size as i64));
+                let dest = self.emit_binop_val(IrBinOp::SDiv, Operand::Value(diff), scale, ptr_int_ty);
                 Some(Operand::Value(dest))
             } else {
                 Some(Operand::Value(diff))
@@ -169,7 +171,8 @@ impl Lowerer {
         if scale <= 1 {
             return index;
         }
-        let scaled = self.emit_binop_val(IrBinOp::Mul, index, Operand::Const(IrConst::I64(scale as i64)), IrType::I64);
+        let ptr_int_ty = crate::common::types::target_int_ir_type();
+        let scaled = self.emit_binop_val(IrBinOp::Mul, index, Operand::Const(IrConst::ptr_int(scale as i64)), ptr_int_ty);
         Operand::Value(scaled)
     }
 
@@ -678,8 +681,9 @@ impl Lowerer {
 
     fn inc_dec_step_and_type(&self, ty: IrType, expr: &Expr) -> (Operand, IrType) {
         if ty == IrType::Ptr {
+            let ptr_int_ty = crate::common::types::target_int_ir_type();
             let elem_size = self.get_pointer_elem_size_from_expr(expr);
-            (Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64)
+            (Operand::Const(IrConst::ptr_int(elem_size as i64)), ptr_int_ty)
         } else if ty == IrType::F64 {
             (Operand::Const(IrConst::F64(1.0)), IrType::F64)
         } else if ty == IrType::F32 {
@@ -689,6 +693,8 @@ impl Lowerer {
         } else if ty == IrType::I128 || ty == IrType::U128 {
             (Operand::Const(IrConst::I128(1)), ty)
         } else {
+            // For regular integer types (I8..U64), use I64 for widening arithmetic.
+            // The caller truncates back to the variable's type after the operation.
             (Operand::Const(IrConst::I64(1)), IrType::I64)
         }
     }

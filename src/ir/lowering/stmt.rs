@@ -1204,11 +1204,12 @@ impl Lowerer {
                     } else {
                         // First runtime dimension: multiply by accumulated const
                         if current_const_stride > 1 {
+                            let ptr_int_ty = crate::common::types::target_int_ir_type();
                             self.emit_binop_val(
                                 IrBinOp::Mul,
                                 Operand::Value(dim_value),
-                                Operand::Const(IrConst::I64(current_const_stride as i64)),
-                                IrType::I64,
+                                Operand::Const(IrConst::ptr_int(current_const_stride as i64)),
+                                ptr_int_ty,
                             )
                         } else {
                             dim_value
@@ -1265,7 +1266,8 @@ impl Lowerer {
                 let dim_val = self.lower_expr(&size_expr_clone);
                 let dim_value = self.operand_to_value(dim_val);
                 if elem_size > 1 {
-                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64);
+                    let ptr_int_ty = crate::common::types::target_int_ir_type();
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::ptr_int(elem_size as i64)), ptr_int_ty);
                     Some(mul)
                 } else {
                     Some(dim_value)
