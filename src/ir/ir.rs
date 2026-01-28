@@ -1325,6 +1325,7 @@ impl Instruction {
                 _ => None,
             },
             Instruction::GetReturnF128Second { .. } => Some(IrType::F128),
+            Instruction::ParamRef { ty, .. } => Some(*ty),
             _ => None,
         }
     }

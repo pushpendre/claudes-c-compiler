@@ -6,6 +6,7 @@
 //! - `&x` (address of a global variable)
 //! - `func` (function name as pointer)
 //! - `arr` (array name decay to pointer)
+//! - `arr[i]` (multidimensional array subscript with sub-array decay to pointer)
 //! - `&arr[i][j]` (chained array subscripts with constant indices)
 //! - `&s.a.b.c` (chained struct member access)
 //! - `&((type*)0)->member` patterns (resolved via offsetof in const_eval.rs)
@@ -53,6 +54,7 @@ impl Lowerer {
     /// - `&x` (address of a global variable)
     /// - `func` (function name used as pointer)
     /// - `arr` (array name decays to pointer)
+    /// - `arr[i]` (multidimensional array subscript, sub-array decays to pointer)
     /// - `&arr[3]` (address of array element with constant index)
     /// - `&s.field` (address of struct field)
     /// - `(type *)&x` (cast of address expression)
@@ -113,6 +115,15 @@ impl Lowerer {
                     }
                 }
                 None
+            }
+            // Array subscript on a multidimensional global array where the result
+            // is a sub-array that decays to a pointer. For example:
+            //   extern const u8 regs[10][16];
+            //   .ptr = regs[3]   // regs[3] is u8[16], decays to u8*
+            // This resolves to GlobalAddrOffset("regs", 3*16).
+            // Critical for Linux kernel's clk_alpha_pll_regs patterns.
+            Expr::ArraySubscript(_, _, _) => {
+                self.resolve_array_subscript_decay(expr)
             }
             // Member access on a global struct where the field is an array:
             // e.g., `global_struct.array_field` decays to &global_struct.array_field[0]
@@ -303,6 +314,50 @@ impl Lowerer {
                 // then apply array subscript offsets using the member's array element size.
                 self.resolve_member_array_subscript(current, &subscripts)
             }
+            _ => None,
+        }
+    }
+
+    /// Resolve an array subscript expression that results in array-to-pointer decay.
+    /// This handles `regs[i]` where `regs` is a multidimensional array, so `regs[i]`
+    /// yields a sub-array that decays to a pointer. For example:
+    ///   extern const u8 regs[10][16];
+    ///   const u8 *p = regs[3];  // -> GlobalAddrOffset("regs", 48)
+    /// We reuse resolve_chained_array_subscript for offset computation, then verify
+    /// that the subscript count is less than the array dimension count (meaning the
+    /// result is a sub-array, not a scalar element).
+    fn resolve_array_subscript_decay(&self, expr: &Expr) -> Option<GlobalInit> {
+        // Count subscripts and find the base
+        let mut num_subscripts = 0usize;
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::ArraySubscript(base, _, _) => {
+                    num_subscripts += 1;
+                    current = base.as_ref();
+                }
+                _ => break,
+            }
+        }
+        // The base must be a global array with more dimensions than subscripts
+        // (so the result is a sub-array that decays to a pointer)
+        match current {
+            Expr::Identifier(name, _) => {
+                let global_name = self.resolve_to_global_name(name)?;
+                let ginfo = self.globals.get(&global_name)?;
+                if !ginfo.is_array {
+                    return None;
+                }
+                // Check that this is a partial subscript (result is still an array)
+                let num_dims = ginfo.array_dim_strides.len();
+                if num_dims == 0 || num_subscripts >= num_dims {
+                    return None;
+                }
+                // Use the existing chained subscript resolver for offset computation
+                self.resolve_chained_array_subscript(expr)
+            }
+            // TODO: handle MemberAccess/Cast bases for patterns like
+            // global_struct.field_2d_array[i] decay
             _ => None,
         }
     }

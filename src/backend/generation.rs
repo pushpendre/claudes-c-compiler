@@ -364,8 +364,13 @@ fn detect_cmp_branch_fusion(block: &BasicBlock, use_counts: &[u32]) -> Option<us
         return None;
     }
 
-    // Don't fuse wide-int or float comparisons (they have special codegen paths)
+    // Don't fuse wide-int or float comparisons (they have special codegen paths).
+    // On 32-bit targets, also exclude I64/U64: the fused compare-and-branch
+    // uses 32-bit cmpl which only tests the low half of a 64-bit value.
     if is_wide_int_type(*ty) || ty.is_float() {
+        return None;
+    }
+    if crate::common::types::target_is_32bit() && matches!(ty, IrType::I64 | IrType::U64) {
         return None;
     }
 

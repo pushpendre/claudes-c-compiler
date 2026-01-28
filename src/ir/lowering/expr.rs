@@ -43,8 +43,16 @@ impl Lowerer {
             return Operand::Value(result);
         }
         let (abs_mask, _, _, _, _) = Self::fp_masks(float_ty);
-        let result = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(abs_mask)), IrType::I64);
-        Operand::Value(result)
+        let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(abs_mask)), IrType::I64);
+        if crate::common::types::target_is_32bit() {
+            // On 32-bit targets, the masked result is typed as I64 but needs to
+            // be reduced to a boolean for the conditional branch, since the
+            // backend's branch-on-nonzero only tests the low 32 bits.
+            let result = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(masked), Operand::Const(IrConst::I64(0)), IrType::I64);
+            Operand::Value(result)
+        } else {
+            Operand::Value(masked)
+        }
     }
 
     /// Lower a condition expression, ensuring floating-point values are properly
