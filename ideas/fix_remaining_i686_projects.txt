@@ -1,11 +1,11 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28
+Date: 2026-01-28 (updated)
 
-Current status (after rep movsb clobber fix + Ptr data emission fix):
-- Unit tests: ~85.6% pass (2343/2737 on 10% sample)
-- Projects passing: 2/12 (zlib, libjpeg)
-- Projects failing: lua, libsodium, mquickjs, libpng, jq, sqlite, mbedtls, libuv, libffi, musl, tcc
+Current status (after 64-bit conditional branch fix):
+- Unit tests: ~90.7% pass (24697/27361 full suite)
+- Projects passing: 2/12 (zlib, libpng)
+- Projects failing: lua, libsodium, mquickjs, jq, libjpeg, sqlite, mbedtls, libuv, libffi, musl, tcc
 
 Known remaining issues:
 
@@ -36,7 +36,7 @@ Known remaining issues:
    - Some tests timeout (possible infinite loop in crypto code)
    - Some tests segfault
 
-9. libpng: SIGSEGV in pngtest
+9. libjpeg: was passing, now failing (may be regression from upstream changes)
 
 10. jq: 1/12 pass, rest fail with SIGABRT or SIGSEGV
 
@@ -44,6 +44,11 @@ Priority investigation targets:
 - Lua (simplest codebase, good for isolating computation bugs)
 - mquickjs (JS engine, exercises many codegen paths)
 - sqlite (exercises everything, good canary)
+
+Top failing test categories (by tag):
+- complex number arrays/operations (70-99% fail)
+- signed integer arithmetic (69%)
+- long double complex (68%)
 
 Techniques:
 - Compare i686 assembly output against x86-64 for suspect functions
