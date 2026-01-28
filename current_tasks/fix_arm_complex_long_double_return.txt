@@ -1,0 +1,20 @@
+Task: Fix ARM64 _Complex long double return ABI
+Status: in_progress
+
+Problem:
+On AAPCS64, _Complex long double should be returned in Q0/Q1 register pair,
+but our compiler incorrectly uses sret (hidden pointer return) for this type.
+This causes all libc functions returning long double _Complex (cpowl, cexpl,
+clogl, etc.) to return garbage values on ARM64.
+
+GCC returns _Complex long double in Q0 (real) and Q1 (imag), treating it
+like a Homogeneous Floating-Point Aggregate (HFA) with 2 quad-precision
+members. Our compiler treats it as a large struct and passes it via sret.
+
+Fix:
+1. Make returns_complex_long_double_in_regs() return true for ARM64
+2. Set IR return type to F128 for ARM64 complex long double returns
+3. Implement emit_get_return_f128_second to read Q1 register
+4. Implement emit_set_return_f128_second to write Q1 register
+
+Affected tests: compiler_suite_0112_* (12 tests), compiler_suite_0147_* (partial)
