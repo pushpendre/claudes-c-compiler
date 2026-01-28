@@ -1,0 +1,17 @@
+Task: Fix hardcoded pointer sizes in IR lowering for i686
+
+Status: in_progress
+
+Problem:
+The IR lowering layer treats IrType::Ptr as synonymous with IrType::I64 throughout
+pointer arithmetic, conditional expressions, constant evaluation, array initialization,
+switch statements, and more. On 64-bit targets this happens to be correct, but on i686
+(32-bit, pointers = 4 bytes), every hardcoded IrType::I64 produces incorrect 8-byte
+operations where 4-byte operations are needed.
+
+Plan:
+1. Add a ptr_int_type() helper that returns IrType::I32 on 32-bit, IrType::I64 on 64-bit
+2. Replace all hardcoded IrType::I64 pointer assumptions in IR lowering with ptr_int_type()
+3. Fix mem2reg's local ir_type_size() for Ptr
+4. Fix alloca size hardcoding for pointer-sized data
+5. Verify no regressions on x86-64, ARM, RISC-V
