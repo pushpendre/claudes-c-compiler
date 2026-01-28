@@ -300,16 +300,20 @@ fn find_dead_call_functions(module: &IrModule) -> FxHashSet<String> {
         if !is_side_effect_free(func) {
             continue;
         }
-        // All return terminators must be Return(None)
-        let all_void_returns = func.blocks.iter().all(|b| {
+        // All terminators must be compatible with dead call elimination.
+        // Unreachable terminators represent trap instructions (ud2/brk/ebreak)
+        // which are observable side effects - functions containing them must
+        // NOT be eliminated (e.g., functions wrapping __builtin_trap()).
+        let safe_to_eliminate = func.blocks.iter().all(|b| {
             match &b.terminator {
                 Terminator::Return(None) => true,
                 Terminator::Return(Some(_)) => false,
-                // Non-return terminators (Branch, CondBranch, etc.) are fine
+                Terminator::Unreachable => false,
+                // Non-return terminators (Branch, CondBranch, Switch, etc.) are fine
                 _ => true,
             }
         });
-        if !all_void_returns {
+        if !safe_to_eliminate {
             continue;
         }
         result.insert(func.name.clone());

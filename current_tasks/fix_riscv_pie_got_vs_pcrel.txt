@@ -1,0 +1,21 @@
+Task: Fix RISC-V PIE codegen using GOT_HI20 instead of PCREL_HI20 for local symbols
+Status: in_progress
+Started: 2026-01-28
+
+Problem: When compiling with -fpie (position-independent executable), the RISC-V
+backend emits `la` for ALL global/static data addresses. The GNU assembler
+defaults to PIC mode when -fpie is active, which causes `la` to expand with
+R_RISCV_GOT_HI20 (GOT indirection) for all symbols. However, local symbols
+(static, hidden visibility) should use R_RISCV_PCREL_HI20 (direct PC-relative
+addressing) via the `lla` pseudo-instruction.
+
+This causes the Linux kernel to hang during boot because the PI (position-
+independent) early boot code (arch/riscv/kernel/pi/) is compiled with -fpie
+and references local data that has no GOT entry.
+
+Root cause: emit_global_addr() always uses `la` regardless of whether the
+symbol is local. The x86 and AArch64 backends correctly use needs_got() to
+decide, but RISC-V delegates entirely to the assembler.
+
+Fix: Make emit_global_addr() use `lla` for local symbols in PIC mode, and
+also fix PIC jump table code that uses `la` for local table labels.
