@@ -1,0 +1,20 @@
+Task: Fix RISC-V unsigned integer to float conversion sign extension bug
+
+Status: in_progress
+
+Bug: On RISC-V, converting a sub-64-bit unsigned integer (U8/U16/U32) to float/double
+inside a loop produces incorrect results when the value has bit 31 set.
+
+Root cause: The RISC-V backend uses fcvt.d.lu / fcvt.s.lu (unsigned 64-bit to float)
+for all unsigned-to-float conversions. However, on RISC-V, W-suffix instructions
+(like sllw) sign-extend the 32-bit result to 64 bits. So if bit 31 is set, the upper
+32 bits of the register are all 1s, making fcvt.d.lu treat it as a huge unsigned
+64-bit value instead of a small unsigned 32-bit value.
+
+Fix: For sub-64-bit unsigned sources (from_u64 == false), use fcvt.d.wu / fcvt.s.wu
+(convert unsigned word to float/double) instead of fcvt.d.lu / fcvt.s.lu.
+Also change the CastKind::UnsignedToFloat variant to carry from_ty for proper
+zero-extension of U8/U16 values.
+
+Test: llvm_unittest_2005_07_17_INT_To_FP (RISC-V), plus custom tests showing
+(double)(unsigned int)(32 << 26) produces wrong result in loops.
