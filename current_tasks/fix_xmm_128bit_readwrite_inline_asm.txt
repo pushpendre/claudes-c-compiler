@@ -1,0 +1,25 @@
+Task: Fix 128-bit XMM read-write inline asm constraint truncation
+Status: in_progress
+Date: 2026-01-28
+
+Problem:
+When using "+x" (read-write XMM) inline asm constraints with 128-bit vector types
+(e.g., __attribute__((vector_size(16)))), only the lower 64 bits were loaded into
+the XMM register. The upper 64 bits were zeroed.
+
+Root cause:
+The IR lowering for "+x" constraints creates a synthetic Load instruction to read
+the current value of the vector variable. But CType::Vector maps to IrType::Ptr
+(8 bytes), so the Load only transfers 64 bits from the 128-bit alloca to an 8-byte
+intermediate stack slot. The inline asm emitter then loads from this truncated slot.
+
+Fix:
+For vector types, skip the intermediate Load and pass the alloca pointer directly
+as the synthetic input operand. The backend's load_input_to_reg already handles
+alloca operands correctly using movdqu (128-bit unaligned load) for XMM registers.
+
+Files changed:
+- src/ir/lowering/stmt_asm.rs: Skip Load for vector types in "+" constraint handling
+- tests/asm-xmm-readwrite-128bit-vector-x86/: Regression test
+
+Impact: Fixes 3+ x86 tests (pslldq, pclmulqdq, pinsrw), also fixes tests on ARM/RISC-V/i686.
