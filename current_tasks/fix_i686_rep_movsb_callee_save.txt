@@ -1,0 +1,17 @@
+Task: Fix i686 rep movsb clobbering callee-saved registers (ESI/EDI)
+Status: in_progress
+
+Problem:
+The i686 emit_memcpy function uses `rep movsb` which implicitly clobbers ESI, EDI, and ECX.
+However, ESI and EDI are callee-saved registers in the System V i386 ABI.
+
+The code only saved/restored ESI/EDI if they were register-allocated in the current function.
+This meant that when a function used rep movsb (e.g., to copy a struct to an sret pointer)
+but didn't have any values assigned to ESI/EDI, those registers were clobbered without
+save/restore, violating the ABI contract.
+
+This caused widespread crashes in jq and other programs on i686, because callers that stored
+values in ESI/EDI across calls would find those values corrupted after calling any function
+that performed a struct copy.
+
+Fix: Always push/pop ESI and EDI around rep movsb in emit_memcpy.
