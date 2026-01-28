@@ -363,7 +363,7 @@ impl Lowerer {
             SizeofArg::Type(ts) => self.sizeof_type(ts),
             SizeofArg::Expr(expr) => self.sizeof_expr(expr),
         };
-        Operand::Const(IrConst::I64(size as i64))
+        Operand::Const(IrConst::ptr_int(size as i64))
     }
 
     fn get_vla_sizeof(&self, arg: &SizeofArg) -> Option<Value> {
@@ -901,7 +901,7 @@ impl Lowerer {
             self.push_scope();
         }
 
-        let mut last_val = Operand::Const(IrConst::I64(0));
+        let mut last_val = Operand::Const(IrConst::ptr_int(0));
         for item in &compound.items {
             match item {
                 BlockItem::Statement(stmt) => {
@@ -1058,12 +1058,13 @@ impl Lowerer {
 
             // Load imag part (second F32 at offset +4)
             let imag_ptr = self.fresh_value();
+            let ptr_int_ty = crate::common::types::target_int_ir_type();
             self.emit(Instruction::BinOp {
                 dest: imag_ptr,
                 op: IrBinOp::Add,
                 lhs: Operand::Value(tmp_alloca),
-                rhs: Operand::Const(IrConst::I64(4)),
-                ty: IrType::I64,
+                rhs: Operand::Const(IrConst::ptr_int(4)),
+                ty: ptr_int_ty,
             });
             let imag_dest = self.fresh_value();
             self.emit(Instruction::Load { dest: imag_dest, ptr: imag_ptr, ty: IrType::F32,

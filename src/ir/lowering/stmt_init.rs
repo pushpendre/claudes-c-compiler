@@ -908,6 +908,22 @@ impl Lowerer {
                         continue;
                     }
                 }
+                // wchar_t array with braced wide string: wchar_t w[] = {L"hello"};
+                if !da.is_array_of_pointers && (da.elem_ir_ty == IrType::I32 || da.elem_ir_ty == IrType::U32) {
+                    if let Expr::WideStringLiteral(s, _) = e {
+                        self.emit_wide_string_to_alloca(alloca, s, current_idx * da.elem_size);
+                        current_idx += 1;
+                        continue;
+                    }
+                }
+                // char16_t array with braced char16 string: char16_t w[] = {u"hello"};
+                if !da.is_array_of_pointers && (da.elem_ir_ty == IrType::I16 || da.elem_ir_ty == IrType::U16) {
+                    if let Expr::Char16StringLiteral(s, _) = e {
+                        self.emit_char16_string_to_alloca(alloca, s, current_idx * da.elem_size);
+                        current_idx += 1;
+                        continue;
+                    }
+                }
                 if is_complex_elem_array {
                     let val = self.lower_expr(e);
                     let src = self.operand_to_value(val);

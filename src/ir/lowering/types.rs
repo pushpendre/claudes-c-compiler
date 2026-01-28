@@ -812,7 +812,7 @@ impl Lowerer {
             2 => IrType::I16,
             4 => IrType::I32,
             8 => IrType::I64,
-            _ => IrType::I64,
+            _ => crate::common::types::target_int_ir_type(),
         }
     }
 

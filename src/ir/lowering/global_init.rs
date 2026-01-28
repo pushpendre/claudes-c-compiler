@@ -199,6 +199,26 @@ impl Lowerer {
                         }
                     }
                 }
+                // Handle brace-wrapped wide string literal for wchar_t arrays:
+                // wchar_t w[] = {L"hello"} or static wchar_t w[] = {L"hello"}
+                if is_array && is_char_not_ptr_array && (base_ty == IrType::I32 || base_ty == IrType::U32) {
+                    if items.len() == 1 && items[0].designators.is_empty() {
+                        if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
+                            let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
+                            return GlobalInit::WideString(chars);
+                        }
+                    }
+                }
+                // Handle brace-wrapped char16 string literal for char16_t arrays:
+                // char16_t w[] = {u"hello"} or static char16_t w[] = {u"hello"}
+                if is_array && is_char_not_ptr_array && (base_ty == IrType::I16 || base_ty == IrType::U16) {
+                    if items.len() == 1 && items[0].designators.is_empty() {
+                        if let Initializer::Expr(Expr::Char16StringLiteral(s, _)) = &items[0].init {
+                            let chars: Vec<u16> = s.chars().map(|c| c as u16).collect();
+                            return GlobalInit::Char16String(chars);
+                        }
+                    }
+                }
 
                 // Array of complex types: emit {real, imag} pairs for each element.
                 // Complex types (e.g., double _Complex) have base_ty=Ptr in IR but are

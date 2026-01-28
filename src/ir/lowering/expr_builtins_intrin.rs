@@ -117,7 +117,8 @@ impl Lowerer {
         let ty = Self::intrinsic_type_from_suffix(name);
         let pop = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest: pop, op: IrUnaryOp::Popcount, src: arg, ty });
-        let dest = self.emit_binop_val(IrBinOp::And, Operand::Value(pop), Operand::Const(IrConst::I64(1)), ty);
+        let one = if ty == IrType::I64 { IrConst::I64(1) } else { IrConst::I32(1) };
+        let dest = self.emit_binop_val(IrBinOp::And, Operand::Value(pop), Operand::Const(one), ty);
         Some(Operand::Value(dest))
     }
 
@@ -139,7 +140,7 @@ impl Lowerer {
             dest: sign_bit,
             op: IrBinOp::LShr,
             lhs: arg.clone(),
-            rhs: Operand::Const(IrConst::I64(bits)),
+            rhs: Operand::Const(if ty == IrType::I64 { IrConst::I64(bits) } else { IrConst::I32(bits as i32) }),
             ty,
         });
 
@@ -175,7 +176,7 @@ impl Lowerer {
         let result = self.emit_binop_val(
             IrBinOp::Sub,
             Operand::Value(clz_val),
-            Operand::Const(IrConst::I64(1)),
+            Operand::Const(IrConst::I32(1)),
             IrType::I32,
         );
 

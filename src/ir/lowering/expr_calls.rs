@@ -126,7 +126,7 @@ impl Lowerer {
                 // Start a new (unreachable) block so subsequent code can still be lowered
                 let dead_label = self.fresh_label();
                 self.start_block(dead_label);
-                return Operand::Const(IrConst::I64(0));
+                return Operand::Const(IrConst::ptr_int(0));
             }
         }
 
@@ -243,7 +243,7 @@ impl Lowerer {
                 self.terminate(Terminator::Unreachable);
                 let dead_label = self.fresh_label();
                 self.start_block(dead_label);
-                return Operand::Const(IrConst::I64(0));
+                return Operand::Const(IrConst::ptr_int(0));
             }
         }
 
@@ -329,10 +329,11 @@ impl Lowerer {
                     self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F32 , seg_override: AddressSpace::Default });
                     // Store imag part (F32) at offset 4
                     let imag_ptr = self.fresh_value();
+                    let ptr_int_ty = crate::common::types::target_int_ir_type();
                     self.emit(Instruction::BinOp {
                         dest: imag_ptr, op: IrBinOp::Add,
-                        lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::I64(4)),
-                        ty: IrType::I64,
+                        lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::ptr_int(4)),
+                        ty: ptr_int_ty,
                     });
                     self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F32 , seg_override: AddressSpace::Default });
                     Some(Operand::Value(alloca))
@@ -347,10 +348,11 @@ impl Lowerer {
                 self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 16, align: 0, volatile: false });
                 self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 , seg_override: AddressSpace::Default });
                 let imag_ptr = self.fresh_value();
+                let ptr_int_ty = crate::common::types::target_int_ir_type();
                 self.emit(Instruction::BinOp {
                     dest: imag_ptr, op: IrBinOp::Add,
-                    lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::I64(8)),
-                    ty: IrType::I64,
+                    lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::ptr_int(8)),
+                    ty: ptr_int_ty,
                 });
                 self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F64 , seg_override: AddressSpace::Default });
                 Some(Operand::Value(alloca))
@@ -367,10 +369,11 @@ impl Lowerer {
                 self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F128, seg_override: AddressSpace::Default });
                 // Store imag part (F128) at offset 16
                 let imag_ptr = self.fresh_value();
+                let ptr_int_ty = crate::common::types::target_int_ir_type();
                 self.emit(Instruction::BinOp {
                     dest: imag_ptr, op: IrBinOp::Add,
-                    lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::I64(16)),
-                    ty: IrType::I64,
+                    lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::ptr_int(16)),
+                    ty: ptr_int_ty,
                 });
                 self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F128, seg_override: AddressSpace::Default });
                 Some(Operand::Value(alloca))

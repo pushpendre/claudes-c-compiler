@@ -47,7 +47,7 @@ impl Lowerer {
         let zero = Self::complex_zero(comp_ty);
         let real_nz = self.emit_cmp_val(IrCmpOp::Ne, real, zero.clone(), comp_ty);
         let imag_nz = self.emit_cmp_val(IrCmpOp::Ne, imag, zero, comp_ty);
-        let result = self.emit_binop_val(IrBinOp::Or, Operand::Value(real_nz), Operand::Value(imag_nz), IrType::I64);
+        let result = self.emit_binop_val(IrBinOp::Or, Operand::Value(real_nz), Operand::Value(imag_nz), crate::common::types::target_int_ir_type());
         Operand::Value(result)
     }
 
@@ -92,7 +92,7 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: imag_ptr,
             base: ptr,
-            offset: Operand::Const(IrConst::I64(comp_size as i64)),
+            offset: Operand::Const(IrConst::ptr_int(comp_size as i64)),
             ty: IrType::I8, // byte offset
         });
         self.emit(Instruction::Store { val: imag, ptr: imag_ptr, ty: comp_ty,
@@ -120,7 +120,7 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: imag_ptr,
             base: ptr,
-            offset: Operand::Const(IrConst::I64(comp_size as i64)),
+            offset: Operand::Const(IrConst::ptr_int(comp_size as i64)),
             ty: IrType::I8,
         });
         let dest = self.fresh_value();
@@ -191,7 +191,7 @@ impl Lowerer {
                     _ => Operand::Const(IrConst::F64(0.0)),
                 }
             } else {
-                Operand::Const(IrConst::I64(0))
+                Operand::Const(IrConst::ptr_int(0))
             }
         }
     }
@@ -648,8 +648,8 @@ impl Lowerer {
                 IrType::U16 => CType::UShort,
                 IrType::I32 => CType::Int,
                 IrType::U32 => CType::UInt,
-                IrType::I64 => CType::Long,
-                IrType::U64 => CType::ULong,
+                IrType::I64 => if crate::common::types::target_is_32bit() { CType::LongLong } else { CType::Long },
+                IrType::U64 => if crate::common::types::target_is_32bit() { CType::ULongLong } else { CType::ULong },
                 IrType::Ptr => CType::Pointer(Box::new(CType::Void), AddressSpace::Default),
                 _ => CType::Int,
             };
@@ -885,14 +885,15 @@ impl Lowerer {
         let imag_eq = self.emit_cmp_val(IrCmpOp::Eq, li, ri, comp_ty);
 
         // Combine: both must be equal for == (either not equal for !=)
+        let int_ty = crate::common::types::target_int_ir_type();
         let result = match op {
             BinOp::Eq => {
-                self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), IrType::I64)
+                self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), int_ty)
             }
             BinOp::Ne => {
                 // a != b iff !(a.re == b.re && a.im == b.im)
-                let both_eq = self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), IrType::I64);
-                self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(both_eq), Operand::Const(IrConst::I64(0)), IrType::I64)
+                let both_eq = self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), int_ty);
+                self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(both_eq), Operand::Const(IrConst::ptr_int(0)), int_ty)
             }
             _ => unreachable!(),
         };
