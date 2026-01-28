@@ -1,0 +1,13 @@
+Fix i686 64-bit switch comparison
+
+Problem: On i686, switch statements over long long (I64/U64) values only compare
+the lower 32-bit half in emit_switch_case_branch, causing incorrect case matching.
+
+Example: switch(v) with v=4294967295LL (0x00000000_FFFFFFFF) incorrectly matches
+case -1 (0xFFFFFFFF_FFFFFFFF) because only the low 32 bits (both 0xFFFFFFFF) are compared.
+
+Fix: Override emit_switch in the i686 backend to detect 64-bit switch values
+(using state.wide_values) and compare both halves for each case. Also need to
+handle the jump table path for 64-bit switches (likely fall back to linear chain).
+
+Test: llvm_unittest_2005_11_29_LongSwitch
