@@ -454,7 +454,10 @@ impl Driver {
     }
 
     fn run_full(&self) -> Result<(), String> {
-        let mut compiled_object_files = Vec::new();
+        use crate::common::temp_files::TempFile;
+
+        // TempFile guards ensure cleanup on all exit paths (success, error, panic).
+        let mut temp_guards: Vec<TempFile> = Vec::new();
         let mut passthrough_objects: Vec<String> = Vec::new();
 
         for input_file in &self.input_files {
@@ -463,24 +466,22 @@ impl Driver {
                 passthrough_objects.push(input_file.clone());
             } else if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
                 // .s/.S files (or -x assembler): pass to assembler, then link
-                let obj_path = format!("/tmp/ccc_{}_{}.o",
-                    std::process::id(), Self::input_stem(input_file));
-                self.assemble_source_file(input_file, &obj_path)?;
-                compiled_object_files.push(obj_path);
+                let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
+                self.assemble_source_file(input_file, tmp.to_str())?;
+                temp_guards.push(tmp);
             } else {
                 // Compile .c files to .o
                 let asm = self.compile_to_assembly(input_file)?;
 
-                let obj_path = format!("/tmp/ccc_{}_{}.o",
-                    std::process::id(), Self::input_stem(input_file));
+                let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
                 let extra = self.build_asm_extra_args();
-                self.target.assemble_with_extra(&asm, &obj_path, &extra)?;
-                compiled_object_files.push(obj_path);
+                self.target.assemble_with_extra(&asm, tmp.to_str(), &extra)?;
+                temp_guards.push(tmp);
             }
         }
 
         // Combine all object files for linking
-        let mut all_objects: Vec<&str> = compiled_object_files.iter().map(|s| s.as_str()).collect();
+        let mut all_objects: Vec<&str> = temp_guards.iter().map(|t| t.to_str()).collect();
         for obj in &passthrough_objects {
             all_objects.push(obj.as_str());
         }
@@ -494,9 +495,8 @@ impl Driver {
             self.target.link_with_args(&all_objects, &self.output_path, &linker_args)?;
         }
 
-        for obj in &compiled_object_files {
-            let _ = std::fs::remove_file(obj);
-        }
+        // temp_guards drop here, cleaning up all temp .o files automatically.
+        // (Also cleans up on early return via ? above.)
 
         if self.verbose {
             eprintln!("Output: {}", self.output_path);

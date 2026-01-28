@@ -54,9 +54,11 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
         // When keeping assembly, use the predictable name for debugging
         format!("{}.s", output_path)
     } else {
-        // Use /tmp/ for temp assembly files to handle cases like -o /dev/null
-        // where the output directory doesn't allow file creation.
-        format!("/tmp/ccc_asm_{}.{}.s", pid, unique_id)
+        // Use the system temp directory (respects $TMPDIR) for temp assembly files
+        // to handle cases like -o /dev/null where the output directory doesn't
+        // allow file creation.
+        let tmp_dir = crate::common::temp_files::temp_dir();
+        format!("{}/ccc_asm_{}.{}.s", tmp_dir.display(), pid, unique_id)
     };
 
     std::fs::write(&asm_path, asm_text)
