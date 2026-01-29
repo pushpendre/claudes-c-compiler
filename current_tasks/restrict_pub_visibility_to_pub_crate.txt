@@ -1,0 +1,15 @@
+Restrict pub visibility to pub(crate) across the codebase
+
+The codebase has ~836 `pub` items but only ~18 `pub(crate)` items.
+Since this is effectively a binary crate (lib.rs exists only for structural
+convenience; main.rs imports only Target, Driver, CompileMode), nearly all
+`pub` items should be `pub(crate)`.
+
+Plan:
+1. Change `pub mod` to `pub(crate) mod` in all mod.rs files (except the
+   few modules that must remain pub for main.rs to compile)
+2. Change `pub fn`, `pub struct`, `pub enum`, `pub const`, `pub type`,
+   `pub trait` to `pub(crate)` where they don't need to be fully public
+3. Keep `pub` on struct fields that are used across module boundaries
+4. Keep `pub` on trait methods (required by Rust)
+5. Verify compilation and tests pass
