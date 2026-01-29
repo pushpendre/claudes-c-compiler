@@ -1,0 +1,22 @@
+Task: Fix ARM kernel stack overflow in blake2s_compress_generic
+Status: in_progress
+Branch: master
+
+Problem:
+ARM kernel hangs during boot after "clocksource: Switched to clocksource arch_sys_counter"
+because blake2s_compress_generic() overflows the kernel's 16KB stack.
+
+Root cause:
+The stack layout's Tier 3 (block-local coalescing) assigns each single-block value
+its own dedicated stack slot, without within-block liveness-based reuse. For functions
+with one large basic block containing many short-lived temporaries (e.g., blake2s_compress
+with 320 ror32() calls generating ~2700 temporaries in the loop body), this creates a
+~22KB block-local pool that overflows the kernel's 16KB stack.
+
+Fix:
+Route values from blocks with >128 block-local values to Tier 2 (liveness-based packing)
+instead of Tier 3. Tier 2 reuses slots for values with non-overlapping lifetimes,
+reducing the stack frame from 28KB to 560 bytes for blake2s_compress.
+
+File modified:
+- src/backend/stack_layout.rs: Large-block Tier 2 fallback

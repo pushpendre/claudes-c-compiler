@@ -34,6 +34,7 @@ impl Preprocessor {
             //  - < 7.0 (avoids glibc expecting native _Float32/_Float64/_Float128
             //    types which we don't support; glibc typedefs them for GCC < 7)
             ("__GNUC__", "6"), ("__GNUC_MINOR__", "5"), ("__GNUC_PATCHLEVEL__", "0"),
+            ("__VERSION__", "\"6.5.0\""),
             // sizeof macros
             ("__SIZEOF_POINTER__", "8"), ("__SIZEOF_INT__", "4"),
             ("__SIZEOF_LONG__", "8"), ("__SIZEOF_LONG_LONG__", "8"),

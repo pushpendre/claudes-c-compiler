@@ -687,6 +687,19 @@ impl Lowerer {
             Expr::Cast(_, inner, _) => {
                 self.eval_string_literal_addr_expr(inner)
             }
+            // Bare string literal: "hello" -> GlobalAddr(.Lstr0)
+            Expr::StringLiteral(s, _) => {
+                let label = self.intern_string_literal(s);
+                Some(GlobalInit::GlobalAddr(label))
+            }
+            Expr::WideStringLiteral(s, _) => {
+                let label = self.intern_wide_string_literal(s);
+                Some(GlobalInit::GlobalAddr(label))
+            }
+            Expr::Char16StringLiteral(s, _) => {
+                let label = self.intern_char16_string_literal(s);
+                Some(GlobalInit::GlobalAddr(label))
+            }
             _ => None,
         }
     }

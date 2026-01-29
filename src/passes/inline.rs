@@ -274,7 +274,16 @@ pub fn run(module: &mut IrModule) -> usize {
                     && callee_data.blocks.len() <= 1;
                 let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
                     && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
-                if is_tiny || (is_small && !budget_exhausted) {
+                // Static inline functions that fit within normal limits should
+                // always be inlined, matching GCC behavior. This is critical for
+                // functions like ror32 (35 instructions) called from blake2s: without
+                // inlining, shift amounts can't be constant-propagated, producing
+                // massive unoptimized code with 28KB+ stack frames that overflow
+                // the kernel's 16KB stack.
+                let is_static_inline_eligible = callee_data.is_static_inline
+                    && callee_inst_count <= MAX_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= MAX_INLINE_BLOCKS;
+                if is_tiny || (is_small && !budget_exhausted) || is_static_inline_eligible {
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
                     found_site = Some((site.clone(), callee_inst_count, use_relaxed));
                     break;
@@ -847,6 +856,11 @@ struct CalleeData {
     /// Such callees should only be inlined when the caller has a section attribute,
     /// to avoid cross-section calls that break early boot / noinstr code.
     exceeds_normal_limits: bool,
+    /// Whether this callee is a `static inline` function. GCC always inlines
+    /// `static inline` functions regardless of caller size. We should do the
+    /// same to match GCC behavior and enable critical optimizations (e.g.,
+    /// constant propagation of shift amounts in ror32 used by blake2s).
+    is_static_inline: bool,
 }
 
 /// A call site that is eligible for inlining.
@@ -1055,6 +1069,7 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             max_block_id,
             is_always_inline,
             exceeds_normal_limits: exceeds_normal,
+            is_static_inline: func.is_static && func.is_inline,
         });
     }
 

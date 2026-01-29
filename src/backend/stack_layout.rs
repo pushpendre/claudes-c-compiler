@@ -617,6 +617,13 @@ pub fn calculate_stack_space_common(
         slot_size: i64,
     }
 
+    // Block-local non-alloca value pending intra-block reuse.
+    struct BlockLocalValue {
+        dest_id: u32,
+        slot_size: i64,
+        block_idx: usize,
+    }
+
     // Collect ALL Value IDs referenced as operands anywhere in the function body.
     // Used for both dead param alloca detection and dead value elimination.
     let used_values: FxHashSet<u32> = {
@@ -863,6 +870,7 @@ pub fn calculate_stack_space_common(
     let mut non_local_space = initial_offset;
     let mut deferred_slots: Vec<DeferredSlot> = Vec::new();
     let mut multi_block_values: Vec<MultiBlockValue> = Vec::new();
+    let mut block_local_values: Vec<BlockLocalValue> = Vec::new();
 
     // Per-block running space counter for block-local values.
     // Indexed by block index, holds the current accumulated space for that block.
@@ -990,16 +998,10 @@ pub fn calculate_stack_space_common(
                 }
 
                 if let Some(target_blk) = coalescable_group(dest.0) {
-                    let bs = block_space.entry(target_blk).or_insert(0);
-                    let before = *bs;
-                    let (_, new_space) = assign_slot(*bs, slot_size, 0);
-                    *bs = new_space;
-                    if new_space > max_block_local_space {
-                        max_block_local_space = new_space;
-                    }
-                    deferred_slots.push(DeferredSlot {
-                        dest_id: dest.0, size: slot_size, align: 0,
-                        block_offset: before,
+                    block_local_values.push(BlockLocalValue {
+                        dest_id: dest.0,
+                        slot_size,
+                        block_idx: target_blk,
                     });
                 } else {
                     // Collect multi-block values for liveness-based packing.
@@ -1009,6 +1011,131 @@ pub fn calculate_stack_space_common(
                     });
                 }
             }
+        }
+    }
+
+    // Tier 3 intra-block reuse for block-local non-alloca values.
+    // Within a single block, values have short lifetimes (defined at one instruction,
+    // last used a few instructions later). By tracking when each value is last used,
+    // we can reuse its stack slot for later values, dramatically reducing frame size.
+    // This is critical for functions like blake2s_compress_generic where macro expansion
+    // creates thousands of short-lived intermediates in a single loop body block.
+    if !block_local_values.is_empty() && coalesce {
+        // Pre-compute per-block last-use instruction index for block-local values.
+        // For each value, last_use[value_id] = instruction index of last use in its block.
+        let block_local_set: FxHashSet<u32> = block_local_values.iter().map(|v| v.dest_id).collect();
+        let mut last_use: FxHashMap<u32, usize> = FxHashMap::default();
+        let mut def_inst_idx: FxHashMap<u32, usize> = FxHashMap::default();
+
+        for block in &func.blocks {
+            for (inst_idx, inst) in block.instructions.iter().enumerate() {
+                // Track definition point
+                if let Some(dest) = inst.dest() {
+                    if block_local_set.contains(&dest.0) {
+                        def_inst_idx.insert(dest.0, inst_idx);
+                    }
+                }
+                // Track last use point
+                for_each_operand_in_instruction(inst, |op| {
+                    if let Operand::Value(v) = op {
+                        if block_local_set.contains(&v.0) {
+                            last_use.insert(v.0, inst_idx);
+                        }
+                    }
+                });
+                for_each_value_use_in_instruction(inst, |v| {
+                    if block_local_set.contains(&v.0) {
+                        last_use.insert(v.0, inst_idx);
+                    }
+                });
+            }
+            // Also check terminator for uses
+            for_each_operand_in_terminator(&block.terminator, |op| {
+                if let Operand::Value(v) = op {
+                    if block_local_set.contains(&v.0) {
+                        // Use block.instructions.len() as the "instruction index"
+                        // for the terminator (it comes after all instructions).
+                        last_use.insert(v.0, block.instructions.len());
+                    }
+                }
+            });
+        }
+
+        // Group block-local values by block, preserving definition order.
+        let mut per_block: FxHashMap<usize, Vec<(u32, i64)>> = FxHashMap::default();
+        for blv in &block_local_values {
+            per_block.entry(blv.block_idx).or_default().push((blv.dest_id, blv.slot_size));
+        }
+
+        // For each block, assign slots with intra-block reuse using greedy coloring.
+        // Values are processed in definition order. When a new value is defined,
+        // check if any previously-assigned values in this block are dead (last use
+        // strictly before this value's definition). Reuse their slots.
+        for (blk_idx, values) in &per_block {
+            // Active slots: (last_use_idx, slot_offset, slot_size) sorted by last_use
+            let mut active: Vec<(usize, i64, i64)> = Vec::new();
+            // Free slots available for reuse: (offset, size)
+            let mut free_8: Vec<i64> = Vec::new();
+            let mut free_16: Vec<i64> = Vec::new();
+            // Start from existing block space (block-local allocas already occupy
+            // offsets 0..block_space[blk_idx]). Non-alloca values must not overlap.
+            let mut block_peak: i64 = block_space.get(blk_idx).copied().unwrap_or(0);
+
+            for &(dest_id, slot_size) in values {
+                let my_def = def_inst_idx.get(&dest_id).copied().unwrap_or(0);
+
+                // Release expired slots: values whose last use is strictly before
+                // this value's definition point.
+                let mut i = 0;
+                while i < active.len() {
+                    if active[i].0 < my_def {
+                        let (_, off, sz) = active.swap_remove(i);
+                        if sz == 16 { free_16.push(off); } else { free_8.push(off); }
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                // Try to reuse a freed slot of the right size.
+                let free_list = if slot_size == 16 { &mut free_16 } else { &mut free_8 };
+                let offset = if let Some(reused) = free_list.pop() {
+                    reused
+                } else {
+                    // Allocate new slot at the current peak.
+                    let off = block_peak;
+                    block_peak += slot_size;
+                    off
+                };
+
+                let my_last = last_use.get(&dest_id).copied().unwrap_or(my_def);
+                active.push((my_last, offset, slot_size));
+
+                deferred_slots.push(DeferredSlot {
+                    dest_id,
+                    size: slot_size,
+                    align: 0,
+                    block_offset: offset,
+                });
+            }
+
+            if block_peak > max_block_local_space {
+                max_block_local_space = block_peak;
+            }
+        }
+    } else {
+        // Fallback: no reuse, just accumulate (original behavior).
+        for blv in &block_local_values {
+            let bs = block_space.entry(blv.block_idx).or_insert(0);
+            let before = *bs;
+            let (_, new_space) = assign_slot(*bs, blv.slot_size, 0);
+            *bs = new_space;
+            if new_space > max_block_local_space {
+                max_block_local_space = new_space;
+            }
+            deferred_slots.push(DeferredSlot {
+                dest_id: blv.dest_id, size: blv.slot_size, align: 0,
+                block_offset: before,
+            });
         }
     }
 
