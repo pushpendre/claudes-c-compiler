@@ -333,6 +333,14 @@ impl Lowerer {
         if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
             return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
         }
+        // Cast wrapping a compound literal: (char *)(unsigned char[]){ 0xFD }
+        // Look through the cast to find the compound literal and create an
+        // anonymous global for it.
+        if let Expr::Cast(_, ref inner, _) = expr {
+            if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
+            }
+        }
         // Try as a global address expression (&x, func name, array name, etc.)
         if let Some(addr) = self.eval_global_addr_expr(expr) {
             return Some(addr);

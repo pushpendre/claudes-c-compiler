@@ -144,6 +144,22 @@ impl Lowerer {
                         return self.create_compound_literal_global(cl_type_spec, cl_init);
                     }
                 }
+                // Check if the target type is a pointer (for compound literal handling).
+                // Note: base_ty == IrType::Ptr is not sufficient because structs
+                // also use Ptr as their base_ty in the IR representation.
+                // Structs/unions have struct_layout set; scalar pointers do not.
+                let target_is_pointer = base_ty == IrType::Ptr
+                    && !is_array
+                    && struct_layout.is_none();
+                // Handle cast of compound literal in pointer context:
+                // e.g. static char *p = (char *)(unsigned char[]){ 0xFD };
+                if let Expr::Cast(_, ref inner, _) = expr {
+                    if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                        if target_is_pointer {
+                            return self.create_compound_literal_global(cl_type_spec, cl_init);
+                        }
+                    }
+                }
                 // Handle (compound_literal) used as initializer value
                 if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
                     let cl_ctype = self.type_spec_to_ctype(cl_type_spec);
@@ -153,6 +169,13 @@ impl Lowerer {
                     );
                     if !is_aggregate {
                         // Scalar or pointer compound literal: create anonymous global
+                        return self.create_compound_literal_global(cl_type_spec, cl_init);
+                    }
+                    // When an aggregate compound literal (array/struct/union) is used
+                    // to initialize a pointer, create an anonymous global and return
+                    // its address (array-to-pointer decay).
+                    // e.g. static int *p = (int[]){ 42 };
+                    if target_is_pointer {
                         return self.create_compound_literal_global(cl_type_spec, cl_init);
                     }
                     // Aggregate compound literal (struct/union/array): recursively
