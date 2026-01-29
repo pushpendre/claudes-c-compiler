@@ -1,0 +1,16 @@
+Task: Clean test suite by validating against reference compilers
+
+Status: in_progress
+
+Goal: Run gcc and clang (for all backends: x86, arm, riscv, i686) over the
+test suite in code/tests/ to find tests that fail with reference compilers.
+Remove or fix tests that fail for bad reasons (e.g., undefined behavior,
+compiler-specific assumptions). Then run our compiler over the remaining
+tests and fix any real issues found.
+
+Approach:
+1. Compile and run all tests with gcc/clang for each backend
+2. Note tests that fail with any reference compiler
+3. Remove tests that rely on undefined behavior or are invalid
+4. Fix tests that have wrong expected output
+5. Run our compiler and fix any real bugs found
