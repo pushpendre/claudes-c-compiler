@@ -291,8 +291,31 @@ fn assign_program_points(
             if is_returns_twice_call(inst) {
                 setjmp_block_indices.push(block_idx);
             }
-            if matches!(inst, Instruction::Call { .. } | Instruction::CallIndirect { .. }) {
-                call_points.push(point);
+
+            // Track call instruction program points for register allocation.
+            // InlineAsm instructions with register operands are treated as call
+            // points because they may clobber caller-saved registers (r8-r11 on
+            // x86). This ensures values whose live ranges span inline asm get
+            // callee-saved registers (which survive inline asm), while values NOT
+            // spanning inline asm can safely use caller-saved registers.
+            //
+            // Empty inline asm barriers (e.g., `asm volatile("" ::: "memory")`)
+            // are NOT call points since they don't use any GP registers. These
+            // are common in the kernel for memory barriers, preempt_disable/enable,
+            // etc. Treating them as call points would unnecessarily force values
+            // into callee-saved registers across simple barriers.
+            match inst {
+                Instruction::Call { .. } | Instruction::CallIndirect { .. } => {
+                    call_points.push(point);
+                }
+                Instruction::InlineAsm { outputs, inputs, .. } => {
+                    // Only treat as call point if the asm has register operands
+                    // (outputs or inputs that bind to GP registers).
+                    if !outputs.is_empty() || !inputs.is_empty() {
+                        call_points.push(point);
+                    }
+                }
+                _ => {}
             }
 
             record_instruction_uses_dense(inst, point, alloca_set, id_to_dense, &mut last_use_points);
@@ -1044,4 +1067,87 @@ fn compute_loop_depth(successors: &[Vec<usize>], num_blocks: usize) -> Vec<u32> 
     }
 
     depth
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::types::IrType;
+
+    /// Verify that InlineAsm with register operands is treated as a call point.
+    /// This is critical for register allocation: values spanning inline asm with
+    /// register constraints must get callee-saved registers, since inline asm may
+    /// clobber caller-saved registers (r8-r11 on x86).
+    #[test]
+    fn test_inline_asm_with_operands_is_call_point() {
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::BinOp {
+                    dest: Value(0), op: IrBinOp::Add,
+                    lhs: Operand::Const(IrConst::I32(1)),
+                    rhs: Operand::Const(IrConst::I32(2)),
+                    ty: IrType::I32,
+                },
+                // Inline asm with an output register constraint
+                Instruction::InlineAsm {
+                    template: "nop".to_string(),
+                    outputs: vec![("=r".to_string(), Value(1), Some("out".to_string()))],
+                    inputs: vec![],
+                    clobbers: vec![],
+                    operand_types: vec![IrType::I32],
+                    goto_labels: vec![],
+                    input_symbols: vec![],
+                    seg_overrides: vec![],
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(0)))),
+            source_spans: Vec::new(),
+        });
+        func.next_value_id = 2;
+
+        let result = compute_live_intervals(&func);
+        // The InlineAsm instruction should appear as a call point
+        assert!(!result.call_points.is_empty(),
+            "InlineAsm with register operands should be a call point");
+    }
+
+    /// Verify that empty inline asm barriers (no inputs/outputs) are NOT call points.
+    /// Memory barriers like `asm volatile("" ::: "memory")` don't use GP registers
+    /// and should not force values into callee-saved registers.
+    #[test]
+    fn test_empty_inline_asm_barrier_not_call_point() {
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::BinOp {
+                    dest: Value(0), op: IrBinOp::Add,
+                    lhs: Operand::Const(IrConst::I32(1)),
+                    rhs: Operand::Const(IrConst::I32(2)),
+                    ty: IrType::I32,
+                },
+                // Empty inline asm barrier - no outputs or inputs
+                Instruction::InlineAsm {
+                    template: String::new(),
+                    outputs: vec![],
+                    inputs: vec![],
+                    clobbers: vec!["memory".to_string()],
+                    operand_types: vec![],
+                    goto_labels: vec![],
+                    input_symbols: vec![],
+                    seg_overrides: vec![],
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(0)))),
+            source_spans: Vec::new(),
+        });
+        func.next_value_id = 1;
+
+        let result = compute_live_intervals(&func);
+        // Call points should only contain the calls, not the empty barrier
+        assert!(result.call_points.is_empty(),
+            "Empty inline asm barriers should NOT be call points");
+    }
 }

@@ -1789,12 +1789,10 @@ impl ArchCodegen for ArmCodegen {
             ARM_CALLER_SAVED.to_vec()
         };
         // Pre-scan for features that require disabling caller-saved allocation.
-        let mut has_inline_asm = false;
         let mut has_f128_ops = false;
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
-                    Instruction::InlineAsm { .. } => { has_inline_asm = true; }
                     // F128 operations emit implicit `bl` calls to soft-float library
                     // functions (e.g., __addtf3, __extenddftf2, __trunctfdf2) that
                     // clobber all caller-saved registers (x0-x18 per AAPCS64). These
@@ -1816,12 +1814,10 @@ impl ArchCodegen for ArmCodegen {
                 }
             }
         }
-        // Conservatively disable caller-saved register allocation for functions
-        // containing inline asm. The ARM_GP_SCRATCH pool includes x13/x14, so
-        // inline asm with generic "r" constraints could use them.
-        if has_inline_asm {
-            caller_saved_regs.clear();
-        }
+        // Inline asm with generic "r" constraints can use caller-saved registers
+        // (x13/x14), but this is now safe because liveness.rs treats InlineAsm
+        // instructions as call points. Values spanning inline asm get callee-saved
+        // registers, while values NOT spanning inline asm can use caller-saved regs.
         // Disable for functions with F128 ops: soft-float `bl` calls clobber
         // caller-saved regs but aren't tracked in IR liveness call_points.
         if has_f128_ops {

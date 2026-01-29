@@ -869,6 +869,31 @@ fn classify_instructions(
                         });
                     }
                 }
+            } else if let Instruction::ParamRef { dest, param_idx, .. } = inst {
+                // ParamRef loads a parameter value from its alloca slot.
+                // Instead of allocating a separate stack slot for the ParamRef
+                // dest, reuse the param alloca's slot. This saves 8 bytes per
+                // promoted parameter (significant for kernel functions with
+                // many parameters where frame size is critical).
+                //
+                // Safety: the alloca slot is rounded up to 8 bytes (by the
+                // assign_slot callback), so storing a full 8-byte movq is safe.
+                // emit_param_ref loads from the alloca with sign/zero extension,
+                // then stores back to the same slot, which is a valid self-update
+                // that sets the upper bytes to the correct extension.
+                if *param_idx < func.param_alloca_values.len() {
+                    let alloca_val = func.param_alloca_values[*param_idx];
+                    if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
+                        state.value_locations.insert(dest.0, slot);
+                        continue;
+                    }
+                }
+                // Fallthrough: if no alloca slot found, classify normally.
+                classify_value(
+                    state, *dest, inst, ctx, reg_assigned,
+                    &mut collected_values, multi_block_values,
+                    block_local_values,
+                );
             } else if let Some(dest) = inst.dest() {
                 classify_value(
                     state, dest, inst, ctx, reg_assigned,

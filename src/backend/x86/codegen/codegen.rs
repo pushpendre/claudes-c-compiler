@@ -998,17 +998,17 @@ impl ArchCodegen for X86Codegen {
         // Build caller-saved register pool. Start with all 4 caller-saved regs
         // (r11, r10, r8, r9), then remove any that are unsafe for this function.
         let mut caller_saved_regs = X86_CALLER_SAVED.to_vec();
-        // Conservatively disable ALL caller-saved register allocation for
-        // functions containing inline asm. Inline asm with generic "r"
-        // constraints can use any GP register including r8-r11.
-        let has_inline_asm = func.blocks.iter().any(|b| {
-            b.instructions
-                .iter()
-                .any(|i| matches!(i, Instruction::InlineAsm { .. }))
-        });
-        if has_inline_asm {
-            caller_saved_regs.clear();
-        }
+        // Inline asm with generic "r" constraints can use caller-saved registers
+        // (r8-r11), but this is now safe because liveness.rs treats InlineAsm
+        // instructions as call points. This means:
+        // - Values whose live ranges span inline asm get callee-saved registers
+        //   (which are preserved across inline asm, just like across calls)
+        // - Values NOT spanning inline asm can use caller-saved registers
+        //   (safe because they're dead before the asm executes)
+        // Previously, ALL caller-saved registers were blanket-disabled for functions
+        // containing any inline asm, forcing all non-call-spanning values onto the
+        // stack. This caused 4-20x stack frame bloat in kernel functions with
+        // spin_lock/atomic ops, leading to kernel stack overflow on defconfig boot.
         // r10 is used for indirect calls (call *%r10), so exclude it.
         // r8 is used by atomic RMW cmpxchg loops and i128 multiply/compare.
         // r9 is used by i128 multiply.
