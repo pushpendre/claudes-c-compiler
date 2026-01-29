@@ -37,5 +37,5 @@ Recursive descent parser for C, producing a spanned AST.
 
 ## What's Not Implemented
 
-- `_Atomic(type)` is parsed but treated as the underlying type (marked with TODO)
+- `_Atomic(type)` is parsed and resolved to the underlying type (atomic qualifier not tracked)
 - `_Generic` selection distinguishes const-qualified pointer types via `is_const` flags on associations and variables (CType still lacks qualifiers, but const is tracked separately for _Generic matching; global variables and complex expressions like casts/subscripts are not yet tracked)
