@@ -25,7 +25,7 @@ use crate::frontend::sema::builtins;
 use super::type_context::{TypeContext, FunctionTypedefInfo};
 use super::const_eval::{SemaConstEval, ConstMap};
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use crate::common::fx_hash::FxHashMap;
 
 /// Map from AST expression node identity to its inferred CType.
@@ -97,7 +97,9 @@ pub struct SemanticAnalyzer {
     /// Structured diagnostic engine for error/warning reporting.
     /// All sema errors and warnings are emitted with source spans through this
     /// engine, which handles rendering, filtering (-Wall/-Werror), and counting.
-    diagnostics: DiagnosticEngine,
+    /// Uses RefCell for interior mutability so that &self methods (e.g.,
+    /// eval_const_expr_as_usize from TypeConvertContext) can emit diagnostics.
+    diagnostics: RefCell<DiagnosticEngine>,
 }
 
 impl SemanticAnalyzer {
@@ -107,7 +109,7 @@ impl SemanticAnalyzer {
             result: SemaResult::default(),
             enum_counter: 0,
             anon_struct_counter: Cell::new(0),
-            diagnostics: DiagnosticEngine::new(),
+            diagnostics: RefCell::new(DiagnosticEngine::new()),
         };
         // Pre-populate with common implicit declarations
         analyzer.declare_implicit_functions();
@@ -131,8 +133,9 @@ impl SemanticAnalyzer {
                 }
             }
         }
-        if self.diagnostics.has_errors() {
-            Err(self.diagnostics.error_count())
+        let diag = self.diagnostics.borrow();
+        if diag.has_errors() {
+            Err(diag.error_count())
         } else {
             Ok(())
         }
@@ -156,12 +159,12 @@ impl SemanticAnalyzer {
 
     /// Set a pre-configured diagnostic engine on the analyzer.
     pub fn set_diagnostics(&mut self, engine: DiagnosticEngine) {
-        self.diagnostics = engine;
+        self.diagnostics = RefCell::new(engine);
     }
 
     /// Take the diagnostic engine back from the analyzer.
     pub fn take_diagnostics(&mut self) -> DiagnosticEngine {
-        std::mem::take(&mut self.diagnostics)
+        self.diagnostics.replace(DiagnosticEngine::new())
     }
 
     // === Function analysis ===
@@ -743,7 +746,7 @@ impl SemanticAnalyzer {
                          .with_note(crate::common::error::Diagnostic::note(
                             format!("expression has type '{}'", ctype)
                          ).with_span(expr.span()));
-                        self.diagnostics.emit(&diag);
+                        self.diagnostics.borrow_mut().emit(&diag);
                     }
                 }
                 self.analyze_stmt(body);
@@ -794,7 +797,7 @@ impl SemanticAnalyzer {
                     && name != "__func__" && name != "__FUNCTION__"
                     && name != "__PRETTY_FUNCTION__"
                 {
-                    self.diagnostics.warning_with_kind(
+                    self.diagnostics.borrow_mut().warning_with_kind(
                         format!("'{}' undeclared", name),
                         *span,
                         crate::common::error::WarningKind::Undeclared,
@@ -810,7 +813,7 @@ impl SemanticAnalyzer {
                         && self.symbol_table.lookup(name).is_none()
                     {
                         // Implicit function declaration (C89 style) - register it
-                        self.diagnostics.warning_with_kind(
+                        self.diagnostics.borrow_mut().warning_with_kind(
                             format!("implicit declaration of function '{}'", name),
                             *callee_span,
                             crate::common::error::WarningKind::ImplicitFunctionDeclaration,
@@ -1217,7 +1220,20 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
     }
 
     fn eval_const_expr_as_usize(&self, expr: &Expr) -> Option<usize> {
-        self.eval_const_expr(expr).map(|v| v as usize)
+        self.eval_const_expr(expr).and_then(|v| {
+            if v < 0 {
+                // C standard requires array sizes to be positive (constraint violation).
+                // Critical for autoconf AC_CHECK_SIZEOF which uses negative array sizes
+                // as compile-time assertions to detect type sizes during cross-compilation.
+                self.diagnostics.borrow_mut().error(
+                    "size of array is negative",
+                    expr.span(),
+                );
+                None
+            } else {
+                Some(v as usize)
+            }
+        })
     }
 }
 

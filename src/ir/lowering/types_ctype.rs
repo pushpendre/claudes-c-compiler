@@ -474,6 +474,12 @@ impl type_builder::TypeConvertContext for Lowerer {
     }
 
     fn eval_const_expr_as_usize(&self, expr: &Expr) -> Option<usize> {
-        self.expr_as_array_size(expr).map(|n| n as usize)
+        self.expr_as_array_size(expr).and_then(|n| {
+            if n < 0 {
+                None // Negative array sizes are rejected by sema
+            } else {
+                Some(n as usize)
+            }
+        })
     }
 }

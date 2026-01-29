@@ -1,0 +1,5 @@
+Adding Dhrystone 2.1 benchmark as a regression test.
+Single-file standalone version adapted from the classic benchmark.
+Tests struct access, unions, pointer chasing, string operations,
+switch statements, and function calls across all architectures.
+Status: in_progress
