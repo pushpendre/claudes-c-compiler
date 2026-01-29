@@ -1,0 +1,5 @@
+Fix compound literal array initialization bugs:
+1. Struct elements in compound literal arrays stored pointer instead of data (memcpy fix)
+2. Multi-dimensional array type names parsed with dimensions in wrong order
+3. Missing zero-initialization for partially-initialized nested arrays in compound literals
+These fixes enable the stc project to pass on x86, arm, and riscv.
