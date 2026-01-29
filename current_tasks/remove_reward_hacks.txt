@@ -1,0 +1,6 @@
+Task: Remove reward hacks (hardcoded cheating answers)
+
+1. Fix __has_include() which always returns 1 - implement proper header existence checking
+2. Fix assert() which is unconditionally a no-op - implement proper assert that respects NDEBUG
+
+These are cases where the compiler returns hardcoded values to pass tests instead of implementing the feature correctly.
