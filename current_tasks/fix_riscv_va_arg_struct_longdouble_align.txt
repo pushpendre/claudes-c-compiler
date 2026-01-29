@@ -1,0 +1,17 @@
+Task: Fix RISC-V va_arg alignment for structs containing long double (f128)
+
+Problem: On RISC-V LP64D, long double is 128-bit (f128) with 16-byte alignment.
+When a struct containing long double is passed as a variadic argument on the stack,
+the va_list pointer must be aligned to 16 bytes before reading the struct.
+The IR lowering in lower_va_arg_struct decomposes structs into I64 slots without
+performing this alignment, causing va_arg to read from the wrong offset and
+corrupting all subsequent va_arg reads.
+
+Fix: In expr_access.rs lower_va_arg_struct, add alignment of the va_list pointer
+before reading struct slots when the struct alignment exceeds slot size (i.e., >8
+bytes on RISC-V). Uses (ptr + align - 1) & ~(align - 1) pattern via IR instructions.
+
+Impact: Fixes compiler_suite_0080_0067 and 0080_0068 (va_arg struct long double
+tests). Full test suite: 132 → 128 failures, no regressions.
+
+Status: completed

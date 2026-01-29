@@ -1122,6 +1122,46 @@ impl Lowerer {
         let ap_val = self.lower_va_list_pointer(ap_expr);
         let va_list_ptr = self.operand_to_value(ap_val);
 
+        // On RISC-V, structs containing long double (f128) require 16-byte alignment
+        // in the variadic argument area. The RISC-V LP64D ABI specifies that 2*XLEN-bit
+        // scalars (and structs containing them) are aligned to 2*XLEN (16 bytes) on the
+        // stack. Without this alignment, reading a struct {long double f;} via va_arg
+        // reads from the wrong offset, corrupting the value and misaligning all
+        // subsequent va_arg reads.
+        //
+        // We align the va_list pointer before reading slots:
+        //   ptr = load(va_list_ptr)
+        //   aligned_ptr = (ptr + align - 1) & ~(align - 1)
+        //   store(aligned_ptr, va_list_ptr)
+        if self.target == Target::Riscv64 && struct_align > slot_size {
+            let cur_ptr = self.fresh_value();
+            self.emit(Instruction::Load {
+                dest: cur_ptr,
+                ptr: va_list_ptr,
+                ty: IrType::Ptr,
+                seg_override: AddressSpace::Default,
+            });
+            let align_val = struct_align as i64;
+            let added = self.emit_binop_val(
+                IrBinOp::Add,
+                Operand::Value(cur_ptr),
+                Operand::Const(IrConst::I64(align_val - 1)),
+                IrType::Ptr,
+            );
+            let aligned = self.emit_binop_val(
+                IrBinOp::And,
+                Operand::Value(added),
+                Operand::Const(IrConst::I64(-align_val)),
+                IrType::Ptr,
+            );
+            self.emit(Instruction::Store {
+                val: Operand::Value(aligned),
+                ptr: va_list_ptr,
+                ty: IrType::Ptr,
+                seg_override: AddressSpace::Default,
+            });
+        }
+
         // Read each slot and store it into the alloca.
         // Use the eightbyte classification to determine the correct IrType:
         // SSE-classified eightbytes use F64 (reads from fp_offset area),
