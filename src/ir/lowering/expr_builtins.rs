@@ -227,63 +227,7 @@ impl Lowerer {
     /// Lower a builtin intrinsic (the BuiltinKind::Intrinsic arm of try_lower_builtin_call).
     fn lower_builtin_intrinsic(&mut self, intrinsic: &BuiltinIntrinsic, name: &str, args: &[Expr]) -> Option<Operand> {
         match intrinsic {
-            BuiltinIntrinsic::FpCompare => {
-                if args.len() >= 2 {
-                    let lhs_ty = self.get_expr_type(&args[0]);
-                    let rhs_ty = self.get_expr_type(&args[1]);
-                    // Promote to the widest floating-point type among the two operands.
-                    let cmp_ty = if lhs_ty == IrType::F128 || rhs_ty == IrType::F128 {
-                        IrType::F128
-                    } else if lhs_ty == IrType::F64 || rhs_ty == IrType::F64 {
-                        IrType::F64
-                    } else if lhs_ty == IrType::F32 || rhs_ty == IrType::F32 {
-                        IrType::F32
-                    } else {
-                        IrType::F64
-                    };
-                    let mut lhs = self.lower_expr(&args[0]);
-                    let mut rhs = self.lower_expr(&args[1]);
-                    if lhs_ty != cmp_ty {
-                        let conv = self.emit_cast_val(lhs, lhs_ty, cmp_ty);
-                        lhs = Operand::Value(conv);
-                    }
-                    if rhs_ty != cmp_ty {
-                        let conv = self.emit_cast_val(rhs, rhs_ty, cmp_ty);
-                        rhs = Operand::Value(conv);
-                    }
-
-                    // __builtin_isunordered: returns 1 if either operand is NaN.
-                    // Emit (a != a) | (b != b) since NaN is the only value where x != x.
-                    if name == "__builtin_isunordered" {
-                        let lhs_nan = self.emit_cmp_val(IrCmpOp::Ne, lhs, lhs, cmp_ty);
-                        let rhs_nan = self.emit_cmp_val(IrCmpOp::Ne, rhs, rhs, cmp_ty);
-                        let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lhs_nan), Operand::Value(rhs_nan), IrType::I32);
-                        return Some(Operand::Value(dest));
-                    }
-
-                    // __builtin_islessgreater: returns 1 if a < b or a > b (NOT for NaN).
-                    // This differs from (a != b) because NaN != NaN is true, but
-                    // islessgreater(NaN, x) must be false.
-                    // Emit (a < b) | (a > b).
-                    if name == "__builtin_islessgreater" {
-                        let lt = self.emit_cmp_val(IrCmpOp::Slt, lhs, rhs, cmp_ty);
-                        let gt = self.emit_cmp_val(IrCmpOp::Sgt, lhs, rhs, cmp_ty);
-                        let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lt), Operand::Value(gt), IrType::I32);
-                        return Some(Operand::Value(dest));
-                    }
-
-                    let cmp_op = match name {
-                        "__builtin_isgreater" => IrCmpOp::Sgt,
-                        "__builtin_isgreaterequal" => IrCmpOp::Sge,
-                        "__builtin_isless" => IrCmpOp::Slt,
-                        "__builtin_islessequal" => IrCmpOp::Sle,
-                        _ => IrCmpOp::Eq,
-                    };
-                    let dest = self.emit_cmp_val(cmp_op, lhs, rhs, cmp_ty);
-                    return Some(Operand::Value(dest));
-                }
-                Some(Operand::Const(IrConst::I64(0)))
-            }
+            BuiltinIntrinsic::FpCompare => self.lower_fp_compare(name, args),
             BuiltinIntrinsic::AddOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Add),
             BuiltinIntrinsic::SubOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Sub),
             BuiltinIntrinsic::MulOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Mul),
@@ -294,53 +238,8 @@ impl Lowerer {
             BuiltinIntrinsic::Bswap => self.lower_bswap_intrinsic(name, args),
             BuiltinIntrinsic::Popcount => self.lower_unary_intrinsic(name, args, IrUnaryOp::Popcount),
             BuiltinIntrinsic::Parity => self.lower_parity_intrinsic(name, args),
-            BuiltinIntrinsic::ComplexReal => {
-                if !args.is_empty() {
-                    let arg_ctype = self.expr_ctype(&args[0]);
-                    let target_ty = Self::creal_return_type(name);
-                    if arg_ctype.is_complex() {
-                        let val = self.lower_complex_real_part(&args[0]);
-                        // Cast from component type to target return type
-                        // e.g., creal(float_complex) extracts F32 but must return F64
-                        let comp_ty = Self::complex_component_ir_type(&arg_ctype);
-                        if comp_ty != target_ty {
-                            Some(self.emit_implicit_cast(val, comp_ty, target_ty))
-                        } else {
-                            Some(val)
-                        }
-                    } else {
-                        let val = self.lower_expr(&args[0]);
-                        let val_ty = self.get_expr_type(&args[0]);
-                        Some(self.emit_implicit_cast(val, val_ty, target_ty))
-                    }
-                } else {
-                    Some(Operand::Const(IrConst::F64(0.0)))
-                }
-            }
-            BuiltinIntrinsic::ComplexImag => {
-                if !args.is_empty() {
-                    let arg_ctype = self.expr_ctype(&args[0]);
-                    let target_ty = Self::creal_return_type(name);
-                    if arg_ctype.is_complex() {
-                        let val = self.lower_complex_imag_part(&args[0]);
-                        // Cast from component type to target return type
-                        let comp_ty = Self::complex_component_ir_type(&arg_ctype);
-                        if comp_ty != target_ty {
-                            Some(self.emit_implicit_cast(val, comp_ty, target_ty))
-                        } else {
-                            Some(val)
-                        }
-                    } else {
-                        Some(match target_ty {
-                            IrType::F32 => Operand::Const(IrConst::F32(0.0)),
-                            IrType::F128 => Operand::Const(IrConst::long_double(0.0)),
-                            _ => Operand::Const(IrConst::F64(0.0)),
-                        })
-                    }
-                } else {
-                    Some(Operand::Const(IrConst::F64(0.0)))
-                }
-            }
+            BuiltinIntrinsic::ComplexReal => self.lower_complex_part(name, args, true),
+            BuiltinIntrinsic::ComplexImag => self.lower_complex_part(name, args, false),
             BuiltinIntrinsic::ComplexConj => {
                 if !args.is_empty() {
                     Some(self.lower_complex_conj(&args[0]))
@@ -362,69 +261,11 @@ impl Lowerer {
                 // Handled earlier in try_lower_builtin_call - should not reach here
                 Some(Operand::Const(IrConst::I64(0)))
             }
-            BuiltinIntrinsic::ComplexConstruct => {
-                if args.len() >= 2 {
-                    let real_val = self.lower_expr(&args[0]);
-                    let imag_val = self.lower_expr(&args[1]);
-                    let arg_ty = self.get_expr_type(&args[0]);
-                    let (comp_ty, complex_size, comp_size) = if arg_ty == IrType::F32 {
-                        (IrType::F32, 8usize, 4usize)
-                    } else {
-                        (IrType::F64, 16usize, 8usize)
-                    };
-                    let alloca = self.fresh_value();
-                    self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val: real_val, ptr: alloca, ty: comp_ty , seg_override: AddressSpace::Default });
-                    let imag_ptr = self.fresh_value();
-                    self.emit(Instruction::GetElementPtr {
-                        dest: imag_ptr, base: alloca,
-                        offset: Operand::Const(IrConst::I64(comp_size as i64)),
-                        ty: IrType::I8,
-                    });
-                    self.emit(Instruction::Store { val: imag_val, ptr: imag_ptr, ty: comp_ty , seg_override: AddressSpace::Default });
-                    Some(Operand::Value(alloca))
-                } else {
-                    Some(Operand::Const(IrConst::I64(0)))
-                }
-            }
+            BuiltinIntrinsic::ComplexConstruct => self.lower_complex_construct(args),
             BuiltinIntrinsic::VaStart | BuiltinIntrinsic::VaEnd | BuiltinIntrinsic::VaCopy => {
                 unreachable!("va builtins handled earlier by name match")
             }
-            // __builtin_constant_p(expr) -> 1 if expr is a compile-time constant, 0 otherwise.
-            // We emit an IsConstant unary op so that after inlining and constant propagation,
-            // the constant_fold pass can resolve it to 1 if the operand became constant.
-            // This is critical for the Linux kernel's cpucap_is_possible() pattern where
-            // __builtin_constant_p is used inside always_inline functions.
-            BuiltinIntrinsic::ConstantP => {
-                if let Some(arg) = args.first() {
-                    // If already a compile-time constant at lowering time, resolve immediately
-                    if self.eval_const_expr(arg).is_some() {
-                        return Some(Operand::Const(IrConst::I32(1)));
-                    }
-                    // In non-inline-candidate functions (not always_inline, inline, or static),
-                    // non-constant expressions always resolve to 0. Only inline candidates
-                    // need deferred resolution via IsConstant, because after inlining a
-                    // parameter may become constant (e.g., kernel's cpucap_is_possible pattern).
-                    if !self.func().is_inline_candidate {
-                        // Lower the argument expression for side effects, then return 0
-                        self.lower_expr(arg);
-                        return Some(Operand::Const(IrConst::I32(0)));
-                    }
-                    // Emit an IsConstant instruction to be resolved after optimization
-                    let src = self.lower_expr(arg);
-                    let src_ty = self.get_expr_type(arg);
-                    let dest = self.fresh_value();
-                    self.emit(Instruction::UnaryOp {
-                        dest,
-                        op: IrUnaryOp::IsConstant,
-                        src,
-                        ty: src_ty,
-                    });
-                    Some(Operand::Value(dest))
-                } else {
-                    Some(Operand::Const(IrConst::I32(0)))
-                }
-            }
+            BuiltinIntrinsic::ConstantP => self.lower_constant_p(args),
             // __builtin_object_size(ptr, type) -> compile-time object size, or unknown
             // For types 0 and 1: return (size_t)-1 when size is unknown
             // For types 2 and 3: return 0 when size is unknown
@@ -562,6 +403,152 @@ impl Lowerer {
                 }
             }
         }
+    }
+
+    /// Lower __builtin_is{greater,less,unordered,...} float comparison builtins.
+    /// Promotes operands to the widest float type, then emits the appropriate comparison.
+    fn lower_fp_compare(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        if args.len() < 2 {
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+        let lhs_ty = self.get_expr_type(&args[0]);
+        let rhs_ty = self.get_expr_type(&args[1]);
+        // Promote to the widest floating-point type among the two operands.
+        let cmp_ty = if lhs_ty == IrType::F128 || rhs_ty == IrType::F128 {
+            IrType::F128
+        } else if lhs_ty == IrType::F64 || rhs_ty == IrType::F64 {
+            IrType::F64
+        } else if lhs_ty == IrType::F32 || rhs_ty == IrType::F32 {
+            IrType::F32
+        } else {
+            IrType::F64
+        };
+        let mut lhs = self.lower_expr(&args[0]);
+        let mut rhs = self.lower_expr(&args[1]);
+        if lhs_ty != cmp_ty {
+            let conv = self.emit_cast_val(lhs, lhs_ty, cmp_ty);
+            lhs = Operand::Value(conv);
+        }
+        if rhs_ty != cmp_ty {
+            let conv = self.emit_cast_val(rhs, rhs_ty, cmp_ty);
+            rhs = Operand::Value(conv);
+        }
+
+        // __builtin_isunordered: returns 1 if either operand is NaN.
+        // Emit (a != a) | (b != b) since NaN is the only value where x != x.
+        if name == "__builtin_isunordered" {
+            let lhs_nan = self.emit_cmp_val(IrCmpOp::Ne, lhs, lhs, cmp_ty);
+            let rhs_nan = self.emit_cmp_val(IrCmpOp::Ne, rhs, rhs, cmp_ty);
+            let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lhs_nan), Operand::Value(rhs_nan), IrType::I32);
+            return Some(Operand::Value(dest));
+        }
+
+        // __builtin_islessgreater: returns 1 if a < b or a > b (NOT for NaN).
+        // Emit (a < b) | (a > b).
+        if name == "__builtin_islessgreater" {
+            let lt = self.emit_cmp_val(IrCmpOp::Slt, lhs, rhs, cmp_ty);
+            let gt = self.emit_cmp_val(IrCmpOp::Sgt, lhs, rhs, cmp_ty);
+            let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lt), Operand::Value(gt), IrType::I32);
+            return Some(Operand::Value(dest));
+        }
+
+        let cmp_op = match name {
+            "__builtin_isgreater" => IrCmpOp::Sgt,
+            "__builtin_isgreaterequal" => IrCmpOp::Sge,
+            "__builtin_isless" => IrCmpOp::Slt,
+            "__builtin_islessequal" => IrCmpOp::Sle,
+            _ => IrCmpOp::Eq,
+        };
+        let dest = self.emit_cmp_val(cmp_op, lhs, rhs, cmp_ty);
+        Some(Operand::Value(dest))
+    }
+
+    /// Lower creal/cimag builtins. `is_real` selects real vs imaginary part.
+    fn lower_complex_part(&mut self, name: &str, args: &[Expr], is_real: bool) -> Option<Operand> {
+        if args.is_empty() {
+            return Some(Operand::Const(IrConst::F64(0.0)));
+        }
+        let arg_ctype = self.expr_ctype(&args[0]);
+        let target_ty = Self::creal_return_type(name);
+        if arg_ctype.is_complex() {
+            let val = if is_real {
+                self.lower_complex_real_part(&args[0])
+            } else {
+                self.lower_complex_imag_part(&args[0])
+            };
+            let comp_ty = Self::complex_component_ir_type(&arg_ctype);
+            if comp_ty != target_ty {
+                Some(self.emit_implicit_cast(val, comp_ty, target_ty))
+            } else {
+                Some(val)
+            }
+        } else if is_real {
+            let val = self.lower_expr(&args[0]);
+            let val_ty = self.get_expr_type(&args[0]);
+            Some(self.emit_implicit_cast(val, val_ty, target_ty))
+        } else {
+            // Imaginary part of a non-complex value is zero
+            Some(match target_ty {
+                IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                IrType::F128 => Operand::Const(IrConst::long_double(0.0)),
+                _ => Operand::Const(IrConst::F64(0.0)),
+            })
+        }
+    }
+
+    /// Lower __builtin_constant_p(expr): 1 if compile-time constant, 0 otherwise.
+    /// In inline candidates, emits a deferred IsConstant instruction for post-optimization resolution.
+    fn lower_constant_p(&mut self, args: &[Expr]) -> Option<Operand> {
+        let Some(arg) = args.first() else {
+            return Some(Operand::Const(IrConst::I32(0)));
+        };
+        // If already a compile-time constant at lowering time, resolve immediately
+        if self.eval_const_expr(arg).is_some() {
+            return Some(Operand::Const(IrConst::I32(1)));
+        }
+        // In non-inline-candidate functions, non-constant expressions always resolve to 0.
+        // Only inline candidates need deferred resolution via IsConstant.
+        if !self.func().is_inline_candidate {
+            self.lower_expr(arg);
+            return Some(Operand::Const(IrConst::I32(0)));
+        }
+        // Emit an IsConstant instruction to be resolved after optimization
+        let src = self.lower_expr(arg);
+        let src_ty = self.get_expr_type(arg);
+        let dest = self.fresh_value();
+        self.emit(Instruction::UnaryOp {
+            dest,
+            op: IrUnaryOp::IsConstant,
+            src,
+            ty: src_ty,
+        });
+        Some(Operand::Value(dest))
+    }
+
+    /// Lower __builtin_complex(real, imag): construct a complex value on the stack.
+    fn lower_complex_construct(&mut self, args: &[Expr]) -> Option<Operand> {
+        if args.len() < 2 {
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+        let real_val = self.lower_expr(&args[0]);
+        let imag_val = self.lower_expr(&args[1]);
+        let arg_ty = self.get_expr_type(&args[0]);
+        let (comp_ty, complex_size, comp_size) = if arg_ty == IrType::F32 {
+            (IrType::F32, 8usize, 4usize)
+        } else {
+            (IrType::F64, 16usize, 8usize)
+        };
+        let alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
+        self.emit(Instruction::Store { val: real_val, ptr: alloca, ty: comp_ty, seg_override: AddressSpace::Default });
+        let imag_ptr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr {
+            dest: imag_ptr, base: alloca,
+            offset: Operand::Const(IrConst::I64(comp_size as i64)),
+            ty: IrType::I8,
+        });
+        self.emit(Instruction::Store { val: imag_val, ptr: imag_ptr, ty: comp_ty, seg_override: AddressSpace::Default });
+        Some(Operand::Value(alloca))
     }
 
     /// Lower an X86 SSE/AES/CRC intrinsic to IR.
