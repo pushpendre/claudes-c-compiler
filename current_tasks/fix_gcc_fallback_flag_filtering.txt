@@ -1,0 +1,18 @@
+Fix GCC fallback flag filtering for VDSO32/16-bit builds
+
+Problem: When ccc encounters -m32 or -m16, it delegates to the system GCC
+via gcc_fallback. However, it passes the original command-line args verbatim,
+including flags that ccc silently accepted but the system GCC doesn't support.
+
+Specifically, ccc pretends to be GCC 6 (__GNUC__=6), so the Linux kernel's
+build system adds GCC-6-era flags like --param=allow-store-data-races=0.
+But the system GCC is version 13 and doesn't recognize some of these flags.
+Similarly, ccc accepts -fmin-function-alignment (GCC 14+) which GCC 13 also
+doesn't support.
+
+This breaks the VDSO32 build in defconfig: arch/x86/entry/vdso/vdso32/
+
+Fix: In run_gcc_fallback(), filter out flags that the system GCC doesn't
+accept by testing them against the system GCC before forwarding.
+
+Status: in_progress

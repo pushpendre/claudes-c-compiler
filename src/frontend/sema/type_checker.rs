@@ -258,11 +258,19 @@ impl<'a> ExprTypeChecker<'a> {
                 self.infer_expr_ctype(lhs)
             }
 
-            // Conditional: type of the then-branch (matches lowerer behavior).
-            // For pointer operands, this avoids incorrect arithmetic conversion.
-            // TODO: implement full C11 6.5.15 composite type rules for pointers
-            Expr::Conditional(_, then_expr, _, _) => self.infer_expr_ctype(then_expr),
-            Expr::GnuConditional(cond, _, _) => self.infer_expr_ctype(cond),
+            // Conditional: C11 6.5.15 composite type rules
+            Expr::Conditional(_, then_expr, else_expr, _) => {
+                CType::conditional_composite_type(
+                    self.infer_expr_ctype(then_expr),
+                    self.infer_expr_ctype(else_expr),
+                )
+            }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                CType::conditional_composite_type(
+                    self.infer_expr_ctype(cond),
+                    self.infer_expr_ctype(else_expr),
+                )
+            }
 
             // Comma: type of the right expression
             Expr::Comma(_, rhs, _) => self.infer_expr_ctype(rhs),

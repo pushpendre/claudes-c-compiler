@@ -282,35 +282,6 @@ impl Lowerer {
         || name == "__sync_val_compare_and_swap"
     }
 
-    /// Compute the composite type for a conditional (ternary) expression.
-    /// For sizeof/typeof purposes, when one branch is void* and the other is T*,
-    /// we use T* to match GCC behavior. This is required for Linux kernel patterns
-    /// like __builtin_choose_expr that rely on sizeof(*(cond ? (void*)x : (T*)y))
-    /// returning sizeof(T), not 1.
-    /// Note: strict C11 6.5.15p6 would use void*, but GCC uses T* for sizeof/typeof.
-    fn composite_conditional_type(then_ct: Option<CType>, else_ct: Option<CType>) -> Option<CType> {
-        match (then_ct, else_ct) {
-            (Some(t), Some(e)) => {
-                // GCC: prefer typed pointer over void* for sizeof/typeof resolution
-                if let (CType::Pointer(ref inner_t, _), CType::Pointer(ref inner_e, _)) = (&t, &e) {
-                    if matches!(inner_t.as_ref(), CType::Void) && !matches!(inner_e.as_ref(), CType::Void) {
-                        return Some(e);
-                    }
-                    if matches!(inner_e.as_ref(), CType::Void) && !matches!(inner_t.as_ref(), CType::Void) {
-                        return Some(t);
-                    }
-                    // Both are the same pointer type or both void*
-                    return Some(t);
-                }
-                // For non-pointer types, prefer the wider/then type (usual arithmetic conversions)
-                Some(t)
-            }
-            (Some(t), None) => Some(t),
-            (None, Some(e)) => Some(e),
-            (None, None) => None,
-        }
-    }
-
     /// Return the IR type for known builtins that return float or specific types.
     /// Returns None for builtins without special return type handling.
     pub(super) fn builtin_return_type(name: &str) -> Option<IrType> {
@@ -1648,12 +1619,12 @@ impl Lowerer {
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 let then_ct = self.get_expr_ctype(then_expr);
                 let else_ct = self.get_expr_ctype(else_expr);
-                Self::composite_conditional_type(then_ct, else_ct)
+                CType::conditional_composite_type(then_ct, else_ct)
             }
             Expr::GnuConditional(cond, else_expr, _) => {
                 let cond_ct = self.get_expr_ctype(cond);
                 let else_ct = self.get_expr_ctype(else_expr);
-                Self::composite_conditional_type(cond_ct, else_ct)
+                CType::conditional_composite_type(cond_ct, else_ct)
             }
             Expr::Comma(_, last, _) => self.get_expr_ctype(last),
             Expr::StringLiteral(_, _) => {

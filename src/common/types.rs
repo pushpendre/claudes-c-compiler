@@ -1241,6 +1241,11 @@ impl CType {
         matches!(self, CType::Float | CType::Double | CType::LongDouble)
     }
 
+    /// Whether this is an arithmetic type (integer, floating-point, or complex).
+    pub fn is_arithmetic(&self) -> bool {
+        self.is_integer() || self.is_floating() || self.is_complex()
+    }
+
     /// Whether this is a GCC vector extension type.
     pub fn is_vector(&self) -> bool {
         matches!(self, CType::Vector(_, _))
@@ -1389,6 +1394,44 @@ impl CType {
         } else {
             // The signed type has higher rank and can represent all values
             if l_unsigned { r } else { l }
+        }
+    }
+
+    /// Compute the composite type for a conditional expression per C11 6.5.15.
+    ///
+    /// Rules:
+    /// - Both arithmetic: usual arithmetic conversions
+    /// - Both void: void
+    /// - Both pointers: prefer typed pointer over void* (GCC compat for sizeof/typeof)
+    /// - Both struct/union: return the then-branch type (must be compatible)
+    /// - Otherwise: return the then-branch type as fallback
+    pub fn conditional_composite_type(then_ct: Option<CType>, else_ct: Option<CType>) -> Option<CType> {
+        match (then_ct, else_ct) {
+            (Some(t), Some(e)) => {
+                // Both void
+                if matches!(&t, CType::Void) && matches!(&e, CType::Void) {
+                    return Some(CType::Void);
+                }
+                // Both pointers: prefer typed pointer over void*
+                if let (CType::Pointer(ref inner_t, _), CType::Pointer(ref inner_e, _)) = (&t, &e) {
+                    if matches!(inner_t.as_ref(), CType::Void) && !matches!(inner_e.as_ref(), CType::Void) {
+                        return Some(e);
+                    }
+                    if matches!(inner_e.as_ref(), CType::Void) && !matches!(inner_t.as_ref(), CType::Void) {
+                        return Some(t);
+                    }
+                    return Some(t);
+                }
+                // Both arithmetic types: apply usual arithmetic conversions
+                if t.is_arithmetic() && e.is_arithmetic() {
+                    return Some(CType::usual_arithmetic_conversion(&t, &e));
+                }
+                // Fallback: then-branch type (structs, unions, etc.)
+                Some(t)
+            }
+            (Some(t), None) => Some(t),
+            (None, Some(e)) => Some(e),
+            (None, None) => None,
         }
     }
 
