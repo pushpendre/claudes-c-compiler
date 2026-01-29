@@ -1,0 +1,18 @@
+Task: Fix asm goto target blocks being incorrectly merged in cfg_simplify
+
+Problem: merge_single_pred_blocks() in cfg_simplify.rs doesn't count InlineAsm
+goto_labels as CFG edges when computing predecessor counts. This causes asm goto
+target blocks (e.g., t_yes, t_no in _static_cpu_has) to appear to have only 1
+predecessor (the terminator-based edge), when they actually have additional
+predecessors from InlineAsm goto_labels.
+
+The merged block gets Terminator::Unreachable (ud2), but the InlineAsm still
+references the old block label, causing the asm goto to jump to ud2 instead of
+the intended code.
+
+This causes the Linux kernel to crash during boot in pat_bp_init() because
+_static_cpu_has's asm goto t_yes label jumps to ud2 instead of "return true".
+
+Fix: Include InlineAsm goto_labels in predecessor counting in merge_single_pred_blocks.
+
+File: src/passes/cfg_simplify.rs
