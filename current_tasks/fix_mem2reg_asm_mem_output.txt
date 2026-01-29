@@ -1,0 +1,18 @@
+Task: Fix mem2reg incorrectly promoting allocas used as =m inline asm outputs
+
+Problem: When an alloca is used as an output operand with a memory-only
+constraint like "=m", mem2reg promotes it to a fresh SSA value. This is
+wrong because the inline asm writes directly to memory at the alloca's
+stack address. After promotion, the backend no longer recognizes the value
+as an alloca, uses movq (load value) instead of leaq (compute address),
+and the inline asm writes to garbage memory.
+
+Example failing test: asm-mov-save-restore-x86-004-run2
+The "=m" output operands get promoted, and the backend loads uninitialized
+stack values instead of computing the alloca addresses.
+
+Fix: In mem2reg's InlineAsm handling, disqualify allocas used as output
+pointers when the output constraint is memory-only (=m, =o, =V, =p).
+These allocas must keep their stack slots for the inline asm to write to.
+
+Status: in_progress

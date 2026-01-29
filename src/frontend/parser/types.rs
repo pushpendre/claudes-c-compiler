@@ -124,13 +124,38 @@ impl Parser {
                 TokenKind::Extension => {
                     self.advance();
                 }
-                // _Atomic
+                // _Atomic as type specifier: _Atomic(type-name)
+                // C11 §6.7.2.4: _Atomic(T) is a type specifier equivalent to T
+                // with atomic qualification. Since we don't track atomic-ness,
+                // we just parse and return the inner type.
                 TokenKind::Atomic => {
                     self.advance();
                     if matches!(self.peek(), TokenKind::LParen) {
-                        self.skip_balanced_parens();
-                        return Some(TypeSpecifier::Int); // TODO: parse the actual type
+                        self.advance(); // consume '('
+                        // Save and restore const qualifier across inner type parse
+                        // to prevent leakage (e.g., _Atomic(const int) should not
+                        // make the outer declaration const).
+                        let saved_const = self.attrs.parsing_const();
+                        self.attrs.set_const(false);
+                        let inner = self.parse_type_specifier();
+                        self.attrs.set_const(saved_const);
+                        if let Some(inner_type) = inner {
+                            let result = self.parse_abstract_declarator_suffix(inner_type);
+                            self.expect(&TokenKind::RParen);
+                            return Some(result);
+                        }
+                        // Fallback: if we can't parse a type, emit error and skip
+                        let err_span = self.peek_span();
+                        self.emit_error("expected type name in _Atomic(...)", err_span);
+                        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                            self.advance();
+                        }
+                        self.consume_if(&TokenKind::RParen);
+                        return Some(TypeSpecifier::Int);
                     }
+                    // _Atomic without parens is a type qualifier; since we don't
+                    // track atomic-ness, it falls through to continue collecting
+                    // type specifiers.
                 }
                 // Alignas
                 TokenKind::Alignas => {

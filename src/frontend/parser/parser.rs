@@ -528,279 +528,10 @@ impl Parser {
                         self.advance(); // outer (
                         if matches!(self.peek(), TokenKind::LParen) {
                             self.advance(); // inner (
-                            // Parse attribute list
-                            loop {
-                                match self.peek() {
-                                    TokenKind::Identifier(name) if name == "constructor" || name == "__constructor__" => {
-                                        self.attrs.set_constructor(true);
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.skip_balanced_parens();
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "destructor" || name == "__destructor__" => {
-                                        self.attrs.set_destructor(true);
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.skip_balanced_parens();
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "packed" || name == "__packed__" => {
-                                        is_packed = true;
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "aligned" || name == "__aligned__" => {
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            if let Some(align) = self.parse_alignment_expr() {
-                                                aligned = Some(align);
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "common" || name == "__common__" => {
-                                        is_common = true;
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "transparent_union" || name == "__transparent_union__" => {
-                                        self.attrs.set_transparent_union(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "weak" || name == "__weak__" => {
-                                        self.attrs.set_weak(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "alias" || name == "__alias__" => {
-                                        self.advance();
-                                        // Parse alias("target_name") - supports string concatenation
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            let mut result = String::new();
-                                            while let TokenKind::StringLiteral(s) = self.peek() {
-                                                result.push_str(s);
-                                                self.advance();
-                                            }
-                                            if !result.is_empty() {
-                                                self.attrs.parsing_alias_target = Some(result);
-                                            }
-                                            // consume )
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "weakref" || name == "__weakref__" => {
-                                        // weakref("target") is equivalent to weak + alias("target")
-                                        self.attrs.set_weak(true);
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            let mut result = String::new();
-                                            while let TokenKind::StringLiteral(s) = self.peek() {
-                                                result.push_str(s);
-                                                self.advance();
-                                            }
-                                            if !result.is_empty() {
-                                                self.attrs.parsing_alias_target = Some(result);
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "visibility" || name == "__visibility__" => {
-                                        self.advance();
-                                        // Parse visibility("hidden"|"default"|"internal"|"protected") - supports string concatenation
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            let mut result = String::new();
-                                            while let TokenKind::StringLiteral(s) = self.peek() {
-                                                result.push_str(s);
-                                                self.advance();
-                                            }
-                                            if !result.is_empty() {
-                                                self.attrs.parsing_visibility = Some(result);
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "section" || name == "__section__" => {
-                                        self.advance();
-                                        // Parse section("name") - supports string concatenation
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            let mut result = String::new();
-                                            while let TokenKind::StringLiteral(s) = self.peek() {
-                                                result.push_str(s);
-                                                self.advance();
-                                            }
-                                            if !result.is_empty() {
-                                                self.attrs.parsing_section = Some(result);
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "error" || name == "__error__"
-                                        || name == "warning" || name == "__warning__" => {
-                                        // __attribute__((error("msg"))) / __attribute__((warning("msg")))
-                                        // These are GCC compile-time assertion mechanisms: if a call to
-                                        // such a function survives to codegen, GCC emits a compile error.
-                                        // The Linux kernel uses this for __compiletime_error() traps.
-                                        self.attrs.set_error_attr(true);
-                                        self.advance();
-                                        // Skip the ("message") argument
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance();
-                                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                                                self.advance();
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "noreturn" => {
-                                        self.attrs.set_noreturn(true);
-                                        self.advance();
-                                    }
-                                    // __noreturn__ is tokenized as TokenKind::Noreturn by the lexer,
-                                    // so handle the keyword form here in addition to the identifier "noreturn".
-                                    TokenKind::Noreturn => {
-                                        self.attrs.set_noreturn(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "gnu_inline" || name == "__gnu_inline__" => {
-                                        self.attrs.set_gnu_inline(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "always_inline" || name == "__always_inline__" => {
-                                        self.attrs.set_always_inline(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "noinline" || name == "__noinline__" => {
-                                        self.attrs.set_noinline(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "cleanup" || name == "__cleanup__" => {
-                                        self.advance();
-                                        // Parse cleanup(func_name) - the function to call when variable goes out of scope
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            if let TokenKind::Identifier(func_name) = self.peek() {
-                                                self.attrs.parsing_cleanup_fn = Some(func_name.clone());
-                                                self.advance();
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance(); // consume )
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "mode" || name == "__mode__" => {
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            // Parse mode specifier: QI (8-bit), HI (16-bit),
-                                            // SI (32-bit), DI (64-bit), TI (128-bit)
-                                            if let TokenKind::Identifier(mode_name) = self.peek() {
-                                                let is_32bit = crate::common::types::target_is_32bit();
-                                                mode_kind = match mode_name.as_str() {
-                                                    "QI" | "__QI__" | "byte" | "__byte__" => Some(ModeKind::QI),
-                                                    "HI" | "__HI__" => Some(ModeKind::HI),
-                                                    "SI" | "__SI__" => Some(ModeKind::SI),
-                                                    "DI" | "__DI__" => Some(ModeKind::DI),
-                                                    "TI" | "__TI__" => {
-                                                        // GCC rejects mode(TI) on 32-bit targets:
-                                                        // "unable to emulate 'TI'"
-                                                        if is_32bit {
-                                                            self.error_count += 1;
-                                                            mode_kind // leave unchanged (error)
-                                                        } else {
-                                                            Some(ModeKind::TI)
-                                                        }
-                                                    }
-                                                    // "word" = machine word size
-                                                    "word" | "__word__" => if is_32bit { Some(ModeKind::SI) } else { Some(ModeKind::DI) },
-                                                    // "pointer" = pointer-sized
-                                                    "pointer" | "__pointer__" => if is_32bit { Some(ModeKind::SI) } else { Some(ModeKind::DI) },
-                                                    _ => mode_kind, // unknown mode, leave unchanged
-                                                };
-                                            }
-                                            // Skip to closing paren
-                                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                                                self.advance();
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "vector_size" || name == "__vector_size__" => {
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            // Parse the vector size expression (must be a constant)
-                                            // TODO: Validate vector_size is a power of 2 and element type is numeric
-                                            let expr = self.parse_assignment_expr();
-                                            let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
-                                            let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
-                                            if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
-                                                self.attrs.parsing_vector_size = Some(size as usize);
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(name) if name == "used" || name == "__used__" => {
-                                        self.attrs.set_used(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "fastcall" || name == "__fastcall__" => {
-                                        self.attrs.set_fastcall(true);
-                                        self.advance();
-                                    }
-                                    TokenKind::Identifier(name) if name == "address_space" || name == "__address_space__" => {
-                                        self.advance();
-                                        // Parse address_space(__seg_gs) / address_space(__seg_fs)
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance(); // consume (
-                                            match self.peek() {
-                                                TokenKind::SegGs => {
-                                                    self.advance();
-                                                    self.attrs.parsing_address_space = AddressSpace::SegGs;
-                                                }
-                                                TokenKind::SegFs => {
-                                                    self.advance();
-                                                    self.attrs.parsing_address_space = AddressSpace::SegFs;
-                                                }
-                                                _ => {
-                                                    // Unknown address space, skip
-                                                    self.advance();
-                                                }
-                                            }
-                                            if matches!(self.peek(), TokenKind::RParen) {
-                                                self.advance();
-                                            }
-                                        }
-                                    }
-                                    TokenKind::Identifier(_) => {
-                                        self.advance();
-                                        if matches!(self.peek(), TokenKind::LParen) {
-                                            self.skip_balanced_parens();
-                                        }
-                                    }
-                                    TokenKind::Comma => { self.advance(); }
-                                    TokenKind::RParen | TokenKind::Eof => break,
-                                    _ => { self.advance(); }
-                                }
-                            }
-                            // Inner )
-                            if matches!(self.peek(), TokenKind::RParen) {
-                                self.advance();
-                            }
+                            self.parse_gcc_attribute_list(
+                                &mut is_packed, &mut aligned, &mut mode_kind, &mut is_common,
+                            );
+                            if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
                         } else {
                             // Single-paren form
                             while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
@@ -812,16 +543,181 @@ impl Parser {
                                 self.advance();
                             }
                         }
-                        // Outer )
-                        if matches!(self.peek(), TokenKind::RParen) {
-                            self.advance();
-                        }
+                        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
                     }
                 }
                 _ => break,
             }
         }
         (is_packed, aligned, mode_kind, is_common)
+    }
+
+    /// Parse the comma-separated attribute list inside __attribute__((...)).
+    fn parse_gcc_attribute_list(&mut self, is_packed: &mut bool, aligned: &mut Option<usize>,
+                                mode_kind: &mut Option<ModeKind>, is_common: &mut bool) {
+        loop {
+            match self.peek() {
+                TokenKind::Comma => { self.advance(); }
+                TokenKind::RParen | TokenKind::Eof => break,
+                TokenKind::Noreturn => {
+                    self.attrs.set_noreturn(true);
+                    self.advance();
+                }
+                TokenKind::Identifier(name) => {
+                    self.dispatch_gcc_attribute(&name.clone(), is_packed, aligned, mode_kind, is_common);
+                }
+                _ => { self.advance(); }
+            }
+        }
+    }
+
+    /// Dispatch a single GCC attribute by name.
+    fn dispatch_gcc_attribute(&mut self, name: &str, is_packed: &mut bool,
+                              aligned: &mut Option<usize>, mode_kind: &mut Option<ModeKind>,
+                              is_common: &mut bool) {
+        match name {
+            "constructor" | "__constructor__" => {
+                self.attrs.set_constructor(true);
+                self.advance();
+                if matches!(self.peek(), TokenKind::LParen) { self.skip_balanced_parens(); }
+            }
+            "destructor" | "__destructor__" => {
+                self.attrs.set_destructor(true);
+                self.advance();
+                if matches!(self.peek(), TokenKind::LParen) { self.skip_balanced_parens(); }
+            }
+            "packed" | "__packed__" => { *is_packed = true; self.advance(); }
+            "aligned" | "__aligned__" => {
+                self.advance();
+                if matches!(self.peek(), TokenKind::LParen) {
+                    if let Some(align) = self.parse_alignment_expr() { *aligned = Some(align); }
+                }
+            }
+            "common" | "__common__" => { *is_common = true; self.advance(); }
+            "transparent_union" | "__transparent_union__" => { self.attrs.set_transparent_union(true); self.advance(); }
+            "weak" | "__weak__" => { self.attrs.set_weak(true); self.advance(); }
+            "alias" | "__alias__" => {
+                self.advance();
+                self.attrs.parsing_alias_target = self.parse_string_attr_arg();
+            }
+            "weakref" | "__weakref__" => {
+                self.attrs.set_weak(true);
+                self.advance();
+                self.attrs.parsing_alias_target = self.parse_string_attr_arg();
+            }
+            "visibility" | "__visibility__" => {
+                self.advance();
+                self.attrs.parsing_visibility = self.parse_string_attr_arg();
+            }
+            "section" | "__section__" => {
+                self.advance();
+                self.attrs.parsing_section = self.parse_string_attr_arg();
+            }
+            "error" | "__error__" | "warning" | "__warning__" => {
+                self.attrs.set_error_attr(true);
+                self.advance();
+                self.skip_optional_paren_arg();
+            }
+            "noreturn" => { self.attrs.set_noreturn(true); self.advance(); }
+            "gnu_inline" | "__gnu_inline__" => { self.attrs.set_gnu_inline(true); self.advance(); }
+            "always_inline" | "__always_inline__" => { self.attrs.set_always_inline(true); self.advance(); }
+            "noinline" | "__noinline__" => { self.attrs.set_noinline(true); self.advance(); }
+            "cleanup" | "__cleanup__" => { self.advance(); self.parse_cleanup_attr(); }
+            "mode" | "__mode__" => { self.advance(); self.parse_mode_attr(mode_kind); }
+            "vector_size" | "__vector_size__" => { self.advance(); self.parse_vector_size_attr(); }
+            "used" | "__used__" => { self.attrs.set_used(true); self.advance(); }
+            "fastcall" | "__fastcall__" => { self.attrs.set_fastcall(true); self.advance(); }
+            "address_space" | "__address_space__" => { self.advance(); self.parse_address_space_attr(); }
+            _ => {
+                self.advance();
+                if matches!(self.peek(), TokenKind::LParen) { self.skip_balanced_parens(); }
+            }
+        }
+    }
+
+    /// Parse a parenthesized string argument: ("string1" "string2"...).
+    /// Returns Some(concatenated) if non-empty, None otherwise.
+    fn parse_string_attr_arg(&mut self) -> Option<String> {
+        if !matches!(self.peek(), TokenKind::LParen) { return None; }
+        self.advance(); // consume (
+        let mut result = String::new();
+        while let TokenKind::StringLiteral(s) = self.peek() {
+            result.push_str(s);
+            self.advance();
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+        if result.is_empty() { None } else { Some(result) }
+    }
+
+    /// Skip an optional parenthesized argument (consuming everything inside).
+    fn skip_optional_paren_arg(&mut self) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+            self.advance();
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+    }
+
+    /// Parse cleanup(func_name) attribute.
+    fn parse_cleanup_attr(&mut self) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        if let TokenKind::Identifier(func_name) = self.peek() {
+            self.attrs.parsing_cleanup_fn = Some(func_name.clone());
+            self.advance();
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+    }
+
+    /// Parse mode(QI|HI|SI|DI|TI|word|pointer) attribute.
+    fn parse_mode_attr(&mut self, mode_kind: &mut Option<ModeKind>) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        if let TokenKind::Identifier(mode_name) = self.peek() {
+            let is_32bit = crate::common::types::target_is_32bit();
+            *mode_kind = match mode_name.as_str() {
+                "QI" | "__QI__" | "byte" | "__byte__" => Some(ModeKind::QI),
+                "HI" | "__HI__" => Some(ModeKind::HI),
+                "SI" | "__SI__" => Some(ModeKind::SI),
+                "DI" | "__DI__" => Some(ModeKind::DI),
+                "TI" | "__TI__" => {
+                    if is_32bit { self.error_count += 1; *mode_kind }
+                    else { Some(ModeKind::TI) }
+                }
+                "word" | "__word__" | "pointer" | "__pointer__" => {
+                    if is_32bit { Some(ModeKind::SI) } else { Some(ModeKind::DI) }
+                }
+                _ => *mode_kind,
+            };
+        }
+        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { self.advance(); }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+    }
+
+    /// Parse vector_size(expr) attribute.
+    fn parse_vector_size_attr(&mut self) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        let expr = self.parse_assignment_expr();
+        let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
+        let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+        if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
+            self.attrs.parsing_vector_size = Some(size as usize);
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+    }
+
+    /// Parse address_space(__seg_gs|__seg_fs) attribute.
+    fn parse_address_space_attr(&mut self) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        match self.peek() {
+            TokenKind::SegGs => { self.advance(); self.attrs.parsing_address_space = AddressSpace::SegGs; }
+            TokenKind::SegFs => { self.advance(); self.attrs.parsing_address_space = AddressSpace::SegFs; }
+            _ => { self.advance(); }
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.
