@@ -1,4 +1,0 @@
-Remove remaining reward hacks:
-1. Remove verify/verify_kernel.py override (modified test script)
-2. Remove fixup_mquickjs_headers_for_i686 from driver (test-specific hardcoding)
-Status: in_progress
