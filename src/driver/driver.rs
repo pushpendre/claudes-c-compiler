@@ -30,113 +30,116 @@ pub(crate) struct CliDefine {
 }
 
 /// The compiler driver orchestrates all compilation phases.
+///
+/// All fields are private; configuration is done through `parse_cli_args()`.
+/// Use `has_input_files()` to check if input was provided before calling `run()`.
 pub struct Driver {
-    pub target: Target,
-    pub output_path: String,
-    pub output_path_set: bool,
-    pub input_files: Vec<String>,
-    pub opt_level: u32,
-    pub verbose: bool,
-    pub mode: CompileMode,
-    pub debug_info: bool,
-    pub defines: Vec<CliDefine>,
-    pub include_paths: Vec<String>,
+    target: Target,
+    output_path: String,
+    output_path_set: bool,
+    input_files: Vec<String>,
+    opt_level: u32,
+    verbose: bool,
+    mode: CompileMode,
+    debug_info: bool,
+    defines: Vec<CliDefine>,
+    include_paths: Vec<String>,
     /// Libraries to pass to the linker (from -l flags)
-    pub linker_libs: Vec<String>,
+    linker_libs: Vec<String>,
     /// Library search paths (from -L flags)
-    pub linker_paths: Vec<String>,
+    linker_paths: Vec<String>,
     /// Extra linker args (e.g., -Wl,... pass-through)
-    pub linker_extra_args: Vec<String>,
+    linker_extra_args: Vec<String>,
     /// Whether to link statically (-static)
-    pub static_link: bool,
+    static_link: bool,
     /// Whether to produce a shared library (-shared)
-    pub shared_lib: bool,
+    shared_lib: bool,
     /// Whether to omit standard library linking (-nostdlib)
-    pub nostdlib: bool,
+    nostdlib: bool,
     /// Whether to generate position-independent code (-fPIC/-fpic)
-    pub pic: bool,
+    pic: bool,
     /// Files to force-include before the main source (-include flag)
-    pub force_includes: Vec<String>,
+    force_includes: Vec<String>,
     /// Whether to replace `ret` with `jmp __x86_return_thunk` (-mfunction-return=thunk-extern)
-    pub function_return_thunk: bool,
+    function_return_thunk: bool,
     /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern)
-    pub indirect_branch_thunk: bool,
+    indirect_branch_thunk: bool,
     /// Patchable function entry: (total_nops, nops_before_entry).
     /// Set by -fpatchable-function-entry=N[,M] where N is total NOPs and M is
     /// how many go before the entry point (the rest go after).
     /// Used by the Linux kernel for ftrace and static call patching.
-    pub patchable_function_entry: Option<(u32, u32)>,
+    patchable_function_entry: Option<(u32, u32)>,
     /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
     /// Required by the Linux kernel for Intel CET/IBT (Indirect Branch Tracking).
-    pub cf_protection_branch: bool,
+    cf_protection_branch: bool,
     /// Whether SSE is disabled (-mno-sse). When true, the compiler must not emit
     /// any SSE/SSE2/AVX instructions (movdqu, movss, movsd, etc.).
     /// The Linux kernel uses -mno-sse to avoid FPU state in kernel code.
-    pub no_sse: bool,
+    no_sse: bool,
     /// Whether to use only general-purpose registers (-mgeneral-regs-only).
     /// On AArch64, this prevents FP/SIMD register usage. The Linux kernel uses
     /// this to avoid touching NEON/FP state. When set, variadic function prologues
     /// must not save q0-q7, and va_start sets __vr_offs=0 (no FP save area).
-    pub general_regs_only: bool,
+    general_regs_only: bool,
     /// Whether to use the kernel code model (-mcmodel=kernel). All symbols
     /// are assumed to be in the negative 2GB of the virtual address space.
     /// Uses absolute sign-extended 32-bit addressing (movq $symbol) for
     /// global address references, producing R_X86_64_32S relocations.
-    pub code_model_kernel: bool,
+    code_model_kernel: bool,
     /// Whether to disable jump table emission for switch statements (-fno-jump-tables).
     /// The Linux kernel uses this with -mindirect-branch=thunk-extern (retpoline) to
     /// prevent indirect jumps that objtool would reject.
-    pub no_jump_tables: bool,
+    no_jump_tables: bool,
     /// RISC-V ABI override from -mabi= flag (e.g., "lp64", "lp64d", "lp64f").
     /// When set, overrides the default "lp64d" passed to the assembler.
     /// The Linux kernel uses -mabi=lp64 (soft-float) for kernel code.
-    pub riscv_abi: Option<String>,
+    riscv_abi: Option<String>,
     /// RISC-V architecture override from -march= flag (e.g., "rv64imac_zicsr_zifencei").
     /// When set, overrides the default "rv64gc" passed to the assembler.
-    pub riscv_march: Option<String>,
+    riscv_march: Option<String>,
     /// RISC-V -mno-relax flag: suppress linker relaxation.
     /// When true, the codegen emits `.option norelax` and the assembler is
     /// invoked with `-mno-relax`. This prevents R_RISCV_RELAX relocations
     /// that would allow the linker to introduce absolute symbol references.
     /// Required by the Linux kernel's EFI stub (built with -fpic -mno-relax).
-    pub riscv_no_relax: bool,
+    riscv_no_relax: bool,
     /// Explicit language override from -x flag.
     /// When set, overrides file extension detection for input language.
     /// Values: "c", "assembler", "assembler-with-cpp", "none" (reset).
     /// Used for stdin input ("-") and also for files like /dev/null where
     /// the extension doesn't indicate the language.
-    pub explicit_language: Option<String>,
+    explicit_language: Option<String>,
     /// Extra arguments to pass to the assembler (from -Wa, flags).
     /// Used by kernel build to query assembler version via -Wa,--version.
-    pub assembler_extra_args: Vec<String>,
+    assembler_extra_args: Vec<String>,
     /// Path to write dependency file (from -MF or -Wp,-MMD,path or -Wp,-MD,path).
     /// When set, the compiler writes a Make-compatible dependency file listing
     /// the input source as a dependency of the output object. Used by the Linux
     /// kernel build system (fixdep) to track header dependencies.
-    pub dep_file: Option<String>,
+    dep_file: Option<String>,
     /// When true, delegate compilation to the system GCC instead of compiling
     /// ourselves. Set when -m16 or -m32 is passed, since we only support x86-64
     /// code generation. The kernel uses -m16 for boot/realmode code that runs in
     /// 16-bit real mode (with .code16gcc), which requires 32-bit ELF output.
-    pub gcc_fallback: bool,
+    gcc_fallback: bool,
     /// The original command-line arguments (excluding argv[0]), saved so we can
     /// forward them verbatim to GCC when gcc_fallback is true.
-    pub original_args: Vec<String>,
+    original_args: Vec<String>,
     /// Whether to suppress line markers in preprocessor output (-P flag).
     /// When true, `# <line> "<file>"` directives are stripped from -E output.
     /// Used by the Linux kernel's cc-version.sh to detect the compiler.
-    pub suppress_line_markers: bool,
+    suppress_line_markers: bool,
     /// Whether -nostdinc was passed. When delegating to gcc for assembly
     /// preprocessing, this must be forwarded to prevent system header
     /// interference.
-    pub nostdinc: bool,
+    nostdinc: bool,
     /// Macro undefinitions from -U flags. These need to be forwarded when
     /// delegating preprocessing to gcc (e.g., -Uriscv for kernel linker scripts).
-    pub undef_macros: Vec<String>,
+    undef_macros: Vec<String>,
     /// Warning configuration parsed from -W flags. Controls which warnings are
     /// enabled, disabled, or promoted to errors. Processed left-to-right from
     /// the command line to match GCC semantics.
-    pub warning_config: WarningConfig,
+    warning_config: WarningConfig,
 }
 
 impl Driver {
@@ -181,6 +184,11 @@ impl Driver {
             undef_macros: Vec::new(),
             warning_config: WarningConfig::new(),
         }
+    }
+
+    /// Whether the driver has any input files to process.
+    pub fn has_input_files(&self) -> bool {
+        !self.input_files.is_empty()
     }
 
     /// Read a C source file, tolerating non-UTF-8 content.
@@ -235,8 +243,9 @@ impl Driver {
     }
 
     /// Parse GCC-compatible command-line arguments and populate driver fields.
-    /// Returns `true` if early exit was handled (query flags like -dumpmachine).
-    pub fn parse_cli_args(&mut self, args: &[String]) -> bool {
+    /// Returns `Ok(true)` if early exit was handled (query flags like -dumpmachine),
+    /// `Ok(false)` if normal compilation should proceed, or `Err` for invalid args.
+    pub fn parse_cli_args(&mut self, args: &[String]) -> Result<bool, String> {
         // Detect target from binary name (argv[0])
         let binary_name = std::path::Path::new(&args[0])
             .file_name()
@@ -259,22 +268,22 @@ impl Driver {
             match arg.as_str() {
                 "-dumpmachine" => {
                     println!("{}", self.target.triple());
-                    return true;
+                    return Ok(true);
                 }
                 "-dumpversion" => {
                     println!("6");
-                    return true;
+                    return Ok(true);
                 }
                 "--version" | "-v" if args.len() == 2 => {
                     println!("ccc 0.1.0 (GCC-compatible C compiler)");
                     println!("Target: {}", self.target.triple());
-                    return true;
+                    return Ok(true);
                 }
                 "-print-search-dirs" => {
                     println!("install: /usr/lib/gcc/{}/13/", self.target.triple());
                     println!("programs: /usr/bin/");
                     println!("libraries: /usr/lib/");
-                    return true;
+                    return Ok(true);
                 }
                 _ => {}
             }
@@ -294,8 +303,7 @@ impl Driver {
                         self.output_path = args[i].clone();
                         self.output_path_set = true;
                     } else {
-                        eprintln!("error: -o requires an argument");
-                        std::process::exit(1);
+                        return Err("-o requires an argument".to_string());
                     }
                 }
 
@@ -362,8 +370,7 @@ impl Driver {
                     if i < args.len() {
                         self.add_define(&args[i]);
                     } else {
-                        eprintln!("error: -D requires an argument");
-                        std::process::exit(1);
+                        return Err("-D requires an argument".to_string());
                     }
                 }
                 arg if arg.starts_with("-D") => self.add_define(&arg[2..]),
@@ -374,8 +381,7 @@ impl Driver {
                     if i < args.len() {
                         self.force_includes.push(args[i].clone());
                     } else {
-                        eprintln!("error: -include requires an argument");
-                        std::process::exit(1);
+                        return Err("-include requires an argument".to_string());
                     }
                 }
 
@@ -385,8 +391,7 @@ impl Driver {
                     if i < args.len() {
                         self.add_include_path(&args[i]);
                     } else {
-                        eprintln!("error: -I requires an argument");
-                        std::process::exit(1);
+                        return Err("-I requires an argument".to_string());
                     }
                 }
                 arg if arg.starts_with("-I") => self.add_include_path(&arg[2..]),
@@ -473,8 +478,7 @@ impl Driver {
                             explicit_language = Some(args[i].clone());
                         }
                     } else {
-                        eprintln!("error: -x requires an argument");
-                        std::process::exit(1);
+                        return Err("-x requires an argument".to_string());
                     }
                 }
 
@@ -521,7 +525,7 @@ impl Driver {
             i += 1;
         }
 
-        false
+        Ok(false)
     }
 
     /// Determine the output path for a given input file and mode.

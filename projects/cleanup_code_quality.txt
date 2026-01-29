@@ -20,11 +20,15 @@ Items a Rust expert would flag, roughly ordered by impact:
    - backend::CodegenOptions and its fields changed to pub(crate)
    - backend::Target methods (except triple()) changed to pub(crate)
    - Unused re-exports removed (ir::*, ast::*, sema builtins, codegen types)
+   - Driver struct: all 38 pub fields changed to private. Only 1 was accessed
+     externally (input_files.is_empty() in main.rs), replaced by has_input_files().
+     parse_cli_args() now returns Result<bool, String> instead of using
+     eprintln!+process::exit(), and real_main() returns Result<(), String>.
    - Remaining: individual pub fn/struct/enum/const within pub(crate) modules
      are semantically capped at pub(crate) by Rust's visibility rules, but
      could be explicitly marked pub(crate) for consistency. Low priority since
      the module-level changes already enforce the correct boundary.
-   - The tighter visibility now exposes ~67 dead code warnings (previously
+   - The tighter visibility now exposes ~32 dead code warnings (previously
      hidden behind pub), which could be cleaned up separately.
 
 4. [PARTIAL] String allocations from literals (medium effort)
