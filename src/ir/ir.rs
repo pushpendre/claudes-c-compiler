@@ -1484,6 +1484,72 @@ pub enum IntrinsicOp {
     /// Load low 64 bits, zero upper (MOVQ)
     /// args[0] = src ptr; dest_ptr = result ptr
     Loadldi128,
+
+    // --- SSE2 packed 16-bit integer operations ---
+    /// Packed 16-bit add (PADDW)
+    Paddw128,
+    /// Packed 16-bit subtract (PSUBW)
+    Psubw128,
+    /// Packed 16-bit multiply high (PMULHW)
+    Pmulhw128,
+    /// Packed 16-bit multiply-add to 32-bit (PMADDWD)
+    Pmaddwd128,
+    /// Packed 16-bit compare greater-than (PCMPGTW)
+    Pcmpgtw128,
+    /// Packed 8-bit compare greater-than (PCMPGTB)
+    Pcmpgtb128,
+    /// Packed 16-bit shift left by imm (PSLLW)
+    Psllwi128,
+    /// Packed 16-bit shift right logical by imm (PSRLW)
+    Psrlwi128,
+    /// Packed 16-bit shift right arithmetic by imm (PSRAW)
+    Psrawi128,
+    /// Packed 32-bit shift right arithmetic by imm (PSRAD)
+    Psradi128,
+    /// Packed 32-bit shift left by imm (PSLLD)
+    Pslldi128,
+    /// Packed 32-bit shift right logical by imm (PSRLD)
+    Psrldi128,
+
+    // --- SSE2 packed 32-bit integer operations ---
+    /// Packed 32-bit add (PADDD)
+    Paddd128,
+    /// Packed 32-bit subtract (PSUBD)
+    Psubd128,
+
+    // --- SSE2 pack/unpack operations ---
+    /// Pack 32-bit to 16-bit signed saturate (PACKSSDW)
+    Packssdw128,
+    /// Pack 16-bit to 8-bit unsigned saturate (PACKUSWB)
+    Packuswb128,
+    /// Unpack and interleave low 8-bit (PUNPCKLBW)
+    Punpcklbw128,
+    /// Unpack and interleave high 8-bit (PUNPCKHBW)
+    Punpckhbw128,
+    /// Unpack and interleave low 16-bit (PUNPCKLWD)
+    Punpcklwd128,
+    /// Unpack and interleave high 16-bit (PUNPCKHWD)
+    Punpckhwd128,
+
+    // --- SSE2 set/insert/extract/convert operations ---
+    /// Set all 16-bit lanes to value (splat)
+    SetEpi16,
+    /// Insert 16-bit value at lane (PINSRW)
+    Pinsrw128,
+    /// Extract 16-bit value at lane (PEXTRW) - returns scalar i32
+    Pextrw128,
+    /// Store low 64 bits to memory (MOVQ store)
+    Storeldi128,
+    /// Convert low 32-bit of __m128i to int (MOVD) - returns scalar i32
+    Cvtsi128Si32,
+    /// Convert int to __m128i with zero extension (MOVD)
+    Cvtsi32Si128,
+    /// Convert low 64-bit of __m128i to long long - returns scalar i64
+    Cvtsi128Si64,
+    /// Shuffle low 16-bit integers (PSHUFLW)
+    Pshuflw128,
+    /// Shuffle high 16-bit integers (PSHUFHW)
+    Pshufhw128,
 }
 
 impl IntrinsicOp {
@@ -1499,7 +1565,22 @@ impl IntrinsicOp {
             IntrinsicOp::Pclmulqdq128 |
             IntrinsicOp::Pslldqi128 | IntrinsicOp::Psrldqi128 |
             IntrinsicOp::Psllqi128 | IntrinsicOp::Psrlqi128 |
-            IntrinsicOp::Pshufd128
+            IntrinsicOp::Pshufd128 |
+            // New SSE2 packed operations are all pure
+            IntrinsicOp::Paddw128 | IntrinsicOp::Psubw128 |
+            IntrinsicOp::Pmulhw128 | IntrinsicOp::Pmaddwd128 |
+            IntrinsicOp::Pcmpgtw128 | IntrinsicOp::Pcmpgtb128 |
+            IntrinsicOp::Psllwi128 | IntrinsicOp::Psrlwi128 |
+            IntrinsicOp::Psrawi128 | IntrinsicOp::Psradi128 |
+            IntrinsicOp::Pslldi128 | IntrinsicOp::Psrldi128 |
+            IntrinsicOp::Paddd128 | IntrinsicOp::Psubd128 |
+            IntrinsicOp::Packssdw128 | IntrinsicOp::Packuswb128 |
+            IntrinsicOp::Punpcklbw128 | IntrinsicOp::Punpckhbw128 |
+            IntrinsicOp::Punpcklwd128 | IntrinsicOp::Punpckhwd128 |
+            IntrinsicOp::SetEpi16 | IntrinsicOp::Pinsrw128 |
+            IntrinsicOp::Pextrw128 | IntrinsicOp::Cvtsi128Si32 |
+            IntrinsicOp::Cvtsi32Si128 | IntrinsicOp::Cvtsi128Si64 |
+            IntrinsicOp::Pshuflw128 | IntrinsicOp::Pshufhw128
         )
     }
 }

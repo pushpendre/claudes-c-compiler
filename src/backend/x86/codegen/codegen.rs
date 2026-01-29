@@ -1198,6 +1198,203 @@ impl X86Codegen {
                     self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
+
+            // --- New SSE2 binary 128-bit operations ---
+            IntrinsicOp::Paddw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "paddw"); }
+            }
+            IntrinsicOp::Psubw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "psubw"); }
+            }
+            IntrinsicOp::Pmulhw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pmulhw"); }
+            }
+            IntrinsicOp::Pmaddwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pmaddwd"); }
+            }
+            IntrinsicOp::Pcmpgtw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pcmpgtw"); }
+            }
+            IntrinsicOp::Pcmpgtb128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pcmpgtb"); }
+            }
+            IntrinsicOp::Paddd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "paddd"); }
+            }
+            IntrinsicOp::Psubd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "psubd"); }
+            }
+            IntrinsicOp::Packssdw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "packssdw"); }
+            }
+            IntrinsicOp::Packuswb128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "packuswb"); }
+            }
+            IntrinsicOp::Punpcklbw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpcklbw"); }
+            }
+            IntrinsicOp::Punpckhbw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpckhbw"); }
+            }
+            IntrinsicOp::Punpcklwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpcklwd"); }
+            }
+            IntrinsicOp::Punpckhwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpckhwd"); }
+            }
+
+            // --- New SSE2 shift-by-immediate 128-bit operations ---
+            IntrinsicOp::Psllwi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psllw ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Psrlwi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrlw ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Psrawi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psraw ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Psradi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrad ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pslldi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pslld ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Psrldi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrld ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+
+            // --- SSE2 set/insert/extract/convert ---
+            IntrinsicOp::SetEpi16 => {
+                // Broadcast 16-bit value to all 8 lanes
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movd %eax, %xmm0");
+                    self.state.emit("    punpcklwd %xmm0, %xmm0");
+                    self.state.emit("    pshufd $0, %xmm0, %xmm0");
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pinsrw128 => {
+                // Insert 16-bit value at lane: pinsrw $imm, %eax, %xmm0
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.operand_to_reg(&args[1], "rcx");
+                    let imm = self.operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrw ${}, %ecx, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pextrw128 => {
+                // Extract 16-bit value at lane: pextrw $imm, %xmm0, %eax
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                let imm = self.operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrw ${}, %xmm0, %eax", imm));
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::Storeldi128 => {
+                // Store low 64 bits to memory (MOVQ)
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    self.state.emit("    movdqu (%rcx), %xmm0");
+                    self.value_to_reg(ptr, "rax");
+                    self.state.emit("    movq %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Cvtsi128Si32 => {
+                // Extract low 32-bit integer (MOVD)
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::Cvtsi32Si128 => {
+                // Convert int to __m128i (MOVD, zero-extends upper bits)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movd %eax, %xmm0");
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Cvtsi128Si64 => {
+                // Extract low 64-bit integer (MOVQ)
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::Pshuflw128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pshuflw ${}, %xmm0, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pshufhw128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pshufhw ${}, %xmm0, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
         }
     }
 

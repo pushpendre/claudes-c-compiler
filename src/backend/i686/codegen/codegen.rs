@@ -4378,6 +4378,201 @@ impl ArchCodegen for I686Codegen {
                     self.state.emit("    movdqu %xmm0, (%eax)");
                 }
             }
+
+            // --- SSE2 packed 16-bit / 32-bit binary operations ---
+            IntrinsicOp::Paddw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "paddw"); }
+            }
+            IntrinsicOp::Psubw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "psubw"); }
+            }
+            IntrinsicOp::Pmulhw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pmulhw"); }
+            }
+            IntrinsicOp::Pmaddwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pmaddwd"); }
+            }
+            IntrinsicOp::Pcmpgtw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pcmpgtw"); }
+            }
+            IntrinsicOp::Pcmpgtb128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "pcmpgtb"); }
+            }
+            IntrinsicOp::Paddd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "paddd"); }
+            }
+            IntrinsicOp::Psubd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "psubd"); }
+            }
+            IntrinsicOp::Packssdw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "packssdw"); }
+            }
+            IntrinsicOp::Packuswb128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "packuswb"); }
+            }
+            IntrinsicOp::Punpcklbw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpcklbw"); }
+            }
+            IntrinsicOp::Punpckhbw128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpckhbw"); }
+            }
+            IntrinsicOp::Punpcklwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpcklwd"); }
+            }
+            IntrinsicOp::Punpckhwd128 => {
+                if let Some(dptr) = dest_ptr { self.emit_sse_binary_128(dptr, args, "punpckhwd"); }
+            }
+
+            // --- SSE2 shift-by-immediate ---
+            IntrinsicOp::Psllwi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psllw ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Psrlwi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrlw ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Psrawi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psraw ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Psradi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrad ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pslldi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pslld ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Psrldi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrld ${}, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+
+            // --- SSE2 set/insert/extract/convert ---
+            IntrinsicOp::SetEpi16 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movd %eax, %xmm0");
+                    self.state.emit("    punpcklwd %xmm0, %xmm0");
+                    self.state.emit("    pshufd $0, %xmm0, %xmm0");
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pinsrw128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    self.operand_to_ecx(&args[1]);
+                    let imm = Self::operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrw ${}, %ecx, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pextrw128 => {
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                let imm = Self::operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrw ${}, %xmm0, %eax", imm));
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
+            IntrinsicOp::Storeldi128 => {
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    self.operand_to_eax(&Operand::Value(*ptr));
+                    self.state.emit("    movq %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Cvtsi128Si32 => {
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
+            IntrinsicOp::Cvtsi32Si128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movd %eax, %xmm0");
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Cvtsi128Si64 => {
+                // TODO: On i686, this only extracts the low 32 bits.
+                // Full 64-bit extraction would need movq to a stack slot.
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
+            IntrinsicOp::Pshuflw128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pshuflw ${}, %xmm0, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pshufhw128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    let imm = Self::operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pshufhw ${}, %xmm0, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
         }
         self.state.reg_cache.invalidate_acc();
     }

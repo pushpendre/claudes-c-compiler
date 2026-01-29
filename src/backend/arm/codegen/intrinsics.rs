@@ -292,7 +292,22 @@ impl ArmCodegen {
             | IntrinsicOp::Pclmulqdq128
             | IntrinsicOp::Pslldqi128 | IntrinsicOp::Psrldqi128
             | IntrinsicOp::Psllqi128 | IntrinsicOp::Psrlqi128
-            | IntrinsicOp::Pshufd128 | IntrinsicOp::Loadldi128 => {
+            | IntrinsicOp::Pshufd128 | IntrinsicOp::Loadldi128
+            | IntrinsicOp::Paddw128 | IntrinsicOp::Psubw128
+            | IntrinsicOp::Pmulhw128 | IntrinsicOp::Pmaddwd128
+            | IntrinsicOp::Pcmpgtw128 | IntrinsicOp::Pcmpgtb128
+            | IntrinsicOp::Psllwi128 | IntrinsicOp::Psrlwi128
+            | IntrinsicOp::Psrawi128 | IntrinsicOp::Psradi128
+            | IntrinsicOp::Pslldi128 | IntrinsicOp::Psrldi128
+            | IntrinsicOp::Paddd128 | IntrinsicOp::Psubd128
+            | IntrinsicOp::Packssdw128 | IntrinsicOp::Packuswb128
+            | IntrinsicOp::Punpcklbw128 | IntrinsicOp::Punpckhbw128
+            | IntrinsicOp::Punpcklwd128 | IntrinsicOp::Punpckhwd128
+            | IntrinsicOp::SetEpi16 | IntrinsicOp::Pinsrw128
+            | IntrinsicOp::Pextrw128 | IntrinsicOp::Storeldi128
+            | IntrinsicOp::Cvtsi128Si32 | IntrinsicOp::Cvtsi32Si128
+            | IntrinsicOp::Cvtsi128Si64
+            | IntrinsicOp::Pshuflw128 | IntrinsicOp::Pshufhw128 => {
                 // x86-only: zero dest if present
                 if let Some(dptr) = dest_ptr {
                     if let Some(slot) = self.state.get_slot(dptr.0) {

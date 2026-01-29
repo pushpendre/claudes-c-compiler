@@ -554,7 +554,33 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Psllqi128
             | BuiltinIntrinsic::X86Psrlqi128
             | BuiltinIntrinsic::X86Pshufd128
-            | BuiltinIntrinsic::X86Loadldi128 => {
+            | BuiltinIntrinsic::X86Loadldi128
+            // New SSE2 packed operations returning __m128i
+            | BuiltinIntrinsic::X86Paddw128
+            | BuiltinIntrinsic::X86Psubw128
+            | BuiltinIntrinsic::X86Pmulhw128
+            | BuiltinIntrinsic::X86Pmaddwd128
+            | BuiltinIntrinsic::X86Pcmpgtw128
+            | BuiltinIntrinsic::X86Pcmpgtb128
+            | BuiltinIntrinsic::X86Psllwi128
+            | BuiltinIntrinsic::X86Psrlwi128
+            | BuiltinIntrinsic::X86Psrawi128
+            | BuiltinIntrinsic::X86Psradi128
+            | BuiltinIntrinsic::X86Pslldi128
+            | BuiltinIntrinsic::X86Psrldi128
+            | BuiltinIntrinsic::X86Paddd128
+            | BuiltinIntrinsic::X86Psubd128
+            | BuiltinIntrinsic::X86Packssdw128
+            | BuiltinIntrinsic::X86Packuswb128
+            | BuiltinIntrinsic::X86Punpcklbw128
+            | BuiltinIntrinsic::X86Punpckhbw128
+            | BuiltinIntrinsic::X86Punpcklwd128
+            | BuiltinIntrinsic::X86Punpckhwd128
+            | BuiltinIntrinsic::X86Set1Epi16
+            | BuiltinIntrinsic::X86Pinsrw128
+            | BuiltinIntrinsic::X86Cvtsi32Si128
+            | BuiltinIntrinsic::X86Pshuflw128
+            | BuiltinIntrinsic::X86Pshufhw128 => {
                 let sse_op = match intrinsic {
                     BuiltinIntrinsic::X86Loaddqu => IntrinsicOp::Loaddqu,
                     BuiltinIntrinsic::X86Pcmpeqb128 => IntrinsicOp::Pcmpeqb128,
@@ -578,6 +604,32 @@ impl Lowerer {
                     BuiltinIntrinsic::X86Psrlqi128 => IntrinsicOp::Psrlqi128,
                     BuiltinIntrinsic::X86Pshufd128 => IntrinsicOp::Pshufd128,
                     BuiltinIntrinsic::X86Loadldi128 => IntrinsicOp::Loadldi128,
+                    // New SSE2 operations
+                    BuiltinIntrinsic::X86Paddw128 => IntrinsicOp::Paddw128,
+                    BuiltinIntrinsic::X86Psubw128 => IntrinsicOp::Psubw128,
+                    BuiltinIntrinsic::X86Pmulhw128 => IntrinsicOp::Pmulhw128,
+                    BuiltinIntrinsic::X86Pmaddwd128 => IntrinsicOp::Pmaddwd128,
+                    BuiltinIntrinsic::X86Pcmpgtw128 => IntrinsicOp::Pcmpgtw128,
+                    BuiltinIntrinsic::X86Pcmpgtb128 => IntrinsicOp::Pcmpgtb128,
+                    BuiltinIntrinsic::X86Psllwi128 => IntrinsicOp::Psllwi128,
+                    BuiltinIntrinsic::X86Psrlwi128 => IntrinsicOp::Psrlwi128,
+                    BuiltinIntrinsic::X86Psrawi128 => IntrinsicOp::Psrawi128,
+                    BuiltinIntrinsic::X86Psradi128 => IntrinsicOp::Psradi128,
+                    BuiltinIntrinsic::X86Pslldi128 => IntrinsicOp::Pslldi128,
+                    BuiltinIntrinsic::X86Psrldi128 => IntrinsicOp::Psrldi128,
+                    BuiltinIntrinsic::X86Paddd128 => IntrinsicOp::Paddd128,
+                    BuiltinIntrinsic::X86Psubd128 => IntrinsicOp::Psubd128,
+                    BuiltinIntrinsic::X86Packssdw128 => IntrinsicOp::Packssdw128,
+                    BuiltinIntrinsic::X86Packuswb128 => IntrinsicOp::Packuswb128,
+                    BuiltinIntrinsic::X86Punpcklbw128 => IntrinsicOp::Punpcklbw128,
+                    BuiltinIntrinsic::X86Punpckhbw128 => IntrinsicOp::Punpckhbw128,
+                    BuiltinIntrinsic::X86Punpcklwd128 => IntrinsicOp::Punpcklwd128,
+                    BuiltinIntrinsic::X86Punpckhwd128 => IntrinsicOp::Punpckhwd128,
+                    BuiltinIntrinsic::X86Set1Epi16 => IntrinsicOp::SetEpi16,
+                    BuiltinIntrinsic::X86Pinsrw128 => IntrinsicOp::Pinsrw128,
+                    BuiltinIntrinsic::X86Cvtsi32Si128 => IntrinsicOp::Cvtsi32Si128,
+                    BuiltinIntrinsic::X86Pshuflw128 => IntrinsicOp::Pshuflw128,
+                    BuiltinIntrinsic::X86Pshufhw128 => IntrinsicOp::Pshufhw128,
                     _ => unreachable!("SSE128 dispatch matched non-SSE128 intrinsic: {:?}", intrinsic),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
@@ -612,6 +664,33 @@ impl Lowerer {
                     args: arg_ops,
                 });
                 Some(Operand::Value(dest_val))
+            }
+            // pextrw / cvtsi128_si32 / cvtsi128_si64 return scalar i32/i64
+            BuiltinIntrinsic::X86Pextrw128
+            | BuiltinIntrinsic::X86Cvtsi128Si32
+            | BuiltinIntrinsic::X86Cvtsi128Si64 => {
+                let sse_op = match intrinsic {
+                    BuiltinIntrinsic::X86Pextrw128 => IntrinsicOp::Pextrw128,
+                    BuiltinIntrinsic::X86Cvtsi128Si32 => IntrinsicOp::Cvtsi128Si32,
+                    BuiltinIntrinsic::X86Cvtsi128Si64 => IntrinsicOp::Cvtsi128Si64,
+                    _ => unreachable!(),
+                };
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let dest_val = self.fresh_value();
+                self.emit(Instruction::Intrinsic {
+                    dest: Some(dest_val),
+                    op: sse_op,
+                    dest_ptr: None,
+                    args: arg_ops,
+                });
+                Some(Operand::Value(dest_val))
+            }
+            // storel_epi64(ptr, src_ptr) - store low 64 bits
+            BuiltinIntrinsic::X86Storeldi128 => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Storeldi128, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
             }
             // CRC32 operations return scalar i32/i64
             BuiltinIntrinsic::X86Crc32_8 | BuiltinIntrinsic::X86Crc32_16

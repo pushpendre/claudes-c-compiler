@@ -234,6 +234,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     // to avoid linker errors from the compiled (but never called) wrappers.
     m.insert("__builtin_ia32_vec_init_v16qi", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
     m.insert("__builtin_ia32_vec_init_v4si", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
+    m.insert("__builtin_ia32_vec_init_v8hi", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
 
     // x86 SSE/SSE2/SSE4.2 intrinsic builtins (__builtin_ia32_* names)
     m.insert("__builtin_ia32_lfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Lfence));
@@ -285,7 +286,8 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_store_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storedqu));
     m.insert("_mm_set1_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi8));
     m.insert("_mm_set1_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi32));
-    m.insert("_mm_setzero_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi8));
+    // _mm_setzero_si128 is handled by its header inline function (returns compound literal)
+    // Do NOT map it here -- it takes 0 args, unlike Set1Epi8 which takes 1.
     m.insert("_mm_cmpeq_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqb128));
     m.insert("_mm_cmpeq_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqd128));
     m.insert("_mm_subs_epu8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubusb128));
@@ -320,6 +322,70 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_srli_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrlqi128));
     m.insert("_mm_shuffle_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufd128));
     m.insert("_mm_loadl_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loadldi128));
+
+    // New SSE2 packed 16-bit _mm_* mappings
+    m.insert("_mm_add_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddw128));
+    m.insert("_mm_sub_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubw128));
+    m.insert("_mm_mulhi_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmulhw128));
+    m.insert("_mm_madd_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmaddwd128));
+    m.insert("_mm_cmpgt_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpgtw128));
+    m.insert("_mm_cmpgt_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpgtb128));
+    m.insert("_mm_slli_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psllwi128));
+    m.insert("_mm_srli_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrlwi128));
+    m.insert("_mm_srai_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrawi128));
+    m.insert("_mm_srai_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psradi128));
+    m.insert("_mm_slli_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pslldi128));
+    m.insert("_mm_srli_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrldi128));
+    // New SSE2 packed 32-bit _mm_* mappings
+    m.insert("_mm_add_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddd128));
+    m.insert("_mm_sub_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubd128));
+    // New SSE2 pack/unpack _mm_* mappings
+    m.insert("_mm_packs_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packssdw128));
+    m.insert("_mm_packus_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packuswb128));
+    m.insert("_mm_unpacklo_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklbw128));
+    m.insert("_mm_unpackhi_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhbw128));
+    m.insert("_mm_unpacklo_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklwd128));
+    m.insert("_mm_unpackhi_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhwd128));
+    // New SSE2 set/insert/extract/convert _mm_* mappings
+    m.insert("_mm_set1_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi16));
+    m.insert("_mm_insert_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrw128));
+    m.insert("_mm_extract_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrw128));
+    m.insert("_mm_storel_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storeldi128));
+    m.insert("_mm_cvtsi128_si32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si32));
+    m.insert("_mm_cvtsi32_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi32Si128));
+    m.insert("_mm_cvtsi128_si64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si64));
+    m.insert("_mm_cvtsi128_si64x", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si64));
+    m.insert("_mm_shufflelo_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshuflw128));
+    m.insert("_mm_shufflehi_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufhw128));
+    // __builtin_ia32_* names for the new SSE2 operations
+    m.insert("__builtin_ia32_paddw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddw128));
+    m.insert("__builtin_ia32_psubw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubw128));
+    m.insert("__builtin_ia32_pmulhw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmulhw128));
+    m.insert("__builtin_ia32_pmaddwd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmaddwd128));
+    m.insert("__builtin_ia32_pcmpgtw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpgtw128));
+    m.insert("__builtin_ia32_pcmpgtb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpgtb128));
+    m.insert("__builtin_ia32_psllwi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psllwi128));
+    m.insert("__builtin_ia32_psrlwi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrlwi128));
+    m.insert("__builtin_ia32_psrawi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrawi128));
+    m.insert("__builtin_ia32_psradi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psradi128));
+    m.insert("__builtin_ia32_pslldi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pslldi128));
+    m.insert("__builtin_ia32_psrldi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrldi128));
+    m.insert("__builtin_ia32_paddd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddd128));
+    m.insert("__builtin_ia32_psubd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubd128));
+    m.insert("__builtin_ia32_packssdw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packssdw128));
+    m.insert("__builtin_ia32_packuswb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packuswb128));
+    m.insert("__builtin_ia32_punpcklbw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklbw128));
+    m.insert("__builtin_ia32_punpckhbw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhbw128));
+    m.insert("__builtin_ia32_punpcklwd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklwd128));
+    m.insert("__builtin_ia32_punpckhwd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhwd128));
+    m.insert("__builtin_ia32_pinsrw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrw128));
+    m.insert("__builtin_ia32_pextrw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrw128));
+    m.insert("__builtin_ia32_storeldi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storeldi128));
+    m.insert("__builtin_ia32_cvtsi128si32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si32));
+    m.insert("__builtin_ia32_cvtsi32si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi32Si128));
+    m.insert("__builtin_ia32_cvtsi128si64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si64));
+    m.insert("__builtin_ia32_pshuflw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshuflw128));
+    m.insert("__builtin_ia32_pshufhw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufhw128));
 
     m
 });
@@ -451,6 +517,39 @@ pub enum BuiltinIntrinsic {
     X86Psrlqi128,      // _mm_srli_epi64 (bit shift right per 64-bit lane)
     X86Pshufd128,      // _mm_shuffle_epi32
     X86Loadldi128,     // _mm_loadl_epi64 (load low 64 bits)
+    // SSE2 packed 16-bit operations
+    X86Paddw128,       // _mm_add_epi16 (PADDW)
+    X86Psubw128,       // _mm_sub_epi16 (PSUBW)
+    X86Pmulhw128,      // _mm_mulhi_epi16 (PMULHW)
+    X86Pmaddwd128,     // _mm_madd_epi16 (PMADDWD)
+    X86Pcmpgtw128,     // _mm_cmpgt_epi16 (PCMPGTW)
+    X86Pcmpgtb128,     // _mm_cmpgt_epi8 (PCMPGTB)
+    X86Psllwi128,      // _mm_slli_epi16 (PSLLW imm)
+    X86Psrlwi128,      // _mm_srli_epi16 (PSRLW imm)
+    X86Psrawi128,      // _mm_srai_epi16 (PSRAW imm)
+    X86Psradi128,      // _mm_srai_epi32 (PSRAD imm)
+    X86Pslldi128,      // _mm_slli_epi32 (PSLLD imm)
+    X86Psrldi128,      // _mm_srli_epi32 (PSRLD imm)
+    // SSE2 packed 32-bit operations
+    X86Paddd128,       // _mm_add_epi32 (PADDD)
+    X86Psubd128,       // _mm_sub_epi32 (PSUBD)
+    // SSE2 pack/unpack
+    X86Packssdw128,    // _mm_packs_epi32 (PACKSSDW)
+    X86Packuswb128,    // _mm_packus_epi16 (PACKUSWB)
+    X86Punpcklbw128,   // _mm_unpacklo_epi8 (PUNPCKLBW)
+    X86Punpckhbw128,   // _mm_unpackhi_epi8 (PUNPCKHBW)
+    X86Punpcklwd128,   // _mm_unpacklo_epi16 (PUNPCKLWD)
+    X86Punpckhwd128,   // _mm_unpackhi_epi16 (PUNPCKHWD)
+    // SSE2 set/insert/extract/convert
+    X86Set1Epi16,      // _mm_set1_epi16 (splat 16-bit)
+    X86Pinsrw128,      // _mm_insert_epi16 (PINSRW)
+    X86Pextrw128,      // _mm_extract_epi16 (PEXTRW)
+    X86Storeldi128,    // _mm_storel_epi64 (MOVQ store)
+    X86Cvtsi128Si32,   // _mm_cvtsi128_si32 (MOVD extract)
+    X86Cvtsi32Si128,   // _mm_cvtsi32_si128 (MOVD insert)
+    X86Cvtsi128Si64,   // _mm_cvtsi128_si64
+    X86Pshuflw128,     // _mm_shufflelo_epi16 (PSHUFLW)
+    X86Pshufhw128,     // _mm_shufflehi_epi16 (PSHUFHW)
 }
 
 impl BuiltinInfo {
