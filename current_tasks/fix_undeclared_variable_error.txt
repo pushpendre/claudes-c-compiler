@@ -1,0 +1,19 @@
+Task: Make undeclared variable identifiers a hard error instead of a warning
+
+Problem: Our compiler treats undeclared variable identifiers as warnings (exit code 0)
+instead of errors (exit code non-zero). In standard C, using an undeclared variable
+is always a hard error. Only implicit function declarations were warnings in C89.
+
+This breaks autoconf-style configure scripts that test for features by checking if
+code compiles successfully. For example, mksh's Build.sh tests whether RSIZE_MAX is
+available by compiling code that uses it. Our compiler says "yes" because it exits 0
+with just a warning, but then the actual build fails at link time with undefined
+references to RSIZE_MAX.
+
+Fix: In sema.rs, change the undeclared identifier handling to emit an error instead
+of a warning. Keep WarningKind::Undeclared for the flag, but make it a hard error
+by default. This matches GCC/Clang behavior.
+
+Impact: Fixes mksh project and likely other projects with configure scripts.
+
+Status: in_progress
