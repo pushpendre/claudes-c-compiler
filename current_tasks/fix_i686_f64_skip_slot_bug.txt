@@ -1,0 +1,15 @@
+Task: Fix i686 F64 immediately-consumed skip-slot bug
+
+Status: in_progress
+
+Problem: On i686, the "immediately consumed" stack slot optimization incorrectly
+skips allocating stack slots for F64 values. F64 values can't fit in the 32-bit
+accumulator (EAX) and require x87 FPU -> memory -> x87 FPU round trips. When
+no slot is allocated, emit_f64_store_from_x87() emits fstp %st(0) (discard)
+instead of fstpl offset(%ebp) (store), causing subsequent fisttpl to convert
+garbage to int (x87 "indefinite" value 0x80000000).
+
+Fix: In classify_value(), exclude F64/I64/U64 values on 32-bit targets from
+the immediately-consumed optimization, similar to how I128/F128 are excluded.
+
+Unblocks: fastlz project on i686 (all 4 architectures now pass)
