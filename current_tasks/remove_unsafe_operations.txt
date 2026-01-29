@@ -1,0 +1,12 @@
+in_progress
+
+Task: Replace unsafe operations with safe alternatives or add proper assertions.
+
+1. Replace all `from_utf8_unchecked` calls with safe alternatives:
+   - Use `debug_assert!` + `from_utf8_unchecked` pattern, or just use safe `from_utf8().unwrap()`
+   - Files: backend/common.rs, backend/x86/codegen/peephole/passes.rs,
+     frontend/preprocessor/text_processing.rs, frontend/preprocessor/macro_defs.rs,
+     frontend/preprocessor/utils.rs
+
+2. Add debug assertions to x87 inline assembly functions in common/long_double.rs
+   to validate inputs before passing to asm blocks.
