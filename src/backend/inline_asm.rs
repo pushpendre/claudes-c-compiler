@@ -1,6 +1,6 @@
 //! Shared inline assembly framework.
 //!
-//! All three backends use the same 4-phase inline assembly processing:
+//! All four backends use the same 4-phase inline assembly processing:
 //! 1. Classify constraints and assign registers (specific first, then scratch)
 //! 2. Load input values into registers, pre-load read-write outputs
 //! 3. Substitute operand references in template and emit
@@ -310,7 +310,7 @@ pub fn constraint_needs_address(constraint: &str, is_riscv: bool, is_arm: bool) 
     false
 }
 
-/// Shared inline assembly emission logic. All three backends call this from their
+/// Shared inline assembly emission logic. All four backends call this from their
 /// `emit_inline_asm` implementation, providing an `InlineAsmEmitter` to handle
 /// arch-specific details.
 pub fn emit_inline_asm_common(

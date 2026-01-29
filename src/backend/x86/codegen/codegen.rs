@@ -223,6 +223,18 @@ impl X86Codegen {
         self.no_sse = enabled;
     }
 
+    /// Apply all relevant options from a `CodegenOptions` struct.
+    pub fn apply_options(&mut self, opts: &crate::backend::CodegenOptions) {
+        self.set_pic(opts.pic);
+        self.set_function_return_thunk(opts.function_return_thunk);
+        self.set_indirect_branch_thunk(opts.indirect_branch_thunk);
+        self.set_patchable_function_entry(opts.patchable_function_entry);
+        self.set_cf_protection_branch(opts.cf_protection_branch);
+        self.set_no_sse(opts.no_sse);
+        self.set_code_model_kernel(opts.code_model_kernel);
+        self.set_no_jump_tables(opts.no_jump_tables);
+    }
+
     pub fn generate(mut self, module: &IrModule) -> String {
         let raw = generate_module(&mut self, module, None);
         super::peephole::peephole_optimize(raw)

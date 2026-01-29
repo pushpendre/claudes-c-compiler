@@ -1,6 +1,6 @@
 //! Shared call ABI classification and stack space computation.
 //!
-//! All three backends use the same algorithmic structure to classify function call
+//! All four backends use the same algorithmic structure to classify function call
 //! arguments into register/stack classes. Only the register counts and F128 handling
 //! differ per architecture. This module extracts that shared classification so each
 //! backend's `emit_call` only needs to handle the instruction emission.
@@ -148,7 +148,7 @@ pub fn classify_sysv_struct(
 }
 
 /// Classify all arguments for a function call, returning a `CallArgClass` per argument.
-/// This captures the shared classification logic used identically by all three backends.
+/// This captures the shared classification logic used identically by all four backends.
 /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct
 /// args, None otherwise.
 /// `struct_arg_classes` provides per-eightbyte SysV ABI classification for struct args

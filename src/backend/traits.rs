@@ -354,7 +354,7 @@ pub trait ArchCodegen {
 
     /// Emit a function call (direct or indirect).
     ///
-    /// The default implementation provides the shared algorithmic skeleton that all three
+    /// The default implementation provides the shared algorithmic skeleton that all four
     /// architectures follow: classify args → emit stack args → load register args → call → cleanup → store result.
     /// Backends override the small `emit_call_*` hook methods instead of reimplementing this entire method.
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,

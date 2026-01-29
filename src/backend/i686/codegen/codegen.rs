@@ -110,6 +110,12 @@ impl I686Codegen {
         self.state.no_jump_tables = enabled;
     }
 
+    /// Apply all relevant options from a `CodegenOptions` struct.
+    pub fn apply_options(&mut self, opts: &crate::backend::CodegenOptions) {
+        self.set_pic(opts.pic);
+        self.set_no_jump_tables(opts.no_jump_tables);
+    }
+
     pub fn generate(mut self, module: &IrModule) -> String {
         generate_module(&mut self, module, None)
     }

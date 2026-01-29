@@ -1,6 +1,6 @@
 //! Shared cast and float operation classification, plus F128 soft-float libcall mapping.
 //!
-//! All three backends use the same decision logic to determine what kind of cast
+//! All four backends use the same decision logic to determine what kind of cast
 //! to emit — only the actual machine instructions differ. By classifying the cast
 //! once in shared code, we eliminate duplicated Ptr-normalization and F128-reduction
 //! logic from each backend. This module also provides the shared mnemonic-to-libcall
@@ -9,7 +9,7 @@
 use crate::common::types::IrType;
 use crate::ir::ir::{IrBinOp, IrCmpOp, IrConst, Operand};
 
-/// Classification of type casts. All three backends use the same control flow
+/// Classification of type casts. All four backends use the same control flow
 /// to decide which kind of cast to emit; only the actual instructions differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastKind {
@@ -51,7 +51,7 @@ pub enum CastKind {
 }
 
 /// Classify a cast between two IR types. This captures the shared decision logic
-/// that all three backends use identically. Backends then match on the returned
+/// that all four backends use identically. Backends then match on the returned
 /// `CastKind` to emit architecture-specific instructions.
 ///
 /// Handles Ptr normalization (Ptr treated as U64) and F128 reduction (F128 treated
@@ -187,7 +187,7 @@ fn classify_f128_cast_native(from_ty: IrType, to_ty: IrType) -> CastKind {
     CastKind::F128ToSigned { to_ty }
 }
 
-/// Float arithmetic operations that all three backends support.
+/// Float arithmetic operations that all four backends support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatOp {
     Add,

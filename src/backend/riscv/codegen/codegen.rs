@@ -162,14 +162,26 @@ impl RiscvCodegen {
         self.no_relax = enabled;
     }
 
-    pub fn generate(mut self, module: &IrModule) -> String {
-        // Emit .option norelax before any code if -mno-relax is set.
-        // This prevents the GNU assembler from generating R_RISCV_RELAX
-        // relocation entries, which is required for EFI stub code that
-        // forbids absolute symbol references from linker relaxation.
+    /// Apply all relevant options from a `CodegenOptions` struct.
+    pub fn apply_options(&mut self, opts: &crate::backend::CodegenOptions) {
+        self.set_pic(opts.pic);
+        self.set_no_jump_tables(opts.no_jump_tables);
+        self.set_no_relax(opts.no_relax);
+    }
+
+    /// Emit `.option norelax` if -mno-relax is set. Must be called once
+    /// before any code is generated. This prevents the GNU assembler from
+    /// generating R_RISCV_RELAX relocation entries, which is required for
+    /// EFI stub code that forbids absolute symbol references from linker
+    /// relaxation.
+    pub fn emit_pre_directives(&mut self) {
         if self.no_relax {
             self.state.emit(".option norelax");
         }
+    }
+
+    pub fn generate(mut self, module: &IrModule) -> String {
+        self.emit_pre_directives();
         generate_module(&mut self, module, None)
     }
 

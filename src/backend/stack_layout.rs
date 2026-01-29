@@ -472,7 +472,7 @@ pub fn collect_inline_asm_callee_saved(
 /// Run register allocation and merge ASM-clobbered callee-saved registers.
 ///
 /// This shared helper eliminates duplicated regalloc setup boilerplate across
-/// all three backends (x86, ARM, RISC-V).  Each backend supplies its callee-saved
+/// all four backends (x86-64, i686, AArch64, RISC-V 64).  Each backend supplies its callee-saved
 /// register list and pre-collected ASM clobber list; this function handles the
 /// common steps: filtering available registers, running the allocator, storing
 /// results, merging clobbers into `used_callee_saved`, and building the

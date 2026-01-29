@@ -1,6 +1,6 @@
 //! Shared backend utilities for assembler, linker, and data emission.
 //!
-//! All three backends (x86-64, AArch64, RISC-V 64) share identical logic for:
+//! All four backends (x86-64, i686, AArch64, RISC-V 64) share identical logic for:
 //! - Assembling via an external toolchain (gcc/cross-gcc)
 //! - Linking via an external toolchain
 //! - Emitting assembly data directives (.data, .bss, .rodata, string literals, constants)

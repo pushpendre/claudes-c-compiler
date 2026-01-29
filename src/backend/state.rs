@@ -1,6 +1,6 @@
 //! Shared codegen state, slot addressing types, and register value cache.
 //!
-//! All three backends use the same `CodegenState` to track stack slot assignments,
+//! All four backends use the same `CodegenState` to track stack slot assignments,
 //! alloca metadata, label generation, and the register value cache during code generation.
 //! The `SlotAddr` enum captures the 3-way addressing pattern (over-aligned alloca /
 //! direct alloca / indirect) that repeats across store, load, GEP, and memcpy emission.

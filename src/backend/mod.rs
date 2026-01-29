@@ -22,7 +22,6 @@ pub mod arm;
 pub mod riscv;
 
 use crate::ir::ir::IrModule;
-use traits::ArchCodegen;
 
 /// Options that control code generation, parsed from CLI flags.
 #[derive(Debug, Clone, Default)]
@@ -172,40 +171,7 @@ impl Target {
 
     /// Generate assembly with full codegen options.
     pub fn generate_assembly_with_opts(&self, module: &IrModule, opts: &CodegenOptions) -> String {
-        match self {
-            Target::X86_64 => {
-                let mut cg = x86::X86Codegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_function_return_thunk(opts.function_return_thunk);
-                cg.set_indirect_branch_thunk(opts.indirect_branch_thunk);
-                cg.set_patchable_function_entry(opts.patchable_function_entry);
-                cg.set_cf_protection_branch(opts.cf_protection_branch);
-                cg.set_no_sse(opts.no_sse);
-                cg.set_code_model_kernel(opts.code_model_kernel);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.generate(module)
-            }
-            Target::I686 => {
-                let mut cg = i686::I686Codegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.generate(module)
-            }
-            Target::Aarch64 => {
-                let mut cg = arm::ArmCodegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.set_general_regs_only(opts.general_regs_only);
-                cg.generate(module)
-            }
-            Target::Riscv64 => {
-                let mut cg = riscv::RiscvCodegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.set_no_relax(opts.no_relax);
-                cg.generate(module)
-            }
-        }
+        self.generate_assembly_with_opts_and_debug(module, opts, None)
     }
 
     /// Generate assembly with full codegen options and optional source manager for debug info.
@@ -220,39 +186,24 @@ impl Target {
         match self {
             Target::X86_64 => {
                 let mut cg = x86::X86Codegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_function_return_thunk(opts.function_return_thunk);
-                cg.set_indirect_branch_thunk(opts.indirect_branch_thunk);
-                cg.set_patchable_function_entry(opts.patchable_function_entry);
-                cg.set_cf_protection_branch(opts.cf_protection_branch);
-                cg.set_no_sse(opts.no_sse);
-                cg.set_code_model_kernel(opts.code_model_kernel);
-                cg.set_no_jump_tables(opts.no_jump_tables);
+                cg.apply_options(opts);
                 let raw = generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr);
                 x86::codegen::peephole::peephole_optimize(raw)
             }
             Target::I686 => {
                 let mut cg = i686::I686Codegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
+                cg.apply_options(opts);
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Aarch64 => {
                 let mut cg = arm::ArmCodegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.set_general_regs_only(opts.general_regs_only);
+                cg.apply_options(opts);
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Riscv64 => {
                 let mut cg = riscv::RiscvCodegen::new();
-                cg.set_pic(opts.pic);
-                cg.set_no_jump_tables(opts.no_jump_tables);
-                cg.set_no_relax(opts.no_relax);
-                // Emit .option norelax before any code, matching generate() behavior
-                if opts.no_relax {
-                    cg.state().emit(".option norelax");
-                }
+                cg.apply_options(opts);
+                cg.emit_pre_directives();
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
         }

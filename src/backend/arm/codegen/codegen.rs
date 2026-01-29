@@ -191,6 +191,13 @@ impl ArmCodegen {
         self.general_regs_only = enabled;
     }
 
+    /// Apply all relevant options from a `CodegenOptions` struct.
+    pub fn apply_options(&mut self, opts: &crate::backend::CodegenOptions) {
+        self.set_pic(opts.pic);
+        self.set_no_jump_tables(opts.no_jump_tables);
+        self.set_general_regs_only(opts.general_regs_only);
+    }
+
     pub fn generate(mut self, module: &IrModule) -> String {
         generate_module(&mut self, module, None)
     }
