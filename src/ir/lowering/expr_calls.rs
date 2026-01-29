@@ -615,20 +615,35 @@ impl Lowerer {
             }).collect()
         };
 
-        // Build struct_arg_classes: propagate per-eightbyte SysV ABI classification from FuncSig
+        // Build struct_arg_classes: propagate per-eightbyte SysV ABI classification from FuncSig.
+        // For variadic args beyond fixed params, infer classification from expression CType
+        // so that struct fields are correctly split between GP and SSE registers.
         let struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>> = if let Some(ref classes) = func_name.and_then(|n| self.func_meta.sigs.get(n).map(|s| s.param_struct_classes.clone())) {
-            args.iter().enumerate().map(|(i, _a)| {
-                if i < classes.len() {
+            args.iter().enumerate().map(|(i, a)| {
+                if i < classes.len() && !classes[i].is_empty() {
                     classes[i].clone()
                 } else {
-                    Vec::new()
+                    // Infer eightbyte classification from expression CType for variadic struct args
+                    self.infer_struct_eightbyte_classes(a)
                 }
             }).collect()
         } else {
-            vec![Vec::new(); args.len()]
+            args.iter().map(|a| self.infer_struct_eightbyte_classes(a)).collect()
         };
 
         (arg_vals, arg_types, struct_arg_sizes, struct_arg_classes)
+    }
+
+    /// Infer SysV ABI eightbyte classification for a struct argument expression.
+    /// This is used for variadic struct args that don't have pre-registered classification
+    /// from the function signature (since the signature only covers fixed params).
+    fn infer_struct_eightbyte_classes(&self, expr: &Expr) -> Vec<crate::common::types::EightbyteClass> {
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            if let Some(layout) = self.get_struct_layout_for_ctype(&ctype) {
+                return layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts());
+            }
+        }
+        Vec::new()
     }
 
     /// Emit the actual call instruction (direct, indirect via fptr, or general indirect).
