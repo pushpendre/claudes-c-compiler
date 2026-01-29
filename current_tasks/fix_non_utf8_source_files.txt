@@ -1,0 +1,7 @@
+Task: Support non-UTF-8 source files (e.g., EUC-JP, Latin-1)
+
+The compiler currently uses std::fs::read_to_string() which requires valid UTF-8.
+C source files can contain arbitrary bytes in string/character literals.
+Fix: read files as bytes and convert using Latin-1 mapping (byte -> Unicode code point).
+
+This will fix the oniguruma project which has EUC-JP encoded test files.
