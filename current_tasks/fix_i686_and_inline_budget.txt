@@ -1,5 +1,5 @@
 Task: Fix i686 codegen bugs, x86 inline asm LEA truncation, and always_inline budget management
-Status: in_progress
+Status: completed
 
 Three related fixes:
 
