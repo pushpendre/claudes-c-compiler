@@ -1,0 +1,39 @@
+Code Quality Cleanup Backlog
+============================
+
+Items a Rust expert would flag, roughly ordered by impact:
+
+1. [DONE] GVN pass parameter threading -> GvnState struct
+   - gvn_dfs had 14 params, process_block had 10 params
+   - Fixed by introducing GvnState struct with save_scope/restore_scope
+
+2. Functions with 10-20+ parameters (medium effort)
+   - parse_declaration_rest: 22 params -> should accept DeclAttributes struct
+   - resolve_type_flags: 16 boolean params -> should use a TypeFlags bitflags struct
+   - gvn_dfs: DONE (was 14 params)
+   Files: src/frontend/parser/declarations.rs:397, src/frontend/parser/types.rs:348
+
+3. Visibility: 1309 pub items vs 16 pub(crate) (large effort)
+   - Nearly every struct field, method, and type is unrestricted pub
+   - Should audit and restrict to pub(crate) or pub(super) where possible
+   - Highest impact files: ir/ir.rs (133 pub), parser/ast.rs (117 pub),
+     common/types.rs (98 pub), backend/state.rs (62 pub)
+
+4. String allocations from literals (medium effort)
+   - 420 .to_string() calls on string literals, especially in
+     builtin_macros.rs (41 calls) for macro definitions
+   - Register name functions (reg_to_32, reg_to_16, etc.) return String
+     from static matches -> should return &'static str or Cow
+
+5. format! in codegen hot paths, zero write! usage (medium effort)
+   - 320 format! calls across the codebase, 0 write!/writeln!
+   - ARM codegen loops allocate 2 Strings per iteration for register names
+   - Could use static lookup tables for register names
+
+6. Deep nesting (16 levels) in global_init.rs (small-medium effort)
+   - Nested match/if-let chains at src/ir/lowering/global_init.rs:490-522
+   - Extract compound literal handling into helper functions
+
+7. Lowerer split across 37 files (large effort, low priority)
+   - Valid Rust pattern but extreme; makes API surface hard to understand
+   - Consider grouping related impl blocks or adding a module-level doc

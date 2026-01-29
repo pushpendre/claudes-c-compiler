@@ -50,6 +50,220 @@ enum VNOperand {
     ValueNum(u32),
 }
 
+/// Mutable state for the GVN pass, threaded through the dominator-tree DFS.
+///
+/// Groups the value numbering tables, expression maps, and rollback logs that
+/// were previously passed as 9 separate `&mut` parameters. The rollback logs
+/// enable scoped hash table semantics: on entering a dominator-tree subtree,
+/// save the log positions; on backtracking, restore entries to undo changes
+/// made in that subtree.
+struct GvnState {
+    /// Maps Value ID -> value number. Indexed by `Value.0`.
+    value_numbers: Vec<u32>,
+    /// Next value number to assign.
+    next_vn: u32,
+    /// Pure expression -> canonical value (not memory-dependent).
+    expr_to_value: FxHashMap<ExprKey, Value>,
+    /// Load expression -> (canonical value, generation). Separated from
+    /// `expr_to_value` so loads can be invalidated independently via
+    /// generation bumping.
+    load_expr_to_value: FxHashMap<ExprKey, (Value, u32)>,
+    /// Generation counter for O(1) load CSE invalidation. When a memory-
+    /// clobbering instruction is encountered, bump this counter; cached
+    /// load entries with older generations are considered stale.
+    load_generation: u32,
+    /// Rollback log for `expr_to_value`: (key, previous_value).
+    rollback_log: Vec<(ExprKey, Option<Value>)>,
+    /// Rollback log for `load_expr_to_value`: (key, previous_entry).
+    load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)>,
+    /// Rollback log for `value_numbers`: (index, previous_vn).
+    vn_log: Vec<(usize, u32)>,
+    /// Total instructions eliminated across all blocks.
+    total_eliminated: usize,
+}
+
+impl GvnState {
+    /// Create a new GVN state sized for `max_value_id` values.
+    fn new(max_value_id: usize) -> Self {
+        Self {
+            value_numbers: vec![u32::MAX; max_value_id + 1],
+            next_vn: 0,
+            expr_to_value: FxHashMap::default(),
+            load_expr_to_value: FxHashMap::default(),
+            load_generation: 0,
+            rollback_log: Vec::new(),
+            load_rollback_log: Vec::new(),
+            vn_log: Vec::new(),
+            total_eliminated: 0,
+        }
+    }
+
+    /// Assign a fresh value number, returning it.
+    fn fresh_vn(&mut self) -> u32 {
+        let vn = self.next_vn;
+        self.next_vn += 1;
+        vn
+    }
+
+    /// Assign a fresh value number to `dest` and record it in the rollback log.
+    fn assign_fresh_vn(&mut self, dest: Value) {
+        let vn = self.fresh_vn();
+        let idx = dest.0 as usize;
+        if idx < self.value_numbers.len() {
+            let old_vn = self.value_numbers[idx];
+            self.vn_log.push((idx, old_vn));
+            self.value_numbers[idx] = vn;
+        }
+    }
+
+    /// Convert an Operand to a VNOperand for hashing.
+    /// If the value hasn't been assigned a value number yet (e.g. a function
+    /// parameter or an alloca whose definition appears later in the block),
+    /// assign it a fresh unique VN on the spot to avoid collisions between
+    /// different un-numbered values and already-assigned VNs.
+    fn operand_to_vn(&mut self, op: &Operand) -> VNOperand {
+        match op {
+            Operand::Const(c) => VNOperand::Const(c.to_hash_key()),
+            Operand::Value(v) => {
+                let idx = v.0 as usize;
+                // Ensure the table is large enough
+                if idx >= self.value_numbers.len() {
+                    self.value_numbers.resize(idx + 1, u32::MAX);
+                }
+                if self.value_numbers[idx] != u32::MAX {
+                    VNOperand::ValueNum(self.value_numbers[idx])
+                } else {
+                    // Assign a fresh VN to this previously un-numbered value
+                    let vn = self.fresh_vn();
+                    let old_vn = self.value_numbers[idx];
+                    self.vn_log.push((idx, old_vn));
+                    self.value_numbers[idx] = vn;
+                    VNOperand::ValueNum(vn)
+                }
+            }
+        }
+    }
+
+    /// Try to create an ExprKey for an instruction (for value numbering).
+    /// Returns the expression key and the destination value, or None if
+    /// the instruction is not eligible for value numbering.
+    fn make_expr_key(&mut self, inst: &Instruction) -> Option<(ExprKey, Value)> {
+        match inst {
+            Instruction::BinOp { dest, op, lhs, rhs, .. } => {
+                let lhs_vn = self.operand_to_vn(lhs);
+                let rhs_vn = self.operand_to_vn(rhs);
+
+                // For commutative operations, canonicalize operand order
+                let (lhs_vn, rhs_vn) = if op.is_commutative() {
+                    canonical_order(lhs_vn, rhs_vn)
+                } else {
+                    (lhs_vn, rhs_vn)
+                };
+
+                Some((ExprKey::BinOp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+            }
+            Instruction::UnaryOp { dest, op, src, .. } => {
+                let src_vn = self.operand_to_vn(src);
+                Some((ExprKey::UnaryOp { op: *op, src: src_vn }, *dest))
+            }
+            Instruction::Cmp { dest, op, lhs, rhs, .. } => {
+                let lhs_vn = self.operand_to_vn(lhs);
+                let rhs_vn = self.operand_to_vn(rhs);
+                Some((ExprKey::Cmp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+            }
+            Instruction::Cast { dest, src, from_ty, to_ty } => {
+                // Don't CSE casts to/from 128-bit types (complex codegen)
+                if from_ty.is_128bit() || to_ty.is_128bit() {
+                    return None;
+                }
+                let src_vn = self.operand_to_vn(src);
+                Some((ExprKey::Cast { src: src_vn, from_ty: *from_ty, to_ty: *to_ty }, *dest))
+            }
+            Instruction::GetElementPtr { dest, base, offset, ty } => {
+                let base_vn = self.operand_to_vn(&Operand::Value(*base));
+                let offset_vn = self.operand_to_vn(offset);
+                Some((ExprKey::Gep { base: base_vn, offset: offset_vn, ty: *ty }, *dest))
+            }
+            // Load CSE: two loads from the same pointer with the same type can be
+            // CSE'd if no intervening memory modification occurred. The caller
+            // (process_block) handles invalidating Load entries on memory clobbers.
+            //
+            // Excluded from CSE:
+            // - Segment-overridden loads: access thread-local or CPU-local storage
+            //   that may differ between accesses even without visible stores
+            // - Float, long double, i128 types: use different register paths in
+            //   codegen that complicate Copy instruction handling
+            // - AtomicLoad: has ordering semantics (falls through to _ => None)
+            Instruction::Load { dest, ptr, ty, seg_override } => {
+                if *seg_override != AddressSpace::Default {
+                    return None;
+                }
+                if ty.is_float() || ty.is_long_double() || ty.is_128bit() {
+                    return None;
+                }
+                let ptr_vn = self.operand_to_vn(&Operand::Value(*ptr));
+                Some((ExprKey::Load { ptr: ptr_vn, ty: *ty }, *dest))
+            }
+            // Other instructions (Store, Call, AtomicLoad, etc.) are not eligible.
+            // AtomicLoad is excluded because it has memory ordering semantics that
+            // require the load to actually execute.
+            _ => None,
+        }
+    }
+
+    /// Save the current log positions for later rollback.
+    fn save_scope(&self) -> ScopeCheckpoint {
+        ScopeCheckpoint {
+            rollback_start: self.rollback_log.len(),
+            load_rollback_start: self.load_rollback_log.len(),
+            vn_log_start: self.vn_log.len(),
+            saved_load_generation: self.load_generation,
+        }
+    }
+
+    /// Restore state to a previously saved checkpoint, undoing all changes
+    /// made since the checkpoint was taken.
+    fn restore_scope(&mut self, checkpoint: &ScopeCheckpoint) {
+        // Rollback: restore expr_to_value
+        while self.rollback_log.len() > checkpoint.rollback_start {
+            let (key, old_val) = self.rollback_log.pop().unwrap();
+            if let Some(val) = old_val {
+                self.expr_to_value.insert(key, val);
+            } else {
+                self.expr_to_value.remove(&key);
+            }
+        }
+
+        // Rollback: restore load_expr_to_value
+        while self.load_rollback_log.len() > checkpoint.load_rollback_start {
+            let (key, old_val) = self.load_rollback_log.pop().unwrap();
+            if let Some(val) = old_val {
+                self.load_expr_to_value.insert(key, val);
+            } else {
+                self.load_expr_to_value.remove(&key);
+            }
+        }
+
+        // Rollback: restore value_numbers
+        while self.vn_log.len() > checkpoint.vn_log_start {
+            let (idx, old_vn) = self.vn_log.pop().unwrap();
+            self.value_numbers[idx] = old_vn;
+        }
+
+        // Rollback: restore load_generation
+        self.load_generation = checkpoint.saved_load_generation;
+    }
+}
+
+/// Saved positions in the rollback logs, used by `GvnState::save_scope` /
+/// `GvnState::restore_scope` to implement scoped hash table semantics.
+struct ScopeCheckpoint {
+    rollback_start: usize,
+    load_rollback_start: usize,
+    vn_log_start: usize,
+    saved_load_generation: u32,
+}
+
 /// Run dominator-based GVN on the entire module.
 /// Returns the number of instructions eliminated.
 pub fn run(module: &mut IrModule) -> usize {
@@ -65,7 +279,8 @@ pub(crate) fn run_gvn_function(func: &mut IrFunction) -> usize {
 
     // Fast path for single-block functions: skip CFG/dominator computation.
     if num_blocks == 1 {
-        return run_gvn_single_block(func);
+        let mut state = GvnState::new(func.max_value_id() as usize);
+        return process_block(0, func, &mut state);
     }
 
     // Build CFG and dominator tree
@@ -83,61 +298,16 @@ pub(crate) fn run_gvn_with_analysis(func: &mut IrFunction, cfg: &analysis::CfgAn
 
     // Fast path for single-block functions.
     if num_blocks == 1 {
-        return run_gvn_single_block(func);
+        let mut state = GvnState::new(func.max_value_id() as usize);
+        return process_block(0, func, &mut state);
     }
 
-    // Allocate value number table indexed by Value ID
-    let max_id = func.max_value_id() as usize;
-    let mut value_numbers: Vec<u32> = vec![u32::MAX; max_id + 1];
-    let mut next_vn: u32 = 0;
-
-    let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
-    let mut load_expr_to_value: FxHashMap<ExprKey, (Value, u32)> = FxHashMap::default();
-    let mut load_generation: u32 = 0;
-
-    // Rollback log: tracks (key, old_value) pairs pushed at each scope
-    let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
-    let mut load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)> = Vec::new();
-    let mut vn_log: Vec<(usize, u32)> = Vec::new();
-
-    let mut total_eliminated = 0;
+    let mut state = GvnState::new(func.max_value_id() as usize);
 
     // DFS over the dominator tree
-    gvn_dfs(
-        0,
-        func,
-        &cfg.dom_children,
-        &cfg.preds,
-        &mut value_numbers,
-        &mut next_vn,
-        &mut expr_to_value,
-        &mut load_expr_to_value,
-        &mut load_generation,
-        &mut rollback_log,
-        &mut load_rollback_log,
-        &mut vn_log,
-        &mut total_eliminated,
-    );
+    gvn_dfs(0, func, &cfg.dom_children, &cfg.preds, &mut state);
 
-    total_eliminated
-}
-
-/// Fast path for single-block functions: skip CFG/dominator computation.
-fn run_gvn_single_block(func: &mut IrFunction) -> usize {
-    let max_id = func.max_value_id() as usize;
-    let mut value_numbers: Vec<u32> = vec![u32::MAX; max_id + 1];
-    let mut next_vn: u32 = 0;
-    let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
-    let mut load_expr_to_value: FxHashMap<ExprKey, (Value, u32)> = FxHashMap::default();
-    let mut load_generation: u32 = 0;
-    let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
-    let mut load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)> = Vec::new();
-    let mut vn_log: Vec<(usize, u32)> = Vec::new();
-    process_block(
-        0, func, &mut value_numbers, &mut next_vn,
-        &mut expr_to_value, &mut load_expr_to_value, &mut load_generation,
-        &mut rollback_log, &mut load_rollback_log, &mut vn_log,
-    )
+    state.total_eliminated
 }
 
 /// Recursive DFS over the dominator tree for GVN.
@@ -148,21 +318,9 @@ fn gvn_dfs(
     func: &mut IrFunction,
     dom_children: &[Vec<usize>],
     preds: &analysis::FlatAdj,
-    value_numbers: &mut Vec<u32>,
-    next_vn: &mut u32,
-    expr_to_value: &mut FxHashMap<ExprKey, Value>,
-    load_expr_to_value: &mut FxHashMap<ExprKey, (Value, u32)>,
-    load_generation: &mut u32,
-    rollback_log: &mut Vec<(ExprKey, Option<Value>)>,
-    load_rollback_log: &mut Vec<(ExprKey, Option<(Value, u32)>)>,
-    vn_log: &mut Vec<(usize, u32)>,
-    total_eliminated: &mut usize,
+    state: &mut GvnState,
 ) {
-    // Save state for rollback
-    let rollback_start = rollback_log.len();
-    let load_rollback_start = load_rollback_log.len();
-    let vn_log_start = vn_log.len();
-    let saved_load_generation = *load_generation;
+    let checkpoint = state.save_scope();
 
     // At block entry, decide whether to invalidate inherited Load CSE entries.
     // Load CSE across blocks is safe when this block has exactly one CFG
@@ -173,74 +331,22 @@ fn gvn_dfs(
     // Invalidation is O(1): just bump load_generation. Entries with older
     // generations are ignored during lookup.
     if block_idx != 0 && preds.len(block_idx) > 1 {
-        *load_generation += 1;
+        state.load_generation += 1;
     }
 
     // Process instructions in this block
-    let eliminated = process_block(
-        block_idx,
-        func,
-        value_numbers,
-        next_vn,
-        expr_to_value,
-        load_expr_to_value,
-        load_generation,
-        rollback_log,
-        load_rollback_log,
-        vn_log,
-    );
-    *total_eliminated += eliminated;
+    let eliminated = process_block(block_idx, func, state);
+    state.total_eliminated += eliminated;
 
     // Recurse into dominator tree children.
     // Iterate by index to avoid cloning the children Vec.
     let num_children = dom_children[block_idx].len();
     for ci in 0..num_children {
         let child = dom_children[block_idx][ci];
-        gvn_dfs(
-            child,
-            func,
-            dom_children,
-            preds,
-            value_numbers,
-            next_vn,
-            expr_to_value,
-            load_expr_to_value,
-            load_generation,
-            rollback_log,
-            load_rollback_log,
-            vn_log,
-            total_eliminated,
-        );
+        gvn_dfs(child, func, dom_children, preds, state);
     }
 
-    // Rollback: restore expr_to_value to state before this block
-    while rollback_log.len() > rollback_start {
-        let (key, old_val) = rollback_log.pop().unwrap();
-        if let Some(val) = old_val {
-            expr_to_value.insert(key, val);
-        } else {
-            expr_to_value.remove(&key);
-        }
-    }
-
-    // Rollback: restore load_expr_to_value to state before this block
-    while load_rollback_log.len() > load_rollback_start {
-        let (key, old_val) = load_rollback_log.pop().unwrap();
-        if let Some(val) = old_val {
-            load_expr_to_value.insert(key, val);
-        } else {
-            load_expr_to_value.remove(&key);
-        }
-    }
-
-    // Rollback: restore value_numbers to state before this block
-    while vn_log.len() > vn_log_start {
-        let (idx, old_vn) = vn_log.pop().unwrap();
-        value_numbers[idx] = old_vn;
-    }
-
-    // Rollback: restore load_generation to state before this block
-    *load_generation = saved_load_generation;
+    state.restore_scope(&checkpoint);
 }
 
 /// Check if an instruction may modify memory, invalidating cached load values.
@@ -267,21 +373,14 @@ fn clobbers_memory(inst: &Instruction) -> bool {
 /// Process a single basic block for GVN.
 /// Returns the number of instructions eliminated.
 ///
-/// Load CSE entries are stored separately in `load_expr_to_value`, tagged with
-/// a generation counter for O(1) invalidation on memory clobber. Cross-block
+/// Load CSE entries are stored separately in `state.load_expr_to_value`, tagged
+/// with a generation counter for O(1) invalidation on memory clobber. Cross-block
 /// Load CSE propagation is controlled by `gvn_dfs` which invalidates Load
 /// entries at merge points (blocks with multiple CFG predecessors).
 fn process_block(
     block_idx: usize,
     func: &mut IrFunction,
-    value_numbers: &mut Vec<u32>,
-    next_vn: &mut u32,
-    expr_to_value: &mut FxHashMap<ExprKey, Value>,
-    load_expr_to_value: &mut FxHashMap<ExprKey, (Value, u32)>,
-    load_generation: &mut u32,
-    rollback_log: &mut Vec<(ExprKey, Option<Value>)>,
-    load_rollback_log: &mut Vec<(ExprKey, Option<(Value, u32)>)>,
-    vn_log: &mut Vec<(usize, u32)>,
+    state: &mut GvnState,
 ) -> usize {
     let mut eliminated = 0;
     let mut new_instructions = Vec::with_capacity(func.blocks[block_idx].instructions.len());
@@ -293,37 +392,35 @@ fn process_block(
         // If so, invalidate all cached Load CSE entries by bumping the
         // generation counter. This is O(1) instead of iterating all load keys.
         if clobbers_memory(&inst) {
-            *load_generation += 1;
+            state.load_generation += 1;
         }
 
-        match make_expr_key(&inst, value_numbers, next_vn, vn_log) {
+        match state.make_expr_key(&inst) {
             Some((expr_key, dest)) => {
                 let is_load = expr_key.is_load();
 
                 // Look up: check pure expr map, or load map with generation check
                 let existing = if is_load {
-                    load_expr_to_value.get(&expr_key).and_then(|&(val, gen)| {
-                        if gen == *load_generation { Some(val) } else { None }
+                    state.load_expr_to_value.get(&expr_key).and_then(|&(val, gen)| {
+                        if gen == state.load_generation { Some(val) } else { None }
                     })
                 } else {
-                    expr_to_value.get(&expr_key).copied()
+                    state.expr_to_value.get(&expr_key).copied()
                 };
 
                 if let Some(existing_value) = existing {
                     // This expression was already computed
                     let idx = existing_value.0 as usize;
-                    let existing_vn = if idx < value_numbers.len() && value_numbers[idx] != u32::MAX {
-                        value_numbers[idx]
+                    let existing_vn = if idx < state.value_numbers.len() && state.value_numbers[idx] != u32::MAX {
+                        state.value_numbers[idx]
                     } else {
-                        let vn = *next_vn;
-                        *next_vn += 1;
-                        vn
+                        state.fresh_vn()
                     };
                     let dest_idx = dest.0 as usize;
-                    if dest_idx < value_numbers.len() {
-                        let old_vn = value_numbers[dest_idx];
-                        vn_log.push((dest_idx, old_vn));
-                        value_numbers[dest_idx] = existing_vn;
+                    if dest_idx < state.value_numbers.len() {
+                        let old_vn = state.value_numbers[dest_idx];
+                        state.vn_log.push((dest_idx, old_vn));
+                        state.value_numbers[dest_idx] = existing_vn;
                     }
                     new_instructions.push(Instruction::Copy {
                         dest,
@@ -332,23 +429,22 @@ fn process_block(
                     eliminated += 1;
                 } else {
                     // New expression - assign value number and record it
-                    let vn = *next_vn;
-                    *next_vn += 1;
+                    let vn = state.fresh_vn();
                     let dest_idx = dest.0 as usize;
-                    if dest_idx < value_numbers.len() {
-                        let old_vn = value_numbers[dest_idx];
-                        vn_log.push((dest_idx, old_vn));
-                        value_numbers[dest_idx] = vn;
+                    if dest_idx < state.value_numbers.len() {
+                        let old_vn = state.value_numbers[dest_idx];
+                        state.vn_log.push((dest_idx, old_vn));
+                        state.value_numbers[dest_idx] = vn;
                     }
                     // Record in appropriate map with rollback
                     if is_load {
                         let key_for_log = expr_key.clone();
-                        let old_val = load_expr_to_value.insert(expr_key, (dest, *load_generation));
-                        load_rollback_log.push((key_for_log, old_val));
+                        let old_val = state.load_expr_to_value.insert(expr_key, (dest, state.load_generation));
+                        state.load_rollback_log.push((key_for_log, old_val));
                     } else {
                         let key_for_log = expr_key.clone();
-                        let old_val = expr_to_value.insert(expr_key, dest);
-                        rollback_log.push((key_for_log, old_val));
+                        let old_val = state.expr_to_value.insert(expr_key, dest);
+                        state.rollback_log.push((key_for_log, old_val));
                     }
                     new_instructions.push(inst);
                 }
@@ -356,14 +452,7 @@ fn process_block(
             None => {
                 // Not a numberable expression (store, call, alloca, etc.)
                 if let Some(dest) = inst.dest() {
-                    let vn = *next_vn;
-                    *next_vn += 1;
-                    let dest_idx = dest.0 as usize;
-                    if dest_idx < value_numbers.len() {
-                        let old_vn = value_numbers[dest_idx];
-                        vn_log.push((dest_idx, old_vn));
-                        value_numbers[dest_idx] = vn;
-                    }
+                    state.assign_fresh_vn(dest);
                 }
                 new_instructions.push(inst);
             }
@@ -373,112 +462,6 @@ fn process_block(
     func.blocks[block_idx].instructions = new_instructions;
     func.blocks[block_idx].source_spans = new_spans;
     eliminated
-}
-
-/// Try to create an ExprKey for an instruction (for value numbering).
-/// Returns the expression key and the destination value, or None if
-/// the instruction is not eligible for value numbering.
-fn make_expr_key(
-    inst: &Instruction,
-    value_numbers: &mut Vec<u32>,
-    next_vn: &mut u32,
-    vn_log: &mut Vec<(usize, u32)>,
-) -> Option<(ExprKey, Value)> {
-    match inst {
-        Instruction::BinOp { dest, op, lhs, rhs, .. } => {
-            let lhs_vn = operand_to_vn(lhs, value_numbers, next_vn, vn_log);
-            let rhs_vn = operand_to_vn(rhs, value_numbers, next_vn, vn_log);
-
-            // For commutative operations, canonicalize operand order
-            let (lhs_vn, rhs_vn) = if op.is_commutative() {
-                canonical_order(lhs_vn, rhs_vn)
-            } else {
-                (lhs_vn, rhs_vn)
-            };
-
-            Some((ExprKey::BinOp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
-        }
-        Instruction::UnaryOp { dest, op, src, .. } => {
-            let src_vn = operand_to_vn(src, value_numbers, next_vn, vn_log);
-            Some((ExprKey::UnaryOp { op: *op, src: src_vn }, *dest))
-        }
-        Instruction::Cmp { dest, op, lhs, rhs, .. } => {
-            let lhs_vn = operand_to_vn(lhs, value_numbers, next_vn, vn_log);
-            let rhs_vn = operand_to_vn(rhs, value_numbers, next_vn, vn_log);
-            Some((ExprKey::Cmp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
-        }
-        Instruction::Cast { dest, src, from_ty, to_ty } => {
-            // Don't CSE casts to/from 128-bit types (complex codegen)
-            if from_ty.is_128bit() || to_ty.is_128bit() {
-                return None;
-            }
-            let src_vn = operand_to_vn(src, value_numbers, next_vn, vn_log);
-            Some((ExprKey::Cast { src: src_vn, from_ty: *from_ty, to_ty: *to_ty }, *dest))
-        }
-        Instruction::GetElementPtr { dest, base, offset, ty } => {
-            let base_vn = operand_to_vn(&Operand::Value(*base), value_numbers, next_vn, vn_log);
-            let offset_vn = operand_to_vn(offset, value_numbers, next_vn, vn_log);
-            Some((ExprKey::Gep { base: base_vn, offset: offset_vn, ty: *ty }, *dest))
-        }
-        // Load CSE: two loads from the same pointer with the same type can be
-        // CSE'd if no intervening memory modification occurred. The caller
-        // (process_block) handles invalidating Load entries on memory clobbers.
-        //
-        // Excluded from CSE:
-        // - Segment-overridden loads: access thread-local or CPU-local storage
-        //   that may differ between accesses even without visible stores
-        // - Float, long double, i128 types: use different register paths in
-        //   codegen that complicate Copy instruction handling
-        // - AtomicLoad: has ordering semantics (falls through to _ => None)
-        Instruction::Load { dest, ptr, ty, seg_override } => {
-            if *seg_override != AddressSpace::Default {
-                return None;
-            }
-            if ty.is_float() || ty.is_long_double() || ty.is_128bit() {
-                return None;
-            }
-            let ptr_vn = operand_to_vn(&Operand::Value(*ptr), value_numbers, next_vn, vn_log);
-            Some((ExprKey::Load { ptr: ptr_vn, ty: *ty }, *dest))
-        }
-        // Other instructions (Store, Call, AtomicLoad, etc.) are not eligible.
-        // AtomicLoad is excluded because it has memory ordering semantics that
-        // require the load to actually execute.
-        _ => None,
-    }
-}
-
-/// Convert an Operand to a VNOperand for hashing.
-/// If the value hasn't been assigned a value number yet (e.g. a function
-/// parameter or an alloca whose definition appears later in the block),
-/// assign it a fresh unique VN on the spot to avoid collisions between
-/// different un-numbered values and already-assigned VNs.
-fn operand_to_vn(
-    op: &Operand,
-    value_numbers: &mut Vec<u32>,
-    next_vn: &mut u32,
-    vn_log: &mut Vec<(usize, u32)>,
-) -> VNOperand {
-    match op {
-        Operand::Const(c) => VNOperand::Const(c.to_hash_key()),
-        Operand::Value(v) => {
-            let idx = v.0 as usize;
-            // Ensure the table is large enough
-            if idx >= value_numbers.len() {
-                value_numbers.resize(idx + 1, u32::MAX);
-            }
-            if value_numbers[idx] != u32::MAX {
-                VNOperand::ValueNum(value_numbers[idx])
-            } else {
-                // Assign a fresh VN to this previously un-numbered value
-                let vn = *next_vn;
-                *next_vn += 1;
-                let old_vn = value_numbers[idx];
-                vn_log.push((idx, old_vn));
-                value_numbers[idx] = vn;
-                VNOperand::ValueNum(vn)
-            }
-        }
-    }
 }
 
 /// Canonicalize operand order for commutative operations.
@@ -507,7 +490,7 @@ mod tests {
     #[test]
     fn test_commutative_cse() {
         // Test that a + b and b + a are recognized as the same expression
-        let mut block = BasicBlock {
+        let block = BasicBlock {
             label: BlockId(0),
             instructions: vec![
                 // %0 = add %a, %b
@@ -531,7 +514,7 @@ mod tests {
             source_spans: Vec::new(),
         };
 
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I32,
@@ -583,7 +566,7 @@ mod tests {
     #[test]
     fn test_non_commutative_not_cse() {
         // Test that a - b and b - a are NOT treated as the same
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I32,
@@ -646,7 +629,7 @@ mod tests {
     #[test]
     fn test_constant_cse() {
         // Two identical constant expressions should be CSE'd
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I32,
@@ -717,7 +700,7 @@ mod tests {
     #[test]
     fn test_cast_cse() {
         // Two identical casts should be CSE'd
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I64,
@@ -786,7 +769,7 @@ mod tests {
     #[test]
     fn test_gep_cse() {
         // Two identical GEPs should be CSE'd
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::Ptr,
@@ -848,7 +831,7 @@ mod tests {
     fn test_cross_block_cse() {
         // Test that expressions in dominating blocks are visible to dominated blocks
         // CFG: block0 -> block1 (block0 dominates block1)
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I32,
@@ -932,7 +915,7 @@ mod tests {
         // Diamond CFG: block0 -> {block1, block2} -> block3
         // Expressions in block1 and block2 should NOT be CSE'd with each other,
         // since neither dominates the other.
-        let mut func = IrFunction {
+        let func = IrFunction {
             name: "test".to_string(),
             params: vec![],
             return_type: IrType::I32,
