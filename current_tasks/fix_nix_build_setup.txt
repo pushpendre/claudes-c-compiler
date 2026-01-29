@@ -1,0 +1,10 @@
+Task: Fix Nix build setup for offline use
+Status: in_progress
+
+Problem: /verify/setup_nix.sh fails because it creates a flake.nix without a
+flake.lock, causing nix to try to fetch flake-utils and nixpkgs from the
+internet (which is unavailable in this environment).
+
+Solution: Add a flake.lock file to /verify/ that pins the inputs to the store
+paths already available in /nix-template. Update setup_nix.sh to copy the
+flake.lock alongside the flake.nix.
