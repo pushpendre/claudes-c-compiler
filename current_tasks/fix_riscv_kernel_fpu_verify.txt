@@ -1,8 +1,0 @@
-Fix RISC-V kernel boot verification: enable FPU in tinyconfig
-
-The verify_kernel.py script uses tinyconfig for kernel builds but doesn't
-enable CONFIG_FPU for RISC-V. The busybox-riscv64 binary uses double-float
-ABI (RVD) and crashes with SIGILL when FPU support is missing.
-
-Fix: Add "FPU" to required_opts for RISC-V in verify_kernel.py.
-Also check/fix verify_kernel_dd_multiarch.py if applicable.
