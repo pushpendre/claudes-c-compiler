@@ -261,12 +261,6 @@ impl Lowerer {
         self.diagnostics.borrow_mut().warning(message, span);
     }
 
-    /// Emit a warning diagnostic without a source span.
-    #[allow(dead_code)]
-    pub(super) fn emit_warning_no_span(&self, message: impl Into<String>) {
-        self.diagnostics.borrow_mut().warning_no_span(message);
-    }
-
     /// Look up the shared type metadata for a variable by name.
     ///
     /// Checks locals first, then globals. Returns `&VarInfo` which provides

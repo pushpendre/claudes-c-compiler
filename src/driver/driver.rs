@@ -183,17 +183,26 @@ impl Driver {
         }
     }
 
+    /// Read a C source file, tolerating non-UTF-8 content.
+    /// Valid UTF-8 files are returned as-is. Non-UTF-8 bytes (0x80-0xFF) are
+    /// encoded as PUA code points (U+E080-U+E0FF) which the lexer decodes
+    /// back to raw bytes inside string/character literals.
+    fn read_c_source_file(path: &str) -> Result<String, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("Cannot read {}: {}", path, e))?;
+        Ok(crate::common::encoding::bytes_to_string(bytes))
+    }
+
     /// Read source from an input file. If the file is "-", reads from stdin.
     fn read_source(input_file: &str) -> Result<String, String> {
         if input_file == "-" {
             use std::io::Read;
-            let mut buf = String::new();
-            std::io::stdin().read_to_string(&mut buf)
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)
                 .map_err(|e| format!("Cannot read from stdin: {}", e))?;
-            Ok(buf)
+            Ok(crate::common::encoding::bytes_to_string(bytes))
         } else {
-            std::fs::read_to_string(input_file)
-                .map_err(|e| format!("Cannot read {}: {}", input_file, e))
+            Self::read_c_source_file(input_file)
         }
     }
 
@@ -326,8 +335,8 @@ impl Driver {
                 resolved.to_path_buf()
             };
 
-            let content = std::fs::read_to_string(&resolved)
-                .map_err(|e| format!("{}: {}: No such file or directory", path, e))?;
+            let content = Self::read_c_source_file(&resolved.to_string_lossy())
+                .map_err(|e| format!("{}: {}", path, e))?;
             preprocessor.preprocess_force_include(&content, &resolved.to_string_lossy());
         }
         Ok(())

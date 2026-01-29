@@ -904,7 +904,7 @@ impl Lowerer {
                 let both_eq = self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), int_ty);
                 self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(both_eq), Operand::Const(IrConst::ptr_int(0)), int_ty)
             }
-            _ => unreachable!(),
+            _ => unreachable!("complex comparison only supports Eq/Ne, got: {:?}", op),
         };
         Operand::Value(result)
     }

@@ -118,7 +118,7 @@ impl Lowerer {
             BinOp::Sub => self.lower_complex_sub(lhs_ptr, rhs_ptr, &result_ct),
             BinOp::Mul => self.lower_complex_mul(lhs_ptr, rhs_ptr, &result_ct),
             BinOp::Div => self.lower_complex_div(lhs_ptr, rhs_ptr, &result_ct),
-            _ => unreachable!(),
+            _ => unreachable!("unsupported complex binary op: {:?}", op),
         }
     }
 
@@ -268,7 +268,7 @@ impl Lowerer {
             (BinOp::Gt, true) => IrCmpOp::Ugt,
             (BinOp::Ge, false) => IrCmpOp::Sge,
             (BinOp::Ge, true) => IrCmpOp::Uge,
-            _ => unreachable!(),
+            _ => unreachable!("non-comparison BinOp in binop_to_cmp: {:?}", op),
         }
     }
 
@@ -288,7 +288,7 @@ impl Lowerer {
             (BinOp::Shl, _) => IrBinOp::Shl,
             (BinOp::Shr, false) => IrBinOp::AShr,
             (BinOp::Shr, true) => IrBinOp::LShr,
-            _ => unreachable!(),
+            _ => unreachable!("non-arithmetic BinOp in binop_to_ir: {:?}", op),
         }
     }
 

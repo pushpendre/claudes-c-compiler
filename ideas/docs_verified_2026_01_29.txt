@@ -1,0 +1,36 @@
+Documentation Verification (2026-01-29)
+========================================
+
+All README.md files and ideas/*.txt files have been audited for correctness.
+
+Fixes Applied:
+- README.md: -dumpversion output corrected from "6.5.0" to "6" (matches actual code)
+- README.md: test count updated from "~690" to "~718" directories
+- README.md: added note that i686/ lacks its own README.md
+- src/frontend/README.md: sema description updated to note it now emits some errors
+- src/common/README.md: added missing temp_files.rs to module listing
+- src/backend/README.md: trait method count corrected from "~58" to "~55" defaults
+- src/passes/README.md: pipeline description updated to include div_by_const pass
+  and note that GVN+LICM+IVSR share CFG analysis
+- ideas/register_allocator.txt: updated from "three backends" to "four backends"
+- ideas/reduce_stack_frame_size_for_postgres.txt: updated from "three" to "four"
+- ideas/high_use_def_chains.txt: updated pass pipeline description from 4 to 14 passes
+
+Verified Correct (no changes needed):
+- Cargo.toml binary targets match README description
+- Architecture tree listing in README matches actual directory structure
+- All 14 optimization pass files exist as documented
+- Pass pipeline runs 3 iterations as documented
+- All backend files match their README listings
+- F128SoftFloat trait has exactly 34 arch-specific primitives as documented
+- RISC-V callee-saved registers (s1, s7-s11 = 6) match documentation
+- Frontend module descriptions (preprocessor, lexer, parser, sema) are accurate
+- IR lowering file listing (~42 files) matches actual directory
+- mem2reg module files match documentation
+- Testing commands in README are accurate
+
+Known Stale (informational snapshots, not fixing):
+- ideas/fix_remaining_{arm,x86,riscv}_tests.txt: pass rate numbers from 2026-01-25
+  likely improved since then, but these are historical snapshots
+- ideas/fix_remaining_i686_projects.txt: some internal pass rates may be outdated
+- Runtime claims (kernel boots, PostgreSQL passes) cannot be verified from code alone

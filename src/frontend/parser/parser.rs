@@ -314,35 +314,11 @@ impl Parser {
         std::mem::take(&mut self.diagnostics)
     }
 
-    /// Format a location prefix for error messages from a span.
-    /// Returns "file:line:col: " if source manager is available, "" otherwise.
-    /// Checks both the parser's own source_manager and the diagnostic engine's.
-    /// Kept for use by parser extensions and future diagnostic improvements.
-    #[allow(dead_code)]
-    pub(super) fn span_to_location(&self, span: Span) -> String {
-        if let Some(ref sm) = self.source_manager {
-            let loc = sm.resolve_span(span);
-            format!("{}:{}:{}: ", loc.file, loc.line, loc.column)
-        } else if let Some(sm) = self.diagnostics.source_manager() {
-            let loc = sm.resolve_span(span);
-            format!("{}:{}:{}: ", loc.file, loc.line, loc.column)
-        } else {
-            String::new()
-        }
-    }
-
     /// Emit a parse error at the given span. Updates error_count and prints
     /// the error with source location and snippet (if source manager is set).
     pub(super) fn emit_error(&mut self, message: impl Into<String>, span: Span) {
         self.error_count += 1;
         self.diagnostics.error(message, span);
-    }
-
-    /// Emit a parse warning at the given span.
-    /// Not yet used; available for adding parser warnings (e.g., implicit conversions).
-    #[allow(dead_code)]
-    pub(super) fn emit_warning(&mut self, message: impl Into<String>, span: Span) {
-        self.diagnostics.warning(message, span);
     }
 
     /// Standard C typedef names commonly provided by system headers.
@@ -552,7 +528,7 @@ impl Parser {
     /// Returns (is_packed, aligned_value, mode_kind, is_common).
     pub(super) fn parse_gcc_attributes(&mut self) -> (bool, Option<usize>, Option<ModeKind>, bool) {
         let mut is_packed = false;
-        let mut _aligned = None;
+        let mut aligned = None;
         let mut mode_kind: Option<ModeKind> = None;
         let mut is_common = false;
         loop {
@@ -589,7 +565,7 @@ impl Parser {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             if let Some(align) = self.parse_alignment_expr() {
-                                                _aligned = Some(align);
+                                                aligned = Some(align);
                                             }
                                         }
                                     }
@@ -856,7 +832,7 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_packed, _aligned, mode_kind, is_common)
+        (is_packed, aligned, mode_kind, is_common)
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.

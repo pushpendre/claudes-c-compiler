@@ -44,7 +44,7 @@ ccc -x c -E -                # Read from stdin
 
 # Build system integration (reports as GCC 6.5 for compatibility)
 ccc -dumpmachine             # x86_64-linux-gnu / aarch64-linux-gnu / riscv64-linux-gnu / i686-linux-gnu
-ccc -dumpversion             # 6.5.0
+ccc -dumpversion             # 6
 ```
 
 ## Status
@@ -140,7 +140,8 @@ src/
   driver/                  CLI parsing, pipeline orchestration
 ```
 
-Each subdirectory has its own `README.md` with design details.
+Each subdirectory has its own `README.md` with design details (except `i686/`,
+which is documented in the shared backend `README.md`).
 
 ### Compilation pipeline
 
@@ -187,7 +188,7 @@ python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86
 
 - `src/` -- Compiler source code (Rust)
 - `include/` -- Bundled C headers (SSE/AVX intrinsic stubs)
-- `tests/` -- Test suite (~690 test directories)
+- `tests/` -- Test suite (~718 test directories)
 - `ideas/` -- Design docs and future work proposals
 - `current_tasks/` -- Active work items (lock files for coordination)
 - `completed_tasks/` -- Finished work items (for reference)

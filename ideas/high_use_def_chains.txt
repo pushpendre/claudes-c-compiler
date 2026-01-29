@@ -9,15 +9,16 @@ to a constant". GVN replaces redundant instructions with Copy but cannot propaga
 the replacement to users. Simplify cannot see that an operand was defined as zero
 in a prior instruction.
 
-At O2 (2 pipeline iterations), each function undergoes 12+ full instruction scans.
-At O3, 18+. Each scan walks every block, every instruction, and pattern-matches all
-28+ Instruction variants. DCE's fixpoint allocates and discards a fresh HashSet per
-iteration. When more passes are added (LICM, inlining, SCCP, copy propagation),
-this becomes the dominant compilation time cost.
+The pipeline now runs 14 passes across 3 iterations, meaning each function
+undergoes 30+ full instruction scans per compilation. Each scan walks every
+block, every instruction, and pattern-matches all 28+ Instruction variants.
 
 Current state (passes/mod.rs, run_passes):
-  simplify::run -> constant_fold::run -> gvn::run -> dce::run, iterated N times
-  Each pass takes &mut IrModule, returns usize count, no shared state between passes.
+  14 passes (cfg_simplify, copy_prop, div_by_const, narrow, simplify,
+  constant_fold, gvn, licm, ivsr, if_convert, copy_prop, dce, cfg_simplify,
+  ipcp), iterated up to 3 times with dirty tracking and dependency-based
+  skip logic. Each pass takes &mut IrModule, returns usize count, no shared
+  state between passes.
 
 What to do:
 1. Add a UseDefInfo struct that maintains, for each Value:

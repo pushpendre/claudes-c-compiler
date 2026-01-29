@@ -567,7 +567,7 @@ fn extend_gep_base_liveness(
                     let ptr_id = match inst {
                         Instruction::Load { ptr, .. } => ptr.0,
                         Instruction::Store { ptr, .. } => ptr.0,
-                        _ => unreachable!(),
+                        _ => unreachable!("GEP analysis matched non-Load/Store instruction"),
                     };
                     if let Some(&(base_id, _offset)) = gep_info.get(&ptr_id) {
                         // Extend base's last_use to this program point

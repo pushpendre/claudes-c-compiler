@@ -1728,7 +1728,7 @@ fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
                     options(nostack),
                 );
             }
-            _ => unreachable!(),
+            _ => unreachable!("invalid x87 binop code"),
         }
     }
     result
@@ -1747,7 +1747,7 @@ fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
         1 => fa - fb,
         2 => fa * fb,
         3 => fa / fb,
-        _ => unreachable!(),
+        _ => unreachable!("invalid x87 binop code"),
     };
     f64_to_x87_bytes_simple(result)
 }

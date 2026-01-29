@@ -1133,7 +1133,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 | Instruction::UnaryOp { .. } | Instruction::Cmp { .. }
                 | Instruction::Cast { .. } | Instruction::GetElementPtr { .. }
                 | Instruction::GlobalAddr { .. } | Instruction::LabelAddr { .. }
-                | Instruction::Select { .. } => unreachable!(),
+                | Instruction::Select { .. } => unreachable!("instruction should have been handled by generate_instruction dispatch"),
             }
             cg.state().reg_cache.invalidate_all();
         }

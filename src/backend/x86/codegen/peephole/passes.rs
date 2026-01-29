@@ -535,7 +535,7 @@ fn fuse_movq_ext_truncation(store: &mut LineStore, infos: &mut [LineInfo]) -> bo
                 let src_8 = REG_NAMES[3][src_family as usize];
                 format!("    movsbq {}, %rax", src_8)
             }
-            _ => unreachable!(),
+            _ => unreachable!("mov+ext fusion matched unexpected ExtKind"),
         };
 
         replace_line(store, &mut infos[i], i, new_text);

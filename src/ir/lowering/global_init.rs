@@ -24,7 +24,7 @@ impl Lowerer {
     pub(super) fn lower_global_init(
         &mut self,
         init: &Initializer,
-        _type_spec: &TypeSpecifier,
+        type_spec: &TypeSpecifier,
         base_ty: IrType,
         is_array: bool,
         elem_size: usize,
@@ -33,9 +33,9 @@ impl Lowerer {
         array_dim_strides: &[usize],
     ) -> GlobalInit {
         // Check if the target type is long double (need to emit as x87 80-bit)
-        let is_long_double_target = self.is_type_spec_long_double(_type_spec);
+        let is_long_double_target = self.is_type_spec_long_double(type_spec);
         // Check if the target element type is _Bool (C11 6.3.1.2 normalization needed)
-        let is_bool_target = self.is_type_bool(_type_spec);
+        let is_bool_target = self.is_type_bool(type_spec);
 
         match init {
             Initializer::Expr(expr) => {
@@ -44,7 +44,7 @@ impl Lowerer {
                 // Without this early check, `eval_const_expr` would succeed on the scalar
                 // and coerce it to the base_ty (Ptr for complex), producing a wrong init.
                 {
-                    let ctype = self.type_spec_to_ctype(_type_spec);
+                    let ctype = self.type_spec_to_ctype(type_spec);
                     if ctype.is_complex() {
                         if let Some(init) = self.eval_complex_global_init(expr, &ctype) {
                             return init;
@@ -224,7 +224,7 @@ impl Lowerer {
                 // Complex types (e.g., double _Complex) have base_ty=Ptr in IR but are
                 // actually stored as {real, imag} pairs. We detect this case early and
                 // use eval_complex_global_init to properly evaluate each element.
-                let complex_ctype = self.type_spec_to_ctype(_type_spec);
+                let complex_ctype = self.type_spec_to_ctype(type_spec);
                 let is_complex_element = is_array && complex_ctype.is_complex();
                 if is_complex_element {
                     let num_elems = total_size / elem_size.max(1);
@@ -481,7 +481,7 @@ impl Lowerer {
                     // e.g., SV s[] = { (SV){1,2,3,4}, (SV){5,6,7,8} } with SV = int vector_size(16)
                     // produces 8 I32 values: [1, 2, 3, 4, 5, 6, 7, 8].
                     {
-                        let ctype = self.type_spec_to_ctype(_type_spec);
+                        let ctype = self.type_spec_to_ctype(type_spec);
                         if let Some((elem_ct, vec_num_elems)) = ctype.vector_info() {
                             let elem_ir_ty = IrType::from_ctype(&elem_ct);
                             let total_scalars = num_elems * vec_num_elems;
@@ -604,7 +604,7 @@ impl Lowerer {
                 // Vectors are aggregates (not arrays/structs), so they need special handling
                 // before the "scalar with braces" path which would only emit the first element.
                 {
-                    let ctype = self.type_spec_to_ctype(_type_spec);
+                    let ctype = self.type_spec_to_ctype(type_spec);
                     if let Some((elem_ct, num_elems)) = ctype.vector_info() {
                         let elem_ir_ty = IrType::from_ctype(&elem_ct);
                         let mut values = vec![self.zero_const(elem_ir_ty); num_elems];

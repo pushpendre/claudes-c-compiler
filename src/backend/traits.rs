@@ -1150,7 +1150,7 @@ pub trait ArchCodegen {
                     IrBinOp::UDiv => "__udivti3",
                     IrBinOp::SRem => "__modti3",
                     IrBinOp::URem => "__umodti3",
-                    _ => unreachable!(),
+                    _ => unreachable!("i128 divrem matched non-div/rem op: {:?}", op),
                 };
                 self.emit_i128_divrem_call(func_name, lhs, rhs);
             }
@@ -1165,7 +1165,7 @@ pub trait ArchCodegen {
                     IrBinOp::Shl => self.emit_i128_shl_const(amount),
                     IrBinOp::LShr => self.emit_i128_lshr_const(amount),
                     IrBinOp::AShr => self.emit_i128_ashr_const(amount),
-                    _ => unreachable!(),
+                    _ => unreachable!("i128 const-shift matched non-shift op: {:?}", op),
                 }
             }
             _ => {
@@ -1180,7 +1180,7 @@ pub trait ArchCodegen {
                     IrBinOp::Shl => self.emit_i128_shl(),
                     IrBinOp::LShr => self.emit_i128_lshr(),
                     IrBinOp::AShr => self.emit_i128_ashr(),
-                    _ => unreachable!(),
+                    _ => unreachable!("unhandled i128 binary op: {:?}", op),
                 }
             }
         }

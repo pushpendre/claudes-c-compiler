@@ -374,7 +374,6 @@ impl DiagnosticEngine {
     }
 
     /// Get a reference to the warning configuration.
-    #[allow(dead_code)]
     pub fn warning_config(&self) -> &WarningConfig {
         &self.warning_config
     }

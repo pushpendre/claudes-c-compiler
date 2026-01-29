@@ -1,10 +1,11 @@
 Register Allocator Improvements
 ===============================
 
-The three-phase linear scan allocator is implemented on all three backends:
+The three-phase linear scan allocator is implemented on all four backends:
 - x86-64: rbx, r12-r15 (callee) + r11, r10, r8, r9 (caller) = 9 registers
 - AArch64: x20-x28 (callee) + x13, x14 (caller) = 11 registers
 - RISC-V: s1, s7-s11 (callee) = 6 registers
+- i686: ebx, esi, edi (callee) = 3 registers
 
 Liveness analysis uses backward dataflow iteration with loop awareness.
 ARM skips variadic functions to avoid callee-save/VA-save area conflicts.

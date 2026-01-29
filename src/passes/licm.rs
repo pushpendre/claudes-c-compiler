@@ -770,9 +770,9 @@ mod tests {
         let mut func = make_loop_func();
         let alloca_info = analyze_allocas(&func);
         let label_to_idx = analysis::build_label_map(&func);
-        let (preds, _succs) = analysis::build_cfg(&func, &label_to_idx);
-        let idom = analysis::compute_dominators(func.blocks.len(), &preds, &_succs);
-        let loops = loop_analysis::find_natural_loops(func.blocks.len(), &preds, &_succs, &idom);
+        let (preds, succs) = analysis::build_cfg(&func, &label_to_idx);
+        let idom = analysis::compute_dominators(func.blocks.len(), &preds, &succs);
+        let loops = loop_analysis::find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
 
         let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &alloca_info);
 

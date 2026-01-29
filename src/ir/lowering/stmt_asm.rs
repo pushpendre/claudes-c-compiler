@@ -99,7 +99,7 @@ impl Lowerer {
                         let asm_reg = self.get_asm_register(var_name).unwrap();
                         self.read_global_register(&asm_reg, out_ty)
                     } else {
-                        unreachable!()
+                        unreachable!("asm output for global register variable must be an identifier")
                     }
                 } else if needs_address {
                     // For "+m" (memory-only read-write) and "+A" (RISC-V address for

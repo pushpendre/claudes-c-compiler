@@ -151,7 +151,7 @@ impl RiscvCodegen {
                     IntrinsicOp::Crc32_16 => 2,
                     IntrinsicOp::Crc32_32 => 4,
                     IntrinsicOp::Crc32_64 => 8,
-                    _ => unreachable!(),
+                    _ => unreachable!("CRC32 dispatch matched non-CRC32 op: {:?}", op),
                 };
                 self.operand_to_t0(&args[0]); // t0 = crc
                 self.state.emit("    mv t3, t0");

@@ -1,3 +1,4 @@
+use crate::common::encoding::decode_pua_byte;
 use crate::common::source::Span;
 use super::token::{Token, TokenKind};
 
@@ -544,8 +545,11 @@ impl Lexer {
                     }
                 }
             } else {
-                s.push(self.input[self.pos] as char);
-                self.pos += 1;
+                // Decode PUA-encoded bytes back to original values for
+                // non-UTF-8 source files (e.g., EUC-JP string literals)
+                let (byte, consumed) = decode_pua_byte(&self.input, self.pos);
+                s.push(byte as char);
+                self.pos += consumed;
             }
         }
         if self.pos < self.input.len() {
@@ -565,28 +569,31 @@ impl Lexer {
                     s.push(self.lex_escape_char());
                 }
             } else {
-                // Decode UTF-8 character for wide string
-                let byte = self.input[self.pos];
-                if byte < 0x80 {
-                    // ASCII
+                // Check for PUA-encoded bytes first (from non-UTF-8 source files)
+                let (byte, consumed) = decode_pua_byte(&self.input, self.pos);
+                if consumed > 1 {
+                    // PUA byte: decode back to original byte value
                     s.push(byte as char);
-                    self.pos += 1;
+                    self.pos += consumed;
                 } else {
-                    // Multi-byte UTF-8: decode to a single Unicode code point
-                    let remaining = &self.input[self.pos..];
-                    if let Ok(text) = std::str::from_utf8(remaining) {
-                        if let Some(ch) = text.chars().next() {
-                            s.push(ch);
-                            self.pos += ch.len_utf8();
-                        } else {
-                            s.push(byte as char);
-                            self.pos += 1;
-                        }
+                    // Decode UTF-8 character for wide string
+                    let byte = self.input[self.pos];
+                    if byte < 0x80 {
+                        s.push(byte as char);
+                        self.pos += 1;
                     } else {
-                        // Try to decode just a few bytes
-                        let end = std::cmp::min(self.pos + 4, self.input.len());
-                        let chunk = &self.input[self.pos..end];
-                        if let Ok(text) = std::str::from_utf8(chunk) {
+                        // Multi-byte UTF-8: decode to a single Unicode code point
+                        let remaining = &self.input[self.pos..];
+                        let end = std::cmp::min(4, remaining.len());
+                        if let Ok(text) = std::str::from_utf8(&remaining[..end]) {
+                            if let Some(ch) = text.chars().next() {
+                                s.push(ch);
+                                self.pos += ch.len_utf8();
+                            } else {
+                                s.push(byte as char);
+                                self.pos += 1;
+                            }
+                        } else if let Ok(text) = std::str::from_utf8(remaining) {
                             if let Some(ch) = text.chars().next() {
                                 s.push(ch);
                                 self.pos += ch.len_utf8();
@@ -595,7 +602,6 @@ impl Lexer {
                                 self.pos += 1;
                             }
                         } else {
-                            // Fallback: treat as Latin-1
                             s.push(byte as char);
                             self.pos += 1;
                         }
@@ -622,24 +628,28 @@ impl Lexer {
                     s.push(self.lex_escape_char());
                 }
             } else {
-                let byte = self.input[self.pos];
-                if byte < 0x80 {
+                // Check for PUA-encoded bytes first
+                let (byte, consumed) = decode_pua_byte(&self.input, self.pos);
+                if consumed > 1 {
                     s.push(byte as char);
-                    self.pos += 1;
+                    self.pos += consumed;
                 } else {
-                    let remaining = &self.input[self.pos..];
-                    if let Ok(text) = std::str::from_utf8(remaining) {
-                        if let Some(ch) = text.chars().next() {
-                            s.push(ch);
-                            self.pos += ch.len_utf8();
-                        } else {
-                            s.push(byte as char);
-                            self.pos += 1;
-                        }
+                    let byte = self.input[self.pos];
+                    if byte < 0x80 {
+                        s.push(byte as char);
+                        self.pos += 1;
                     } else {
-                        let end = std::cmp::min(self.pos + 4, self.input.len());
-                        let chunk = &self.input[self.pos..end];
-                        if let Ok(text) = std::str::from_utf8(chunk) {
+                        let remaining = &self.input[self.pos..];
+                        let end = std::cmp::min(4, remaining.len());
+                        if let Ok(text) = std::str::from_utf8(&remaining[..end]) {
+                            if let Some(ch) = text.chars().next() {
+                                s.push(ch);
+                                self.pos += ch.len_utf8();
+                            } else {
+                                s.push(byte as char);
+                                self.pos += 1;
+                            }
+                        } else if let Ok(text) = std::str::from_utf8(remaining) {
                             if let Some(ch) = text.chars().next() {
                                 s.push(ch);
                                 self.pos += ch.len_utf8();
@@ -670,27 +680,34 @@ impl Lexer {
                 let ch = self.lex_escape_char();
                 value = ch as u32; // Unicode escapes return code point directly
             } else {
-                // Decode UTF-8 to get Unicode code point
-                let byte = self.input[self.pos];
-                if byte < 0x80 {
+                // Check for PUA-encoded bytes first
+                let (byte, consumed) = decode_pua_byte(&self.input, self.pos);
+                if consumed > 1 {
                     value = byte as u32;
-                    self.pos += 1;
+                    self.pos += consumed;
                 } else {
-                    let remaining = &self.input[self.pos..];
-                    let end = std::cmp::min(remaining.len(), 4);
-                    if let Ok(text) = std::str::from_utf8(&remaining[..end]) {
-                        if let Some(ch) = text.chars().next() {
-                            value = ch as u32;
-                            self.pos += ch.len_utf8();
-                        }
-                    } else if let Ok(text) = std::str::from_utf8(remaining) {
-                        if let Some(ch) = text.chars().next() {
-                            value = ch as u32;
-                            self.pos += ch.len_utf8();
-                        }
-                    } else {
+                    // Decode UTF-8 to get Unicode code point
+                    let byte = self.input[self.pos];
+                    if byte < 0x80 {
                         value = byte as u32;
                         self.pos += 1;
+                    } else {
+                        let remaining = &self.input[self.pos..];
+                        let end = std::cmp::min(remaining.len(), 4);
+                        if let Ok(text) = std::str::from_utf8(&remaining[..end]) {
+                            if let Some(ch) = text.chars().next() {
+                                value = ch as u32;
+                                self.pos += ch.len_utf8();
+                            }
+                        } else if let Ok(text) = std::str::from_utf8(remaining) {
+                            if let Some(ch) = text.chars().next() {
+                                value = ch as u32;
+                                self.pos += ch.len_utf8();
+                            }
+                        } else {
+                            value = byte as u32;
+                            self.pos += 1;
+                        }
                     }
                 }
             }
@@ -716,9 +733,10 @@ impl Lexer {
                 self.pos += 1;
                 self.lex_escape_char()
             } else {
-                let c = self.input[self.pos] as char;
-                self.pos += 1;
-                c
+                // Decode PUA-encoded bytes for non-UTF-8 source files
+                let (byte, consumed) = decode_pua_byte(&self.input, self.pos);
+                self.pos += consumed;
+                byte as char
             };
             // C narrow char literals encode Unicode escapes as UTF-8 bytes
             // combined into a multi-byte int value, matching GCC behavior.
@@ -1100,8 +1118,14 @@ impl Lexer {
                 }
             }
             _ => {
-                // Unknown character, skip it and try again
-                TokenKind::Eof // TODO: emit error diagnostic
+                // Non-ASCII or unknown character: skip any remaining bytes of
+                // a multi-byte UTF-8 sequence (including PUA-encoded bytes from
+                // non-UTF-8 source files) and continue tokenizing.
+                // TODO: emit a diagnostic for genuinely unknown/invalid characters
+                while self.pos < self.input.len() && (self.input[self.pos] & 0xC0) == 0x80 {
+                    self.pos += 1; // skip continuation bytes
+                }
+                return self.next_token();
             }
         };
 

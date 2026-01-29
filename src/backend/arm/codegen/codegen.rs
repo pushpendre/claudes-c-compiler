@@ -76,7 +76,7 @@ fn arm_alu_mnemonic(op: IrBinOp) -> &'static str {
         IrBinOp::Or => "orr",
         IrBinOp::Xor => "eor",
         IrBinOp::Mul => "mul",
-        _ => unreachable!(),
+        _ => unreachable!("unsupported ALU op for arm_alu_mnemonic: {:?}", op),
     }
 }
 
@@ -4383,7 +4383,7 @@ impl ArchCodegen for ArmCodegen {
             IrCmpOp::Sgt | IrCmpOp::Sge => ("gt", if op == IrCmpOp::Sgt { "hi" } else { "hs" }),
             IrCmpOp::Ult | IrCmpOp::Ule => ("lo", if op == IrCmpOp::Ult { "lo" } else { "ls" }),
             IrCmpOp::Ugt | IrCmpOp::Uge => ("hi", if op == IrCmpOp::Ugt { "hi" } else { "hs" }),
-            _ => unreachable!(),
+            _ => unreachable!("i128 ordered cmp got equality op: {:?}", op),
         };
         self.state.emit_fmt(format_args!("    cset x0, {}", hi_cond));
         self.state.emit_fmt(format_args!("    b.ne {}", done));

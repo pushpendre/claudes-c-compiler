@@ -203,7 +203,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
                         BinOp::Gt => cmp == 1,
                         BinOp::Le => cmp == -1 || cmp == 0,
                         BinOp::Ge => cmp == 1 || cmp == 0,
-                        _ => unreachable!(),
+                        _ => unreachable!("inner match in const_arith has already-excluded op"),
                     };
                     Some(IrConst::I64(if result { 1 } else { 0 }))
                 }
@@ -214,7 +214,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
                     let result = match op {
                         BinOp::LogicalAnd => l_nonzero && r_nonzero,
                         BinOp::LogicalOr => l_nonzero || r_nonzero,
-                        _ => unreachable!(),
+                        _ => unreachable!("inner match in const_arith has already-excluded op"),
                     };
                     Some(IrConst::I64(if result { 1 } else { 0 }))
                 }
@@ -233,7 +233,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
                         BinOp::Mul => long_double::x87_mul(&la, &ra),
                         BinOp::Div => long_double::x87_div(&la, &ra),
                         BinOp::Mod => long_double::x87_rem(&la, &ra),
-                        _ => unreachable!(),
+                        _ => unreachable!("inner match in const_arith has already-excluded op"),
                     };
                     let result_f128 = long_double::x87_bytes_to_f128_bytes(&result_x87);
                     let approx = long_double::x87_to_f64(&result_x87);
@@ -249,7 +249,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
                         BinOp::Gt => l > r,
                         BinOp::Le => l <= r,
                         BinOp::Ge => l >= r,
-                        _ => unreachable!(),
+                        _ => unreachable!("inner match in const_arith has already-excluded op"),
                     };
                     Some(IrConst::I64(if result { 1 } else { 0 }))
                 }
@@ -259,7 +259,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
                     let result = match op {
                         BinOp::LogicalAnd => l != 0.0 && r != 0.0,
                         BinOp::LogicalOr => l != 0.0 || r != 0.0,
-                        _ => unreachable!(),
+                        _ => unreachable!("inner match in const_arith has already-excluded op"),
                     };
                     Some(IrConst::I64(if result { 1 } else { 0 }))
                 }

@@ -122,14 +122,6 @@ impl I686Codegen {
 
     // --- i686 helper methods ---
 
-    #[allow(dead_code)]
-    fn operand_reg(&self, op: &Operand) -> Option<PhysReg> {
-        match op {
-            Operand::Value(v) => self.reg_assignments.get(&v.0).copied(),
-            _ => None,
-        }
-    }
-
     fn dest_reg(&self, dest: &Value) -> Option<PhysReg> {
         self.reg_assignments.get(&dest.0).copied()
     }
@@ -567,50 +559,6 @@ impl I686Codegen {
         } else {
             // No slot available, pop x87 stack to discard
             self.state.emit("    fstp %st(0)");
-        }
-    }
-
-    /// Load an operand into a named register.
-    #[allow(dead_code)]
-    fn operand_to_reg(&mut self, op: &Operand, reg: &str) {
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I8(v) => emit!(self.state, "    movl ${}, %{}", *v as i32, reg),
-                    IrConst::I16(v) => emit!(self.state, "    movl ${}, %{}", *v as i32, reg),
-                    IrConst::I32(v) => {
-                        if *v == 0 && (reg == "eax" || reg == "ecx" || reg == "edx") {
-                            emit!(self.state, "    xorl %{}, %{}", reg, reg);
-                        } else {
-                            emit!(self.state, "    movl ${}, %{}", v, reg);
-                        }
-                    }
-                    IrConst::I64(v) => {
-                        let low = *v as i32;
-                        if low == 0 && (reg == "eax" || reg == "ecx" || reg == "edx") {
-                            emit!(self.state, "    xorl %{}, %{}", reg, reg);
-                        } else {
-                            emit!(self.state, "    movl ${}, %{}", low, reg);
-                        }
-                    }
-                    _ => {
-                        self.operand_to_eax(op);
-                        if reg != "eax" {
-                            emit!(self.state, "    movl %eax, %{}", reg);
-                        }
-                    }
-                }
-            }
-            Operand::Value(v) => {
-                if let Some(phys) = self.reg_assignments.get(&v.0).copied() {
-                    let src_reg = phys_reg_name(phys);
-                    if src_reg != reg {
-                        emit!(self.state, "    movl %{}, %{}", src_reg, reg);
-                    }
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    movl {}(%ebp), %{}", slot.0, reg);
-                }
-            }
         }
     }
 
@@ -1736,7 +1684,7 @@ impl ArchCodegen for I686Codegen {
                         emit!(self.state, "    movl ${}, {}(%ebp)", lo as i32, dest_slot.0);
                         emit!(self.state, "    movl ${}, {}(%ebp)", hi as i32, dest_slot.0 + 4);
                     }
-                    _ => unreachable!(),
+                    _ => unreachable!("unexpected wide constant type in i686 emit_copy"),
                 }
                 self.state.reg_cache.invalidate_all();
                 return;
@@ -2797,7 +2745,7 @@ impl ArchCodegen for I686Codegen {
     /// remaining args go on the stack, and the callee cleans up the stack.
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
-                 is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
+                 is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
                  is_sret: bool,
                  is_fastcall: bool) {
@@ -4175,7 +4123,7 @@ impl ArchCodegen for I686Codegen {
                     IntrinsicOp::Crc32_8  => "crc32b %cl, %eax",
                     IntrinsicOp::Crc32_16 => "crc32w %cx, %eax",
                     IntrinsicOp::Crc32_32 => "crc32l %ecx, %eax",
-                    _ => unreachable!(),
+                    _ => unreachable!("CRC32 dispatch matched non-CRC32 op: {:?}", op),
                 };
                 self.state.emit_fmt(format_args!("    {}", inst));
                 self.state.reg_cache.invalidate_acc();
@@ -4334,7 +4282,7 @@ impl ArchCodegen for I686Codegen {
                         IntrinsicOp::Aesenclast128 => "aesenclast",
                         IntrinsicOp::Aesdec128 => "aesdec",
                         IntrinsicOp::Aesdeclast128 => "aesdeclast",
-                        _ => unreachable!(),
+                        _ => unreachable!("AES-NI dispatch matched non-AES op: {:?}", op),
                     };
                     self.emit_sse_binary_128(dptr, args, inst);
                 }
@@ -4876,7 +4824,7 @@ impl ArchCodegen for I686Codegen {
                 IrCmpOp::Sle => "setbe",  // unsigned below or equal
                 IrCmpOp::Sgt => "seta",   // unsigned above
                 IrCmpOp::Sge => "setae",  // unsigned above or equal
-                _ => unreachable!(),
+                _ => unreachable!("signed i64 low-word cmp got non-signed op: {:?}", op),
             };
             emit!(self.state, "    {} %al", low_set);
             emit!(self.state, "    jmp {}", label_done);
@@ -4888,7 +4836,7 @@ impl ArchCodegen for I686Codegen {
                 IrCmpOp::Sle => "setl",   // if high < high, result is true (<=)
                 IrCmpOp::Sgt => "setg",
                 IrCmpOp::Sge => "setg",   // if high > high, result is true (>=)
-                _ => unreachable!(),
+                _ => unreachable!("signed i64 high-word cmp got non-signed op: {:?}", op),
             };
             emit!(self.state, "    {} %al", high_set);
 
@@ -4909,7 +4857,7 @@ impl ArchCodegen for I686Codegen {
                 IrCmpOp::Ule => "setbe",
                 IrCmpOp::Ugt => "seta",
                 IrCmpOp::Uge => "setae",
-                _ => unreachable!(),
+                _ => unreachable!("unsigned i64 cmp got non-unsigned op: {:?}", op),
             };
             emit!(self.state, "    {} %al", set_instr);
         }

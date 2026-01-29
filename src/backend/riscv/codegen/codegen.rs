@@ -2890,7 +2890,7 @@ impl ArchCodegen for RiscvCodegen {
                 IrType::U8 => self.state.emit("    lbu t0, 0(t0)"),
                 IrType::I16 => self.state.emit("    lh t0, 0(t0)"),
                 IrType::U16 => self.state.emit("    lhu t0, 0(t0)"),
-                _ => unreachable!(),
+                _ => unreachable!("non-subword type in subword atomic load: {:?}", ty),
             }
             if matches!(ordering, AtomicOrdering::Acquire | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst) {
                 self.state.emit("    fence r, rw");
@@ -2923,7 +2923,7 @@ impl ArchCodegen for RiscvCodegen {
             match ty {
                 IrType::I8 | IrType::U8 => self.state.emit("    sb t1, 0(t0)"),
                 IrType::I16 | IrType::U16 => self.state.emit("    sh t1, 0(t0)"),
-                _ => unreachable!(),
+                _ => unreachable!("non-subword type in subword atomic store: {:?}", ty),
             }
             if matches!(ordering, AtomicOrdering::SeqCst) {
                 self.state.emit("    fence rw, rw");
@@ -3335,7 +3335,7 @@ impl ArchCodegen for RiscvCodegen {
             IrCmpOp::Sgt | IrCmpOp::Sge => self.state.emit("    slt t0, t6, t4"),
             IrCmpOp::Ult | IrCmpOp::Ule => self.state.emit("    sltu t0, t4, t6"),
             IrCmpOp::Ugt | IrCmpOp::Uge => self.state.emit("    sltu t0, t6, t4"),
-            _ => unreachable!(),
+            _ => unreachable!("i128 ordered cmp (high word) got equality op: {:?}", op),
         }
         self.state.emit_fmt(format_args!("    j {}", done));
         self.state.emit_fmt(format_args!("{}:", hi_equal));
@@ -3350,7 +3350,7 @@ impl ArchCodegen for RiscvCodegen {
                 self.state.emit("    sltu t0, t3, t5");
                 self.state.emit("    xori t0, t0, 1");
             }
-            _ => unreachable!(),
+            _ => unreachable!("i128 ordered cmp (low word) got equality op: {:?}", op),
         }
         self.state.emit_fmt(format_args!("{}:", done));
     }

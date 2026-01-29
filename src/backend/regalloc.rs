@@ -252,7 +252,7 @@ pub fn allocate_registers(
                 Instruction::GetElementPtr { dest, .. } => {
                     eligible.insert(dest.0);
                 }
-                Instruction::Copy { dest, src } => {
+                Instruction::Copy { dest, src: _ } => {
                     // Copy instructions are eligible unless the source produces a
                     // non-GPR value (float, i128, or i64 on 32-bit). We check both
                     // constant types and propagated non-GPR status from Value sources.

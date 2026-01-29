@@ -1024,7 +1024,7 @@ impl X86Codegen {
                     IntrinsicOp::Crc32_16 => "crc32w %cx, %eax",
                     IntrinsicOp::Crc32_32 => "crc32l %ecx, %eax",
                     IntrinsicOp::Crc32_64 => "crc32q %rcx, %rax",
-                    _ => unreachable!(),
+                    _ => unreachable!("CRC32 dispatch matched non-CRC32 op: {:?}", op),
                 };
                 self.state.emit_fmt(format_args!("    {}", inst));
                 if let Some(d) = dest {
@@ -1094,7 +1094,7 @@ impl X86Codegen {
                         IntrinsicOp::Aesenclast128 => "aesenclast",
                         IntrinsicOp::Aesdec128 => "aesdec",
                         IntrinsicOp::Aesdeclast128 => "aesdeclast",
-                        _ => unreachable!(),
+                        _ => unreachable!("AES-NI dispatch matched non-AES op: {:?}", op),
                     };
                     self.emit_sse_binary_128(dptr, args, inst);
                 }
@@ -1913,7 +1913,7 @@ impl ArchCodegen for X86Codegen {
         let seg_prefix = match seg {
             AddressSpace::SegGs => "%gs:",
             AddressSpace::SegFs => "%fs:",
-            AddressSpace::Default => unreachable!(),
+            AddressSpace::Default => unreachable!("segment-prefixed op called with default address space"),
         };
         // Load the pointer (address) into %rcx
         self.emit_load_operand(&Operand::Value(*ptr));
@@ -1931,7 +1931,7 @@ impl ArchCodegen for X86Codegen {
         let seg_prefix = match seg {
             AddressSpace::SegGs => "%gs:",
             AddressSpace::SegFs => "%fs:",
-            AddressSpace::Default => unreachable!(),
+            AddressSpace::Default => unreachable!("segment-prefixed op called with default address space"),
         };
         let load_instr = Self::mov_load_for_type(ty);
         let dest_reg = Self::load_dest_reg(ty);
@@ -1946,7 +1946,7 @@ impl ArchCodegen for X86Codegen {
         let seg_prefix = match seg {
             AddressSpace::SegGs => "%gs:",
             AddressSpace::SegFs => "%fs:",
-            AddressSpace::Default => unreachable!(),
+            AddressSpace::Default => unreachable!("segment-prefixed op called with default address space"),
         };
         // Load value into %rax, then save to %rdx
         self.emit_load_operand(val);
@@ -1966,7 +1966,7 @@ impl ArchCodegen for X86Codegen {
         let seg_prefix = match seg {
             AddressSpace::SegGs => "%gs:",
             AddressSpace::SegFs => "%fs:",
-            AddressSpace::Default => unreachable!(),
+            AddressSpace::Default => unreachable!("segment-prefixed op called with default address space"),
         };
         self.emit_load_operand(val);
         let store_instr = Self::mov_store_for_type(ty);
@@ -2560,7 +2560,7 @@ impl ArchCodegen for X86Codegen {
                     IrBinOp::Add => "add",
                     IrBinOp::Sub => "sub",
                     IrBinOp::Mul => "imul",
-                    _ => unreachable!(),
+                    _ => unreachable!("Add/Sub/Mul arm matched unexpected op: {:?}", op),
                 };
                 if use_32bit {
                     self.state.emit_fmt(format_args!("    {}l %ecx, %eax", mnem));
@@ -4347,7 +4347,7 @@ impl ArchCodegen for X86Codegen {
             IrCmpOp::Sgt | IrCmpOp::Sge => "setg",
             IrCmpOp::Ult | IrCmpOp::Ule => "setb",
             IrCmpOp::Ugt | IrCmpOp::Uge => "seta",
-            _ => unreachable!(),
+            _ => unreachable!("i128 ordered cmp got equality op: {:?}", op),
         };
         self.state.emit_fmt(format_args!("    {} %r8b", set_hi));
         self.state.emit("    jne 1f");
@@ -4358,7 +4358,7 @@ impl ArchCodegen for X86Codegen {
             IrCmpOp::Sle | IrCmpOp::Ule => "setbe",
             IrCmpOp::Sgt | IrCmpOp::Ugt => "seta",
             IrCmpOp::Sge | IrCmpOp::Uge => "setae",
-            _ => unreachable!(),
+            _ => unreachable!("i128 ordered cmp (low word) got equality op: {:?}", op),
         };
         self.state.emit_fmt(format_args!("    {} %r8b", set_lo));
         self.state.emit("1:");

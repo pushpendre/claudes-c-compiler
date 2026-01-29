@@ -51,7 +51,7 @@ constant folding. This enables cfg_simplify to fold branches guarded by
 
 ### Main loop (up to 3 iterations)
 
-CFG simplify -> copy prop -> [div_by_const on iter 0] -> narrow -> simplify -> constant fold -> GVN/CSE -> LICM -> [IVSR on iter 0] -> if-convert -> copy prop -> DCE -> CFG simplify -> IPCP
+CFG simplify -> copy prop -> [div_by_const on iter 0, non-i686] -> narrow -> simplify -> constant fold -> GVN/CSE + LICM + [IVSR on iter 0] -> if-convert -> copy prop -> DCE -> CFG simplify -> IPCP
 
 Per-function dirty tracking avoids re-processing unchanged functions. Per-pass
 skip tracking uses a dependency graph to skip passes when no upstream pass created

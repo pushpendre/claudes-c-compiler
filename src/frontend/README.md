@@ -17,7 +17,7 @@ Source text -> Preprocessor -> Lexer -> Parser -> Sema -> Typed AST
 
 - The preprocessor runs as a text-to-text pass before lexing (not integrated into the lexer). This simplifies the architecture but means we lose original source locations within macros.
 - The parser uses recursive descent (no parser generator), making error recovery and GCC extension support straightforward.
-- Sema is permissive -- it produces warnings but does not reject invalid programs. Type inference is split between sema (via `ExprTypeChecker` and `SemaConstEval`) and IR lowering.
+- Sema is mostly permissive -- it produces warnings and some errors (e.g., non-integer switch expressions) but does not reject most invalid programs. Type inference is split between sema (via `ExprTypeChecker` and `SemaConstEval`) and IR lowering.
 
 ## What's Missing
 

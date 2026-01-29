@@ -10,6 +10,14 @@ use super::preprocessor::Preprocessor;
 /// Prevents infinite inclusion loops in files without `#pragma once`.
 const MAX_INCLUDE_DEPTH: usize = 200;
 
+/// Read a C source file, tolerating non-UTF-8 content.
+/// Valid UTF-8 files are returned as-is. Non-UTF-8 bytes are encoded as PUA
+/// code points which the lexer decodes back to raw bytes.
+fn read_c_source_file(path: &Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(crate::common::encoding::bytes_to_string(bytes))
+}
+
 /// Normalize a computed include path by collapsing anti-paste spaces around '/'.
 ///
 /// During macro expansion, the preprocessor inserts a space between adjacent '/'
@@ -86,7 +94,7 @@ impl Preprocessor {
             }
 
             // Read the file
-            match std::fs::read_to_string(&resolved_path) {
+            match read_c_source_file(&resolved_path) {
                 Ok(content) => {
                     // Push onto include stack
                     self.include_stack.push(resolved_path.clone());
@@ -196,7 +204,7 @@ impl Preprocessor {
             }
 
             // Read and preprocess the file
-            match std::fs::read_to_string(&resolved_path) {
+            match read_c_source_file(&resolved_path) {
                 Ok(content) => {
                     self.include_stack.push(resolved_path.clone());
 

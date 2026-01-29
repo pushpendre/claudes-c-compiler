@@ -652,7 +652,7 @@ fn thread_jump_chains_with_map(func: &mut IrFunction, label_to_idx: &FxHashMap<B
             if let Terminator::Branch(target) = &block.terminator {
                 (block.label, *target)
             } else {
-                unreachable!()
+                unreachable!("block was filtered to have Branch terminator")
             }
         })
         .collect();

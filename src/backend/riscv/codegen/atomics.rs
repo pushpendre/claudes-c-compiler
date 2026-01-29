@@ -70,7 +70,7 @@ impl RiscvCodegen {
         match ty {
             IrType::I8 | IrType::U8 => 8,
             IrType::I16 | IrType::U16 => 16,
-            _ => unreachable!(),
+            _ => unreachable!("subword_bits called with non-subword type: {:?}", ty),
         }
     }
 

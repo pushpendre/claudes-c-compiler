@@ -463,7 +463,7 @@ impl Lowerer {
             BinOp::Sub => self.lower_complex_sub(op_lhs_ptr, rhs_ptr, &result_ct),
             BinOp::Mul => self.lower_complex_mul(op_lhs_ptr, rhs_ptr, &result_ct),
             BinOp::Div => self.lower_complex_div(op_lhs_ptr, rhs_ptr, &result_ct),
-            _ => unreachable!(),
+            _ => unreachable!("unsupported complex compound assignment op: {:?}", op),
         };
 
         let store_ptr = if result_ct != *lhs_ct {
@@ -682,7 +682,7 @@ impl Lowerer {
     fn lower_vector_assign(&mut self, lhs: &Expr, rhs: &Expr, lhs_ct: &CType) -> Operand {
         let (_, total_size) = match lhs_ct {
             CType::Vector(_, total_size) => ((), *total_size),
-            _ => unreachable!(),
+            _ => unreachable!("lower_vector_assign called with non-vector type: {:?}", lhs_ct),
         };
         let lhs_ptr = self.lower_expr(lhs);
         let lhs_ptr_val = self.operand_to_value(lhs_ptr);
@@ -817,7 +817,7 @@ impl Lowerer {
         let elem_size = elem_ct.size();
         let total_size = match vec_ct {
             CType::Vector(_, ts) => *ts,
-            _ => unreachable!(),
+            _ => unreachable!("lower_vector_binary_op called with non-vector type: {:?}", vec_ct),
         };
         let is_unsigned = elem_ct.is_unsigned();
         let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);

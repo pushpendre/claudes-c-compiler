@@ -565,7 +565,7 @@ impl Lowerer {
                     BuiltinIntrinsic::X86Psrlqi128 => IntrinsicOp::Psrlqi128,
                     BuiltinIntrinsic::X86Pshufd128 => IntrinsicOp::Pshufd128,
                     BuiltinIntrinsic::X86Loadldi128 => IntrinsicOp::Loadldi128,
-                    _ => unreachable!(),
+                    _ => unreachable!("SSE128 dispatch matched non-SSE128 intrinsic: {:?}", intrinsic),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 // Allocate 16-byte stack slot for result
@@ -608,7 +608,7 @@ impl Lowerer {
                     BuiltinIntrinsic::X86Crc32_16 => IntrinsicOp::Crc32_16,
                     BuiltinIntrinsic::X86Crc32_32 => IntrinsicOp::Crc32_32,
                     BuiltinIntrinsic::X86Crc32_64 => IntrinsicOp::Crc32_64,
-                    _ => unreachable!(),
+                    _ => unreachable!("CRC32 dispatch matched non-CRC32 intrinsic: {:?}", intrinsic),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let dest_val = self.fresh_value();

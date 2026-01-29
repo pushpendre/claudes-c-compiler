@@ -206,7 +206,7 @@ impl ArmCodegen {
                     IntrinsicOp::Crc32_16 => ("w9", "crc32ch w9, w9, w0"),
                     IntrinsicOp::Crc32_32 => ("w9", "crc32cw w9, w9, w0"),
                     IntrinsicOp::Crc32_64 => ("x9", "crc32cx w9, w9, x0"),
-                    _ => unreachable!(),
+                    _ => unreachable!("CRC32 dispatch matched non-CRC32 op: {:?}", op),
                 };
                 self.operand_to_x0(&args[0]);
                 self.state.emit_fmt(format_args!("    mov {}, {}", save_reg, if is_64 { "x0" } else { "w0" }));

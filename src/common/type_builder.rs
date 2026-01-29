@@ -234,7 +234,7 @@ pub fn build_full_ctype(
                         let (params, variadic) = match &derived[i + 1] {
                             DerivedDeclarator::FunctionPointer(p, v)
                             | DerivedDeclarator::Function(p, v) => (p, *v),
-                            _ => unreachable!(),
+                            _ => unreachable!("expected FunctionPointer/Function declarator after Pointer"),
                         };
                         let param_types = convert_param_decls_to_ctypes(ctx, params);
                         let func_type = CType::Function(Box::new(FunctionType {

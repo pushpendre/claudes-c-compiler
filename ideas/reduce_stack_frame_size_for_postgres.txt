@@ -12,7 +12,7 @@ Root causes:
 Remaining fixes:
 1. Use 4-byte slots for i32 and smaller types (HIGH IMPACT)
    - Change slot_size computation in calculate_stack_space_common
-   - Requires changes to store/load paths in all 3 backends
+   - Requires changes to store/load paths in all 4 backends
    - Could reduce frame sizes by ~40%
 
 2. Skip slot allocation for single-use values consumed immediately (HIGH IMPACT)
@@ -20,4 +20,4 @@ Remaining fixes:
      need a stack slot (stays in accumulator register)
    - Could eliminate 30-50% of slots
 
-Note: Caller-saved register allocation is now done on all three backends.
+Note: Caller-saved register allocation is now done on all four backends.
