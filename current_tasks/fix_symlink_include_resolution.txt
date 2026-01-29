@@ -1,0 +1,18 @@
+Task: Fix #include resolution through symlinks to match GCC behavior
+
+Status: in_progress
+
+Problem: The preprocessor used std::fs::canonicalize when resolving #include "..."
+paths, which follows symlinks. This meant that when a source file was accessed
+through a symlink (common in build systems like exim), included headers were
+searched relative to the symlink TARGET's directory instead of the symlink's
+directory.
+
+Example: If build-dir/local_scan.h -> ../src/local_scan.h includes "config.h",
+our compiler searched in ../src/ (wrong), while GCC searches in build-dir/ (correct).
+
+Fix: Replace canonicalize with make_absolute (absolute path without resolving
+symlinks) in resolve_include_path, resolve_include_next_path, and set_filename.
+Keep canonicalize only for comparison operations (include_next same-file detection).
+
+This fixes exim compilation with ccc-i686 (and all architectures).
