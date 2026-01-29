@@ -1,0 +1,8 @@
+Refactoring functions with excessive parameters (code quality cleanup item #2)
+
+Target functions:
+1. parse_declaration_rest (22 params) -> pass DeclAttributes struct + alignment struct
+2. resolve_type_flags (16 boolean params) -> pass TypeSpecFlags struct
+3. parse_function_def (11 params) -> pass DeclAttributes struct
+
+These are the two worst "god function signature" code smells in the codebase.
