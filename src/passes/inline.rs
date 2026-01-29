@@ -329,15 +329,26 @@ pub fn run(module: &mut IrModule) -> usize {
                     // use the normal budget (budget_remaining). This ensures they
                     // don't consume the always_inline budget.
                     if callee_data.is_always_inline {
-                        // __attribute__((always_inline)) is a C semantic requirement.
-                        // These functions MUST always be inlined regardless of budget.
-                        // Not inlining them causes section mismatch errors in the
-                        // kernel (e.g., idle_init in .text calling fork_idle in
-                        // .init.text, or __calc_tpm2_event_size calling early_memremap
-                        // in .init.text). GCC always inlines these unconditionally.
+                        // always_inline functions MUST be inlined unconditionally.
+                        // This is a C semantic requirement: __attribute__((always_inline))
+                        // means the compiler must always inline the function. Not doing
+                        // so causes:
+                        // 1. Section mismatch errors: standalone always_inline bodies
+                        //    in .text reference .init.text symbols (e.g., idle_init
+                        //    referencing fork_idle in the kernel's smpboot.c)
+                        // 2. Linker errors: dead code elimination depends on inlining
+                        //    chains being complete (e.g., system_supports_sve() ->
+                        //    alternative_has_cap_unlikely() -> cpucap_is_possible()
+                        //    must all be inlined to constant-fold away references to
+                        //    undefined symbols like sve_load_state when CONFIG_ARM64_SVE
+                        //    is not set)
+                        // 3. Incorrect codegen: __builtin_constant_p depends on arguments
+                        //    becoming visible as constants after inlining
                         //
-                        // The always_inline budget only limits non-always_inline
-                        // callees that use the relaxed path (exceeds_normal_limits).
+                        // The always_inline budget is still consumed for accounting
+                        // purposes (to limit non-always_inline inlining when the caller
+                        // grows large), but it does NOT prevent always_inline functions
+                        // from being inlined.
                     } else {
                         // Non-always_inline callees use budget_remaining
                         // regardless of whether they exceed normal limits.

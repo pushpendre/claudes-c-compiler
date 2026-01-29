@@ -172,6 +172,77 @@ fn is_side_effect_free(block: &BasicBlock) -> bool {
     true
 }
 
+/// Check if a condition operand is a known constant or can be trivially resolved
+/// to a constant within the block. When the condition is constant, the branch
+/// should be folded by cfg_simplify rather than converted to a Select by
+/// if_convert. Converting a constant-condition branch to Select delays dead
+/// code elimination: the Select needs additional optimization iterations
+/// (simplify + constfold + cfg_simplify) to fold away, and if the diminishing-
+/// returns heuristic terminates the optimization loop early, dead code paths
+/// (e.g., kernel's conditional calls to restore_tpidr2_context guarded by
+/// system_supports_sme() which returns false) survive to the final output.
+fn is_constant_condition(block: &BasicBlock, cond: &Operand) -> bool {
+    match cond {
+        Operand::Const(_) => true,
+        Operand::Value(v) => {
+            // Check if the value is defined as a constant Copy, or as a Cmp/Select
+            // where all operands are constants, within the same block.
+            for inst in &block.instructions {
+                match inst {
+                    Instruction::Copy { dest, src: Operand::Const(_) } if *dest == *v => {
+                        return true;
+                    }
+                    Instruction::Cmp { dest, lhs, rhs, .. } if *dest == *v => {
+                        let lhs_const = matches!(lhs, Operand::Const(_)) || is_value_const_in_block(block, lhs);
+                        let rhs_const = matches!(rhs, Operand::Const(_)) || is_value_const_in_block(block, rhs);
+                        if lhs_const && rhs_const {
+                            return true;
+                        }
+                    }
+                    Instruction::Select { dest, true_val, false_val, .. } if *dest == *v => {
+                        // Select(cond, x, x) where both arms are the same constant
+                        if same_value_or_both_zero(true_val, false_val) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Check if an operand is a constant within the block (either directly or via Copy).
+fn is_value_const_in_block(block: &BasicBlock, op: &Operand) -> bool {
+    match op {
+        Operand::Const(_) => true,
+        Operand::Value(v) => {
+            for inst in &block.instructions {
+                if let Instruction::Copy { dest, src: Operand::Const(_) } = inst {
+                    if *dest == *v {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Check if two operands are the same value or both integer-zero constants.
+/// Used to detect Select(cond, x, x) patterns where the result is the same
+/// regardless of the condition, making the condition effectively constant.
+fn same_value_or_both_zero(a: &Operand, b: &Operand) -> bool {
+    match (a, b) {
+        (Operand::Const(ca), Operand::Const(cb)) => {
+            ca.to_i64() == Some(0) && cb.to_i64() == Some(0)
+        }
+        (Operand::Value(va), Operand::Value(vb)) => va.0 == vb.0,
+        _ => false,
+    }
+}
+
 /// Detect a diamond pattern starting from a block with a CondBranch terminator.
 fn detect_diamond(
     func: &IrFunction,
@@ -188,6 +259,12 @@ fn detect_diamond(
         }
         _ => return None,
     };
+
+    // Don't convert branches with constant conditions to Select.
+    // cfg_simplify will fold these more efficiently (single pass vs multi-iteration).
+    if is_constant_condition(pred_block, cond) {
+        return None;
+    }
 
     let true_idx = *label_to_idx.get(true_label)?;
     let false_idx = *label_to_idx.get(false_label)?;
@@ -342,6 +419,12 @@ fn detect_triangle(
         }
         _ => return None,
     };
+
+    // Don't convert branches with constant conditions to Select.
+    // cfg_simplify will fold these more efficiently (single pass vs multi-iteration).
+    if is_constant_condition(pred_block, cond) {
+        return None;
+    }
 
     let true_idx = *label_to_idx.get(true_label)?;
     let false_idx = *label_to_idx.get(false_label)?;

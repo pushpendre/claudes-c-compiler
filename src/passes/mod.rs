@@ -292,6 +292,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
 
     for iter in 0..iterations {
         let mut total_changes = 0usize;
+        let mut total_changes_excl_dce = 0usize; // Exclude DCE for diminishing-returns check
         let mut cur_pass_changes = [0usize; NUM_PASSES];
 
         // Clear the changed accumulator for this iteration
@@ -337,6 +338,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("cfg_simplify1", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
             cur_pass_changes[0] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 2: Copy propagation
@@ -345,6 +347,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("copy_prop1", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
             cur_pass_changes[1] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 2a: Division-by-constant strength reduction (first iteration only).
@@ -359,7 +362,9 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
         // TODO: Re-enable once i686 has proper 64-bit arithmetic support, or implement
         // a 32-bit-aware variant that uses single-operand imull for mulhi.
         if iter == 0 && !disabled.contains("divconst") && !target.is_32bit() {
-            total_changes += timed_pass!("div_by_const", run_on_visited(module, &dirty, &mut changed, div_by_const::div_by_const_function));
+            let n = timed_pass!("div_by_const", run_on_visited(module, &dirty, &mut changed, div_by_const::div_by_const_function));
+            total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 2b: Integer narrowing
@@ -368,6 +373,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("narrow", run_on_visited(module, &dirty, &mut changed, narrow::narrow_function));
             cur_pass_changes[2] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 3: Algebraic simplification
@@ -376,6 +382,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("simplify", run_on_visited(module, &dirty, &mut changed, simplify::simplify_function));
             cur_pass_changes[3] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 4: Constant folding
@@ -386,6 +393,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("constfold", run_on_visited(module, &dirty, &mut changed, constant_fold::fold_function));
             cur_pass_changes[4] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phases 5-6a: GVN + LICM + IVSR with shared CFG analysis.
@@ -407,9 +415,12 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
                 );
                 cur_pass_changes[5] = gvn_n;
                 total_changes += gvn_n;
+                total_changes_excl_dce += gvn_n;
                 cur_pass_changes[6] = licm_n;
                 total_changes += licm_n;
+                total_changes_excl_dce += licm_n;
                 total_changes += ivsr_n;
+                total_changes_excl_dce += ivsr_n;
             }
         }
 
@@ -419,6 +430,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("if_convert", run_on_visited(module, &dirty, &mut changed, if_convert::if_convert_function));
             cur_pass_changes[7] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 8: Copy propagation again
@@ -430,14 +442,25 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("copy_prop2", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
             cur_pass_changes[8] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 9: Dead code elimination
         // Upstream: gvn, licm, if_convert, copy_prop2 (produced dead instructions)
+        // Note: DCE changes are excluded from the diminishing-returns comparison
+        // (total_changes_excl_dce) because DCE is a cleanup pass that removes dead
+        // instructions. Its large change count (often 5000+ in iteration 0) inflates
+        // iter0_total_changes, and by removing instructions, DCE actually reduces
+        // the work subsequent passes can do in later iterations. This combination
+        // causes the diminishing-returns heuristic to exit too early, preventing
+        // the optimizer from completing multi-iteration constant propagation chains
+        // (e.g., kernel's cpucap_is_possible switch folding through inlined
+        // system_supports_sme -> alternative_has_cap_unlikely -> cpucap_is_possible).
         if !dis_dce && should_run!(9, 5, 6, 7, 8) {
             let n = timed_pass!("dce", run_on_visited(module, &dirty, &mut changed, dce::eliminate_dead_code));
             cur_pass_changes[9] = n;
             total_changes += n;
+            // Intentionally NOT added to total_changes_excl_dce
         }
 
         // Phase 10: CFG simplification again
@@ -446,6 +469,7 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
             let n = timed_pass!("cfg_simplify2", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
             cur_pass_changes[10] = n;
             total_changes += n;
+            total_changes_excl_dce += n;
         }
 
         // Phase 10.5: Interprocedural constant propagation (IPCP).
@@ -459,10 +483,11 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
                 changed.iter_mut().for_each(|c| *c = true);
             }
             total_changes += ipcp_changes;
+            total_changes_excl_dce += ipcp_changes;
         }
 
         if iter == 0 {
-            iter0_total_changes = total_changes;
+            iter0_total_changes = total_changes_excl_dce;
         }
 
         // Early exit: if no passes changed anything, additional iterations are useless.
@@ -477,15 +502,27 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend
         // less than 5% of the first iteration's output saves one full pipeline
         // iteration with negligible impact on optimization quality.
         //
+        // We use total_changes_excl_dce for this comparison because DCE is a
+        // cleanup pass whose large change count (removing dead instructions)
+        // inflates iter0's total and makes subsequent iterations look like
+        // diminishing returns even when they're still making meaningful progress.
+        // DCE also reduces the number of instructions available for other passes,
+        // naturally lowering their change counts in later iterations.
+        //
         // Exception: if IPCP made changes this iteration, always run another
         // iteration regardless of diminishing returns. IPCP changes (constant
         // argument propagation, dead call elimination) create opportunities for
         // constant folding, DCE, and CFG simplification that require a full pass
         // to clean up. Without this, dead code referencing undefined symbols
         // (like the kernel's convert_to_fxsr) would survive.
+        // We require iter > 1 (at least 2 full iterations) because multi-step
+        // constant propagation chains (e.g., kernel's switch folding through
+        // inlined cpucap_is_possible -> alternative_has_cap_unlikely) need at
+        // least 2 iterations to complete: iter0 for initial folding, iter1 for
+        // propagating results through the control flow.
         const DIMINISHING_RETURNS_FACTOR: usize = 20; // 1/20 = 5% threshold
-        if iter > 0 && ipcp_changes == 0 && iter0_total_changes > 0
-            && total_changes * DIMINISHING_RETURNS_FACTOR < iter0_total_changes
+        if iter > 1 && ipcp_changes == 0 && iter0_total_changes > 0
+            && total_changes_excl_dce * DIMINISHING_RETURNS_FACTOR < iter0_total_changes
         {
             break;
         }

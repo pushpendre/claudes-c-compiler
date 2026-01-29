@@ -134,6 +134,12 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
         }
     }
 
+    // Build a global value definition map for cross-block resolution.
+    // Maps Value -> (block_index, instruction_index) for quick lookup.
+    // This enables resolving values defined in other blocks, which is critical
+    // for eliminating dead code after inlining always_inline functions.
+    let global_val_map = build_global_value_map(func);
+
     // First pass: collect the folding decisions.
     // Each entry: (block_index, taken_target, not_taken_target, block_label)
     let mut folds: Vec<(usize, BlockId, BlockId, BlockId)> = Vec::new();
@@ -151,22 +157,41 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
                     if resolved.is_some() {
                         resolved.map(|c| is_const_nonzero(&c))
                     } else {
-                        // If not found in this block, check if this block has a single
-                        // unconditional predecessor. The value may be defined there
-                        // (e.g., after if_convert creates a Select in the predecessor
-                        // that cfg_simplify later resolves to a constant).
-                        single_pred.get(&block.label)
-                            .and_then(|pred_label| label_to_idx.get(pred_label))
-                            .and_then(|&pred_idx| {
-                                let pred_block = &func.blocks[pred_idx];
-                                // Only look at predecessor if it unconditionally branches here
-                                if matches!(&pred_block.terminator, Terminator::Branch(t) if *t == block.label) {
-                                    resolve_value_to_const_in_block(pred_block, *v)
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|c| is_const_nonzero(&c))
+                        // If not found in this block, walk the single-predecessor chain
+                        // (blocks with exactly one predecessor that unconditionally branches
+                        // here). This handles cases where the value definition is multiple
+                        // blocks away after inlining and partial optimization.
+                        let mut current_label = block.label;
+                        let mut resolved_from_pred = None;
+                        for _ in 0..8 {
+                            let pred_label = match single_pred.get(&current_label) {
+                                Some(l) => *l,
+                                None => break,
+                            };
+                            let pred_idx = match label_to_idx.get(&pred_label) {
+                                Some(&i) => i,
+                                None => break,
+                            };
+                            let pred_block = &func.blocks[pred_idx];
+                            if !matches!(&pred_block.terminator, Terminator::Branch(t) if *t == current_label) {
+                                break;
+                            }
+                            if let Some(c) = resolve_value_to_const_in_block(pred_block, *v) {
+                                resolved_from_pred = Some(c);
+                                break;
+                            }
+                            current_label = pred_label;
+                        }
+                        // If still not resolved, try global cross-block resolution.
+                        // This is needed for the kernel's alternative_has_cap_unlikely()
+                        // pattern: after switch folding and phi simplification, the
+                        // cpucap_is_possible result (0 for impossible capabilities) may
+                        // be defined in a non-predecessor block, flowing through Cmp/Cast
+                        // chains in intermediate blocks.
+                        if resolved_from_pred.is_none() {
+                            resolved_from_pred = resolve_value_globally(func, *v, &global_val_map, 0);
+                        }
+                        resolved_from_pred.map(|c| is_const_nonzero(&c))
                     }
                 }
             };
@@ -291,6 +316,119 @@ fn fold_constant_switches_with_map(func: &mut IrFunction, label_to_idx: &FxHashM
     }
 
     count
+}
+
+/// Build a map from Value -> (block_index, instruction_index) for the entire function.
+/// This allows resolve_value_globally to find where a value is defined across blocks.
+fn build_global_value_map(func: &IrFunction) -> FxHashMap<Value, (usize, usize)> {
+    let mut map = FxHashMap::default();
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for (ii, inst) in block.instructions.iter().enumerate() {
+            let dest = match inst {
+                Instruction::Copy { dest, .. } |
+                Instruction::Phi { dest, .. } |
+                Instruction::Cmp { dest, .. } |
+                Instruction::Cast { dest, .. } |
+                Instruction::Select { dest, .. } |
+                Instruction::BinOp { dest, .. } |
+                Instruction::UnaryOp { dest, .. } => Some(*dest),
+                _ => None,
+            };
+            if let Some(d) = dest {
+                map.insert(d, (bi, ii));
+            }
+        }
+    }
+    map
+}
+
+/// Resolve a Value to a constant by following its definition chain across blocks.
+/// This handles chains like: Phi → Copy → Cmp(Ne, Cast(Phi), 0) where the inner
+/// Phi has collapsed to a constant but the outer chain spans multiple blocks.
+///
+/// This is critical for the kernel's `alternative_has_cap_unlikely()` pattern:
+/// after inlining and switch folding, `cpucap_is_possible(58)` returns 0, but
+/// the result flows through Cmp/Cast/Copy chains in separate blocks before
+/// reaching the CondBranch that guards the asm goto block.
+fn resolve_value_globally(func: &IrFunction, v: Value, val_map: &FxHashMap<Value, (usize, usize)>, depth: usize) -> Option<IrConst> {
+    if depth > 16 {
+        return None;
+    }
+    let &(bi, ii) = val_map.get(&v)?;
+    let inst = &func.blocks[bi].instructions[ii];
+    match inst {
+        Instruction::Copy { src: Operand::Const(c), .. } => Some(*c),
+        Instruction::Copy { src: Operand::Value(sv), .. } => {
+            resolve_value_globally(func, *sv, val_map, depth + 1)
+        }
+        Instruction::Phi { incoming, .. } => {
+            // All incoming must be the same constant
+            let mut common_val: Option<i64> = None;
+            let mut first_const: Option<IrConst> = None;
+            for (op, _) in incoming {
+                let c = match op {
+                    Operand::Const(c) => Some(*c),
+                    Operand::Value(pv) => resolve_value_globally(func, *pv, val_map, depth + 1),
+                };
+                match c {
+                    Some(c) => {
+                        if let Some(ci) = c.to_i64() {
+                            if let Some(prev) = common_val {
+                                if prev != ci { return None; }
+                            } else {
+                                common_val = Some(ci);
+                                first_const = Some(c);
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                    None => return None,
+                }
+            }
+            first_const
+        }
+        Instruction::Cmp { op, lhs, rhs, ty, .. } => {
+            let l = resolve_operand_globally(func, lhs, val_map, depth + 1)?;
+            let r = resolve_operand_globally(func, rhs, val_map, depth + 1)?;
+            let l = truncate_to_cmp_type(l, *ty);
+            let r = truncate_to_cmp_type(r, *ty);
+            let result = match op {
+                IrCmpOp::Eq => l == r,
+                IrCmpOp::Ne => l != r,
+                IrCmpOp::Slt => l < r,
+                IrCmpOp::Sle => l <= r,
+                IrCmpOp::Sgt => l > r,
+                IrCmpOp::Sge => l >= r,
+                IrCmpOp::Ult => (l as u64) < (r as u64),
+                IrCmpOp::Ule => (l as u64) <= (r as u64),
+                IrCmpOp::Ugt => (l as u64) > (r as u64),
+                IrCmpOp::Uge => (l as u64) >= (r as u64),
+            };
+            Some(IrConst::I32(if result { 1 } else { 0 }))
+        }
+        Instruction::Cast { src: Operand::Const(c), .. } => Some(*c),
+        Instruction::Cast { src: Operand::Value(sv), .. } => {
+            resolve_value_globally(func, *sv, val_map, depth + 1)
+        }
+        Instruction::Select { cond, true_val, false_val, .. } => {
+            let cond_val = resolve_operand_globally(func, cond, val_map, depth + 1)?;
+            let chosen = if cond_val != 0 { true_val } else { false_val };
+            match chosen {
+                Operand::Const(c) => Some(*c),
+                Operand::Value(cv) => resolve_value_globally(func, *cv, val_map, depth + 1),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Resolve an operand to an i64 constant using global cross-block resolution.
+fn resolve_operand_globally(func: &IrFunction, op: &Operand, val_map: &FxHashMap<Value, (usize, usize)>, depth: usize) -> Option<i64> {
+    match op {
+        Operand::Const(c) => c.to_i64(),
+        Operand::Value(v) => resolve_value_globally(func, *v, val_map, depth)?.to_i64(),
+    }
 }
 
 /// Look through Copy, Phi, Cmp, and Select instructions in a block to resolve a Value to

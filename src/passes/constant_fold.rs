@@ -34,10 +34,12 @@ pub fn resolve_remaining_is_constant(module: &mut IrModule) {
         }
         for block in &mut func.blocks {
             for inst in &mut block.instructions {
-                if let Instruction::UnaryOp { dest, op: IrUnaryOp::IsConstant, .. } = inst {
+                if let Instruction::UnaryOp { dest, op: IrUnaryOp::IsConstant, src, .. } = inst {
+                    // Check if the operand is a constant - if so, resolve to 1 (true).
+                    let is_const = matches!(src, Operand::Const(_));
                     *inst = Instruction::Copy {
                         dest: *dest,
-                        src: Operand::Const(IrConst::I32(0)),
+                        src: Operand::Const(IrConst::I32(if is_const { 1 } else { 0 })),
                     };
                 }
             }
