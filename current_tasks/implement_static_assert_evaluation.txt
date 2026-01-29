@@ -1,0 +1,18 @@
+Implement _Static_assert / static_assert Evaluation
+=====================================================
+Status: in_progress
+
+The parser currently skips _Static_assert declarations entirely without
+evaluating the condition expression. This means _Static_assert(0, "fail")
+compiles silently when it should be a compile error.
+
+The kernel uses 988 static_assert() calls. While they happen to be all
+true (otherwise gcc would have caught them), missing this means our compiler
+doesn't catch type/size constraint violations.
+
+Plan:
+1. Parse _Static_assert(expr, "msg") properly at both file and block scope
+2. Evaluate the constant expression using eval_const_int_expr
+3. Emit a compile error if the expression is false (zero)
+4. Support C23 single-argument form: _Static_assert(expr)
+5. Remove the now-unnecessary static_assert preprocessor macro
