@@ -636,13 +636,9 @@ pub fn emit_inline_asm_common_impl(
     let num_gcc_operands = outputs.len() + inputs.len();
     let mut gcc_to_internal: Vec<usize> = Vec::with_capacity(num_gcc_operands);
     // Outputs: GCC %0..%N map to internal 0..N
-    for i in 0..outputs.len() {
-        gcc_to_internal.push(i);
-    }
+    gcc_to_internal.extend(0..outputs.len());
     // Explicit inputs (skip synthetic "+" inputs): GCC %N..%(N+K)
-    for i in num_plus..inputs.len() {
-        gcc_to_internal.push(outputs.len() + i);
-    }
+    gcc_to_internal.extend((num_plus..inputs.len()).map(|i| outputs.len() + i));
     // Synthetic "+" matching inputs at the end: GCC %(N+K)..%(N+K+P)
     // These are the implicit matching constraint inputs created by "+"
     // output constraints. Each matches the corresponding output operand's register.

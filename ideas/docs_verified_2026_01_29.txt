@@ -37,6 +37,14 @@ Verified Correct (no changes needed):
 - Testing commands in README are accurate
 - All 17 README.md files use consistent markdown formatting
 
+Fixes Applied (round 3, 2026-01-29):
+- README.md: test count updated from "~724" to "~736" directories
+- src/backend/README.md: clarified generate_function/instruction/terminator as
+  internal (private) helpers, only generate_module() is public
+- src/backend/README.md: clarified common.rs emit_section_group/emit_init_data/
+  emit_symbol_directives/emit_zero_global as internal helpers
+- src/common/README.md: clarified eval_const_binop_i128 is internal, not public API
+
 Known Stale (informational snapshots, not fixing):
 - ideas/fix_remaining_{arm,x86,riscv}_tests.txt: pass rate numbers from 2026-01-25
   likely improved since then, but these are historical snapshots

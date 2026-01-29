@@ -85,7 +85,7 @@ impl RiscvCodegen {
                 }
                 // Emit the immediate value directly
                 if let Some(imm) = op_imm_values[idx] {
-                    format!("{}", imm)
+                    imm.to_string()
                 } else {
                     "0".to_string()
                 }

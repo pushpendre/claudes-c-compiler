@@ -1,9 +1,0 @@
-Style cleanup: Rust idioms and documentation accuracy
-
-Fixing common Rust anti-patterns that experienced Rustaceans would flag:
-1. &Box<CType> parameters -> &CType (9 occurrences in struct_init.rs)
-2. format!("{}", x) -> x.to_string() (inline_asm files)
-3. Redundant .iter() in for loops (struct_init.rs, global_init_bytes.rs, etc.)
-4. Index loop -> .extend() (inline_asm.rs)
-5. Documentation accuracy fixes (test count, private function visibility in READMEs)
-6. Update docs verification tracking file

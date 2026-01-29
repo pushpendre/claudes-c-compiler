@@ -132,7 +132,7 @@ impl ArmCodegen {
         }
         // Check for immediate value - emit raw (GCC AArch64 behavior)
         if let Some(Some(imm)) = op_imm_values.get(idx) {
-            return format!("{}", imm);
+            return imm.to_string();
         }
         // Regular register operand
         Self::format_reg_static(&op_regs[idx], modifier)

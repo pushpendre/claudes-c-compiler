@@ -95,7 +95,20 @@ impl Parser {
         }
 
         let start = self.peek_span();
-        let type_spec = self.parse_type_specifier()?;
+        let type_spec = self.parse_type_specifier().or_else(|| {
+            // C89 implicit int: if no type specifier is found, check if this looks like
+            // a function definition with implicit int return type (e.g., "main() { ... }"
+            // or K&R-style "Proc_1(x) int x; { ... }").
+            // The pattern is: identifier followed by '('.
+            if let TokenKind::Identifier(_) = self.peek() {
+                if self.pos + 1 < self.tokens.len()
+                    && matches!(self.tokens[self.pos + 1].kind, TokenKind::LParen)
+                {
+                    return Some(TypeSpecifier::Int);
+                }
+            }
+            None
+        })?;
 
         // Capture constructor/destructor from type-level attributes
         let type_level_ctor = self.attrs.parsing_constructor();

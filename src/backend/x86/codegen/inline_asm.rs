@@ -152,7 +152,7 @@ impl X86Codegen {
                     } else {
                         result.push('%');
                         if let Some(m) = modifier { result.push(m); }
-                        result.push_str(&format!("{}", num));
+                        result.push_str(&num.to_string());
                     }
                 } else {
                     // Not a recognized pattern, emit as-is (e.g. %rax, %eax, etc.)
@@ -191,7 +191,7 @@ impl X86Codegen {
         if is_neg {
             // %n: emit the negated constant value (no $ prefix)
             if let Some(&imm) = has_imm {
-                result.push_str(&format!("{}", imm.wrapping_neg()));
+                result.push_str(&imm.wrapping_neg().to_string());
             } else {
                 // Fallback: emit as-is if not an immediate (shouldn't happen with correct usage)
                 result.push_str(&op_regs[idx]);
@@ -201,7 +201,7 @@ impl X86Codegen {
             if let Some(sym) = has_symbol {
                 result.push_str(sym);
             } else if let Some(imm) = has_imm {
-                result.push_str(&format!("{}", imm));
+                result.push_str(&imm.to_string());
             } else if op_is_memory[idx] {
                 // Memory operands with %P/%c emit their address directly.
                 // Without this, we'd fall through to the register branch
@@ -218,7 +218,7 @@ impl X86Codegen {
                 result.push_str(&format!("{}(%rip)", sym));
             } else if let Some(imm) = has_imm {
                 // Immediate: emit raw value (absolute address)
-                result.push_str(&format!("{}", imm));
+                result.push_str(&imm.to_string());
             } else if op_is_memory[idx] {
                 // Memory operand: emit its address
                 result.push_str(&op_mem_addrs[idx]);

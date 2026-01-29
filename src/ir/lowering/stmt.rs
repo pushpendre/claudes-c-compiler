@@ -787,7 +787,7 @@ impl Lowerer {
                 let elem_ir_ty = IrType::from_ctype(elem_ty);
                 let elem_size = self.resolve_ctype_size(elem_ty);
                 let mut ai = 0usize;
-                for item in items.iter() {
+                for item in items {
                     // Check for index designator: [idx]=val
                     if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
                         if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {

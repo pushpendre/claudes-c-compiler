@@ -844,7 +844,7 @@ impl Lowerer {
         elem_size: usize, elem_ir_ty: IrType, bytes: &mut [u8], field_offset: usize,
     ) {
         let mut ai = 0usize;
-        for sub_item in sub_items.iter() {
+        for sub_item in sub_items {
             if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
                 if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
                     ai = idx;
@@ -865,7 +865,7 @@ impl Lowerer {
         arr_size: usize, elem_size: usize, bytes: &mut [u8], field_offset: usize,
     ) {
         let mut ai = 0usize;
-        for sub_item in sub_items.iter() {
+        for sub_item in sub_items {
             if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
                 if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
                     ai = idx;

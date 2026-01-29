@@ -135,7 +135,7 @@ impl I686Codegen {
                     } else {
                         result.push('%');
                         if let Some(m) = modifier { result.push(m); }
-                        result.push_str(&format!("{}", num));
+                        result.push_str(&num.to_string());
                     }
                 } else {
                     // Not a recognized pattern (e.g., %eax, %ax, etc.)
@@ -172,7 +172,7 @@ impl I686Codegen {
 
         if is_neg {
             if let Some(&imm) = has_imm {
-                result.push_str(&format!("{}", imm.wrapping_neg()));
+                result.push_str(&imm.wrapping_neg().to_string());
             } else {
                 result.push_str(&op_regs[idx]);
             }
@@ -180,7 +180,7 @@ impl I686Codegen {
             if let Some(sym) = has_symbol {
                 result.push_str(sym);
             } else if let Some(imm) = has_imm {
-                result.push_str(&format!("{}", imm));
+                result.push_str(&imm.to_string());
             } else if op_is_memory[idx] {
                 result.push_str(&op_mem_addrs[idx]);
             } else {
@@ -190,7 +190,7 @@ impl I686Codegen {
             if let Some(sym) = has_symbol {
                 result.push_str(sym);
             } else if let Some(imm) = has_imm {
-                result.push_str(&format!("{}", imm));
+                result.push_str(&imm.to_string());
             } else if op_is_memory[idx] {
                 result.push_str(&op_mem_addrs[idx]);
             } else {

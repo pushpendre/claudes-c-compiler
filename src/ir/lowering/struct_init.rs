@@ -220,7 +220,7 @@ impl Lowerer {
         items: &[InitializerItem],
         item_idx: &mut usize,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
     ) {
@@ -262,7 +262,7 @@ impl Lowerer {
 
         // Continue consuming subsequent non-designated items for array
         // positions idx+1, idx+2, ... (C11 6.7.9p17)
-        let elem_is_bool = **elem_ty == CType::Bool;
+        let elem_is_bool = *elem_ty == CType::Bool;
         let mut ai = idx + 1;
         while ai < arr_size && *item_idx < items.len() {
             let next_item = &items[*item_idx];
@@ -287,11 +287,11 @@ impl Lowerer {
         &mut self,
         item: &InitializerItem,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         elem_offset: usize,
         after_first_idx: &[Designator],
     ) {
-        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
+        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty {
             let sub_layout = self.types.borrow_struct_layouts().get(&**key).cloned();
             if let Some(sub_layout) = sub_layout {
                 let sub_desigs: Vec<_> = after_first_idx.iter().cloned().collect();
@@ -309,11 +309,11 @@ impl Lowerer {
         &mut self,
         item: &InitializerItem,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         elem_offset: usize,
         remaining_index_desigs: &[Designator],
     ) {
-        if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty.as_ref() {
+        if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty {
             let inner_idx = remaining_index_desigs.iter().find_map(|d| {
                 if let Designator::Index(ref idx_expr) = d {
                     self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
@@ -345,7 +345,7 @@ impl Lowerer {
         &mut self,
         item: &InitializerItem,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         elem_offset: usize,
         elem_ir_ty: IrType,
     ) {
@@ -353,18 +353,18 @@ impl Lowerer {
             Initializer::Expr(e) => {
                 // Check for string literal targeting a char sub-array
                 if let Expr::StringLiteral(s, _) = e {
-                    if let CType::Array(inner, Some(_)) = elem_ty.as_ref() {
+                    if let CType::Array(inner, Some(_)) = elem_ty {
                         if matches!(inner.as_ref(), CType::Char | CType::UChar) {
                             self.emit_string_to_alloca(base_alloca, s, elem_offset);
                             return;
                         }
                     }
                 }
-                self.emit_init_expr_to_offset_bool(e, base_alloca, elem_offset, elem_ir_ty, **elem_ty == CType::Bool);
+                self.emit_init_expr_to_offset_bool(e, base_alloca, elem_offset, elem_ir_ty, *elem_ty == CType::Bool);
             }
             Initializer::List(sub_items) => {
                 // Handle list init for array element (e.g., .a[1] = {1,2,3})
-                match elem_ty.as_ref() {
+                match elem_ty {
                     CType::Array(inner_elem_ty, Some(inner_size)) => {
                         let inner_elem_size = self.resolve_ctype_size(inner_elem_ty);
                         let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
@@ -435,7 +435,7 @@ impl Lowerer {
         items: &[InitializerItem],
         item_idx: &mut usize,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
         array_start_idx: Option<usize>,
@@ -466,7 +466,7 @@ impl Lowerer {
         &mut self,
         sub_items: &[InitializerItem],
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
         elem_size: usize,
@@ -474,14 +474,14 @@ impl Lowerer {
         // Check for brace-wrapped string literal: {"hello"} for char[]
         if sub_items.len() == 1 && sub_items[0].designators.is_empty() {
             if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
-                if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                if matches!(elem_ty, CType::Char | CType::UChar) {
                     self.emit_string_to_alloca(base_alloca, s, field_offset);
                     return;
                 }
             }
         }
 
-        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
+        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty {
             // Array of structs
             let sub_layout = self.types.borrow_struct_layouts().get(&**key).cloned();
             if let Some(sub_layout) = sub_layout {
@@ -541,14 +541,14 @@ impl Lowerer {
         &mut self,
         sub_items: &[InitializerItem],
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
         elem_size: usize,
     ) {
-        let complex_ctype = elem_ty.as_ref().clone();
+        let complex_ctype = elem_ty.clone();
         let mut ai = 0usize;
-        for sub_item in sub_items.iter() {
+        for sub_item in sub_items {
             if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
                 if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {
                     ai = idx;
@@ -574,14 +574,14 @@ impl Lowerer {
         &mut self,
         sub_items: &[InitializerItem],
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
         elem_size: usize,
     ) {
-        let elem_is_bool = **elem_ty == CType::Bool;
+        let elem_is_bool = *elem_ty == CType::Bool;
         let mut ai = 0usize;
-        for sub_item in sub_items.iter() {
+        for sub_item in sub_items {
             if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
                 if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {
                     ai = idx;
@@ -596,7 +596,7 @@ impl Lowerer {
                 }
                 Initializer::List(inner_items) => {
                     // Handle braced sub-init for array elements (e.g., int arr[2][3] = {{1,2,3},{4,5,6}})
-                    if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty.as_ref() {
+                    if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty {
                         let inner_elem_ir_ty = IrType::from_ctype(inner_elem_ty);
                         let inner_is_bool = **inner_elem_ty == CType::Bool;
                         let inner_elem_size = self.resolve_ctype_size(inner_elem_ty);
@@ -629,7 +629,7 @@ impl Lowerer {
         items: &[InitializerItem],
         item_idx: &mut usize,
         base_alloca: Value,
-        elem_ty: &Box<CType>,
+        elem_ty: &CType,
         arr_size: usize,
         field_offset: usize,
         elem_size: usize,
@@ -637,14 +637,14 @@ impl Lowerer {
     ) {
         // String literal for char array field
         if let Expr::StringLiteral(s, _) = e {
-            if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+            if matches!(elem_ty, CType::Char | CType::UChar) {
                 self.emit_string_to_alloca(base_alloca, s, field_offset);
                 *item_idx += 1;
                 return;
             }
         }
 
-        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
+        if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty {
             // Flat init for array of structs
             let sub_layout = self.types.borrow_struct_layouts().get(&**key).cloned();
             if let Some(sub_layout) = sub_layout {
@@ -662,7 +662,7 @@ impl Lowerer {
             }
         } else if elem_ty.is_complex() {
             // Flat init for array of complex
-            let complex_ctype = elem_ty.as_ref().clone();
+            let complex_ctype = elem_ty.clone();
             let start_ai = array_start_idx.unwrap_or(0);
             let mut consumed = 0usize;
             let mut ai = start_ai;
@@ -686,7 +686,7 @@ impl Lowerer {
         } else {
             // Flat init for scalar array
             let elem_ir_ty = IrType::from_ctype(elem_ty);
-            let elem_is_bool = **elem_ty == CType::Bool;
+            let elem_is_bool = *elem_ty == CType::Bool;
             let start_ai = array_start_idx.unwrap_or(0);
             let mut consumed = 0usize;
             let mut ai = start_ai;

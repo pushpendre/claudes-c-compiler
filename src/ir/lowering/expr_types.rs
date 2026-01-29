@@ -559,7 +559,7 @@ impl Lowerer {
             assocs_differ || ctrl_is_const
         };
         let mut default_expr: Option<&Expr> = None;
-        for assoc in associations.iter() {
+        for assoc in associations {
             match &assoc.type_spec {
                 None => { default_expr = Some(&assoc.expr); }
                 Some(type_spec) => {
