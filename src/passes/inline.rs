@@ -1356,6 +1356,7 @@ fn remap_call_info(info: &CallInfo, vo: u32) -> CallInfo {
         is_variadic: info.is_variadic,
         num_fixed_args: info.num_fixed_args,
         struct_arg_sizes: info.struct_arg_sizes.clone(),
+        struct_arg_aligns: info.struct_arg_aligns.clone(),
         struct_arg_classes: info.struct_arg_classes.clone(),
         is_sret: info.is_sret,
         is_fastcall: info.is_fastcall,

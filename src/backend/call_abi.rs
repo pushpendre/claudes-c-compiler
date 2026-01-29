@@ -154,12 +154,16 @@ pub fn classify_sysv_struct(
 /// This captures the shared classification logic used identically by all four backends.
 /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct
 /// args, None otherwise.
+/// `struct_arg_aligns` indicates struct alignment: Some(align) for struct args, None otherwise.
+/// Used on RISC-V to even-align register pairs for 2×XLEN-aligned structs (e.g., containing
+/// long double with 16-byte alignment per the RISC-V psABI).
 /// `struct_arg_classes` provides per-eightbyte SysV ABI classification for struct args
 /// (used when `config.use_sysv_struct_classification` is true, i.e. x86-64).
 pub fn classify_call_args(
     args: &[Operand],
     arg_types: &[IrType],
     struct_arg_sizes: &[Option<usize>],
+    struct_arg_aligns: &[Option<usize>],
     struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
     is_variadic: bool,
     config: &CallAbiConfig,
@@ -218,6 +222,15 @@ pub fn classify_call_args(
             } else if size <= 16 {
                 // Non-SysV path (ARM, RISC-V): always use GP registers for small structs
                 let regs_needed = if size <= 8 { 1 } else { 2 };
+                // RISC-V psABI: 2×XLEN-aligned structs (alignment > XLEN) must start
+                // at an even-numbered register, matching i128/f128 pair alignment.
+                let slot_size = crate::common::types::target_ptr_size();
+                if regs_needed == 2 && config.align_i128_pairs {
+                    let struct_align = struct_arg_aligns.get(i).copied().flatten().unwrap_or(slot_size);
+                    if struct_align > slot_size && int_idx % 2 != 0 {
+                        int_idx += 1; // skip to even register
+                    }
+                }
                 if int_idx + regs_needed <= config.max_int_regs {
                     result.push(CallArgClass::StructByValReg { base_reg_idx: int_idx, size });
                     int_idx += regs_needed;

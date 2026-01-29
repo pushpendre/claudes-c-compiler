@@ -155,7 +155,7 @@ impl Lowerer {
         };
 
         // Lower arguments with implicit casts
-        let (mut arg_vals, mut arg_types, mut struct_arg_sizes, mut struct_arg_classes) = self.lower_call_arguments(effective_func, args);
+        let (mut arg_vals, mut arg_types, mut struct_arg_sizes, mut struct_arg_aligns, mut struct_arg_classes) = self.lower_call_arguments(effective_func, args);
 
         // Detect variadic status early (needed for complex arg decomposition)
         let call_is_variadic = if let Expr::Identifier(name, _) = stripped_func {
@@ -175,7 +175,7 @@ impl Lowerer {
         } else {
             None
         };
-        self.decompose_complex_call_args(&mut arg_vals, &mut arg_types, &mut struct_arg_sizes, &param_ctypes_for_decompose, args, call_is_variadic);
+        self.decompose_complex_call_args(&mut arg_vals, &mut arg_types, &mut struct_arg_sizes, &mut struct_arg_aligns, &param_ctypes_for_decompose, args, call_is_variadic);
 
         let dest = self.fresh_value();
 
@@ -186,6 +186,7 @@ impl Lowerer {
             arg_vals.insert(0, Operand::Value(alloca));
             arg_types.insert(0, IrType::Ptr);
             struct_arg_sizes.insert(0, None); // sret pointer is not a struct arg
+            struct_arg_aligns.insert(0, None);
             struct_arg_classes.insert(0, Vec::new()); // sret pointer has no eightbyte classes
             Some(alloca)
         } else {
@@ -233,7 +234,7 @@ impl Lowerer {
         };
 
         // Dispatch: direct call, function pointer call, or indirect call
-        let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, struct_arg_classes, call_variadic, num_fixed_args, two_reg_size, sret_size);
+        let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, call_variadic, num_fixed_args, two_reg_size, sret_size);
 
         // After call to noreturn function, emit unreachable and start dead block.
         // Unlike error_functions (which skip the call entirely), noreturn functions
@@ -384,9 +385,10 @@ impl Lowerer {
 
     /// Lower function call arguments, applying implicit casts for parameter types
     /// and default argument promotions for variadic args.
-    /// Returns (arg_vals, arg_types, struct_arg_sizes) where struct_arg_sizes[i] is
-    /// Some(size) if the ith argument is a struct/union passed by value.
-    pub(super) fn lower_call_arguments(&mut self, func: &Expr, args: &[Expr]) -> (Vec<Operand>, Vec<IrType>, Vec<Option<usize>>, Vec<Vec<crate::common::types::EightbyteClass>>) {
+    /// Returns (arg_vals, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes) where struct_arg_sizes[i] is
+    /// Some(size) if the ith argument is a struct/union passed by value, and struct_arg_aligns[i]
+    /// is Some(align) for struct args.
+    pub(super) fn lower_call_arguments(&mut self, func: &Expr, args: &[Expr]) -> (Vec<Operand>, Vec<IrType>, Vec<Option<usize>>, Vec<Option<usize>>, Vec<Vec<crate::common::types::EightbyteClass>>) {
         // Extract function name from direct calls, or the underlying variable name
         // from indirect calls through function pointers (e.g., (*afp)(args) -> "afp").
         let func_name = match func {
@@ -615,6 +617,22 @@ impl Lowerer {
             }).collect()
         };
 
+        // Build struct_arg_aligns: for each struct arg, record its alignment.
+        // This is used by RISC-V to even-align register pairs for 2×XLEN-aligned structs
+        // (e.g., struct containing long double with 16-byte alignment).
+        let struct_arg_aligns: Vec<Option<usize>> = args.iter().enumerate().map(|(i, a)| {
+            if struct_arg_sizes.get(i).copied().flatten().is_none() {
+                return None;
+            }
+            let ctype = self.get_expr_ctype(a);
+            match ctype {
+                Some(ref ct @ CType::Struct(_)) | Some(ref ct @ CType::Union(_)) => {
+                    self.get_struct_layout_for_ctype(ct).map(|layout| layout.align)
+                }
+                _ => None,
+            }
+        }).collect();
+
         // Build struct_arg_classes: propagate per-eightbyte SysV ABI classification from FuncSig.
         // For variadic args beyond fixed params, infer classification from expression CType
         // so that struct fields are correctly split between GP and SSE registers.
@@ -631,7 +649,7 @@ impl Lowerer {
             args.iter().map(|a| self.infer_struct_eightbyte_classes(a)).collect()
         };
 
-        (arg_vals, arg_types, struct_arg_sizes, struct_arg_classes)
+        (arg_vals, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes)
     }
 
     /// Infer SysV ABI eightbyte classification for a struct argument expression.
@@ -655,6 +673,7 @@ impl Lowerer {
         arg_vals: Vec<Operand>,
         arg_types: Vec<IrType>,
         struct_arg_sizes: Vec<Option<usize>>,
+        struct_arg_aligns: Vec<Option<usize>>,
         struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>>,
         is_variadic: bool,
         num_fixed_args: usize,
@@ -678,7 +697,7 @@ impl Lowerer {
                         info: CallInfo {
                             dest: Some(dest), args: arg_vals, arg_types,
                             return_type: indirect_ret_ty, is_variadic, num_fixed_args,
-                            struct_arg_sizes, struct_arg_classes,
+                            struct_arg_sizes, struct_arg_aligns, struct_arg_classes,
                             is_sret: sret_size.is_some(), is_fastcall: false,
                         },
                     });
@@ -713,7 +732,7 @@ impl Lowerer {
                         info: CallInfo {
                             dest: Some(dest), args: arg_vals, arg_types,
                             return_type: ret_ty, is_variadic, num_fixed_args,
-                            struct_arg_sizes, struct_arg_classes,
+                            struct_arg_sizes, struct_arg_aligns, struct_arg_classes,
                             is_sret: sret_size.is_some(), is_fastcall: callee_is_fastcall,
                         },
                     });
@@ -729,6 +748,7 @@ impl Lowerer {
                 let is_noop_deref = self.is_function_pointer_deref(inner);
                 let n = arg_vals.len();
                 let sas = struct_arg_sizes;
+                let saa = struct_arg_aligns;
                 let sac = struct_arg_classes;
                 let func_ptr = if is_noop_deref {
                     // No-op dereference: (*fp)() == fp()
@@ -742,7 +762,7 @@ impl Lowerer {
                     info: CallInfo {
                         dest: Some(dest), args: arg_vals, arg_types,
                         return_type: indirect_ret_ty, is_variadic: false, num_fixed_args: n,
-                        struct_arg_sizes: sas, struct_arg_classes: sac,
+                        struct_arg_sizes: sas, struct_arg_aligns: saa, struct_arg_classes: sac,
                         is_sret: sret_size.is_some(), is_fastcall: false,
                     },
                 });
@@ -750,6 +770,7 @@ impl Lowerer {
             }
             _ => {
                 let sas = struct_arg_sizes;
+                let saa = struct_arg_aligns;
                 let sac = struct_arg_classes;
                 let func_ptr = self.lower_expr(func);
                 self.emit(Instruction::CallIndirect {
@@ -757,7 +778,7 @@ impl Lowerer {
                     info: CallInfo {
                         dest: Some(dest), args: arg_vals, arg_types,
                         return_type: indirect_ret_ty, is_variadic, num_fixed_args,
-                        struct_arg_sizes: sas, struct_arg_classes: sac,
+                        struct_arg_sizes: sas, struct_arg_aligns: saa, struct_arg_classes: sac,
                         is_sret: sret_size.is_some(), is_fastcall: false,
                     },
                 });

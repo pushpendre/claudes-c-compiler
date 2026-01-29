@@ -53,7 +53,7 @@ fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize 
                 Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => info,
                 _ => continue,
             };
-            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_variadic, config);
+            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, info.is_variadic, config);
             let gp_count = classes.iter().filter(|c| matches!(c, CallArgClass::IntReg { .. })).count();
             if gp_count > max_gp {
                 max_gp = gp_count;

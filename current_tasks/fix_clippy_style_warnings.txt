@@ -1,0 +1,18 @@
+Task: Fix clippy style warnings across the codebase
+
+Status: in_progress
+
+Goal: Address the most impactful clippy lint warnings to improve Rust
+idiomatic style. This is complementary to the "eliminate_compiler_warnings"
+task which focuses on dead code warnings.
+
+Specific fixes:
+- Remove .clone() on Copy types (use copy semantics instead) - 71 occurrences
+- Convert file-level doc comments (///) to inner doc comments (//!) - 15 occurrences
+- Replace manual div_ceil with .div_ceil() - 22 occurrences
+- Replace manual prefix stripping with .strip_prefix() - 10 occurrences
+- Other idiomatic fixes: map_or simplification, collapsible if statements,
+  RangeInclusive::contains, redundant closures, etc.
+
+Approach: Non-functional changes only. Fix clippy lints to make the code
+more idiomatic Rust. Run full test suite to ensure zero regressions.

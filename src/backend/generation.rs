@@ -1100,9 +1100,9 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                     }
                 }
                 Instruction::Call { func, info } =>
-                    cg.emit_call(&info.args, &info.arg_types, Some(func), None, info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
+                    cg.emit_call(&info.args, &info.arg_types, Some(func), None, info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
                 Instruction::CallIndirect { func_ptr, info } =>
-                    cg.emit_call(&info.args, &info.arg_types, None, Some(func_ptr), info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
+                    cg.emit_call(&info.args, &info.arg_types, None, Some(func_ptr), info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
                 Instruction::Memcpy { dest, src, size } => cg.emit_memcpy(dest, src, *size),
                 Instruction::VaArg { dest, va_list_ptr, result_ty } => cg.emit_va_arg(dest, va_list_ptr, *result_ty),
                 Instruction::VaStart { va_list_ptr } => cg.emit_va_start(va_list_ptr),

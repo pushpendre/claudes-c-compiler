@@ -2726,6 +2726,7 @@ impl ArchCodegen for I686Codegen {
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
                  is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
+                 struct_arg_aligns: &[Option<usize>],
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
                  is_sret: bool,
                  is_fastcall: bool) {
@@ -2736,7 +2737,7 @@ impl ArchCodegen for I686Codegen {
             // the call to the shared skeleton.
             use crate::backend::call_abi::*;
             let config = self.call_abi_config();
-            let arg_classes_vec = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, &config);
+            let arg_classes_vec = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, is_variadic, &config);
             let indirect = func_ptr.is_some() && direct_name.is_none();
             if indirect {
                 self.emit_call_spill_fptr(func_ptr.unwrap());

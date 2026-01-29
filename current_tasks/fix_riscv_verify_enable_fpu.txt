@@ -1,19 +1,20 @@
-Task: Fix RISC-V kernel verification by enabling CONFIG_FPU in tinyconfig
+Task: Fix RISC-V calling convention: even-align register pairs for 2xXLEN-aligned structs
 
-Problem: The RISC-V tinyconfig kernel verification fails because busybox-riscv64
-uses the double-float ABI (RVC + D extension). The busybox binary contains FPU
-instructions like `fsd fs0,112(a0)` which cause SIGILL (illegal instruction)
-when CONFIG_FPU is not set. This causes the kernel to panic because init
-(busybox) is killed.
+Problem: On RISC-V LP64D, when a struct with 16-byte alignment (e.g., containing
+long double) is passed by value in integer registers, the ABI requires the register
+pair to start at an even-numbered register (a0, a2, a4, a6). CCC does not perform
+this alignment, so struct { long double f; } passed as vararg(0, s) goes to a1/a2
+instead of a2/a3, causing the callee's va_arg to read incorrect data.
 
-The CCC-compiled RISC-V kernel actually compiles and boots successfully - the
-failure is entirely due to the missing CONFIG_FPU in the kernel config.
+Fix: Added struct_arg_aligns to CallInfo and struct_align to IrParam. Both caller
+(call_abi.rs) and callee (call_emit.rs) classification skip to even register when
+align_i128_pairs && regs_needed == 2 && struct_align > slot_size.
 
-Fix: Add "FPU" to the required_opts list in verify_kernel.py for RISC-V arch.
-The verify script is mounted read-only in /verify/, so the fix must be applied
-to a copy.
+Test results:
+- RISC-V: 2849/2859 (99.7%) tests, all 12 projects PASS
+- x86: 2990/2990 (100%), all projects PASS
+- ARM: 2854/2868 (99.5%), 11/12 projects PASS (mbedtls fail pre-existing)
+- i686: 2733/2737 (99.9%), all projects PASS
+- Kernel: tinyconfig RISC-V builds and boots
 
-Also: The completed task fix_riscv_va_arg_struct_longdouble_align.txt should be
-cleaned up (it's marked completed but still in current_tasks).
-
-Status: in_progress
+Status: completed

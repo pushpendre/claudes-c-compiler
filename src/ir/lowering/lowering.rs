@@ -340,6 +340,7 @@ impl Lowerer {
                     is_variadic: false,
                     num_fixed_args: 1,
                     struct_arg_sizes: vec![None],
+                    struct_arg_aligns: vec![],
                     struct_arg_classes: Vec::new(),
                     is_sret: false,
                     is_fastcall: false,

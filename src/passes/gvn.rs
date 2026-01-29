@@ -1151,6 +1151,7 @@ mod tests {
                         is_variadic: false,
                         num_fixed_args: 0,
                         struct_arg_sizes: vec![],
+                        struct_arg_aligns: vec![],
                         struct_arg_classes: vec![],
                         is_sret: false,
                         is_fastcall: false,

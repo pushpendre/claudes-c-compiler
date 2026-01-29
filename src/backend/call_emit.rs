@@ -191,6 +191,13 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
                 float_reg_idx += fp_used;
             } else if size <= 16 {
                 let regs_needed = if size <= slot_size { 1 } else { (size + slot_size - 1) / slot_size };
+                // RISC-V psABI: 2×XLEN-aligned structs must start at even register.
+                if regs_needed == 2 && config.align_i128_pairs {
+                    let struct_align = param.struct_align.unwrap_or(slot_size);
+                    if struct_align > slot_size && int_reg_idx % 2 != 0 {
+                        int_reg_idx += 1; // skip to even register
+                    }
+                }
                 if int_reg_idx + regs_needed <= config.max_int_regs {
                     result.push(ParamClass::StructByValReg {
                         base_reg_idx: int_reg_idx,

@@ -239,6 +239,9 @@ pub struct IrParam {
     pub ty: IrType,
     /// If this param is a struct/union passed by value, its byte size. None for non-struct params.
     pub struct_size: Option<usize>,
+    /// Struct alignment in bytes. Used on RISC-V to even-align register pairs for
+    /// 2×XLEN-aligned structs. None for non-struct params.
+    pub struct_align: Option<usize>,
     /// Per-eightbyte SysV ABI classification for struct params (x86-64 only).
     /// Empty for non-struct params or when classification is not applicable.
     /// Each entry indicates whether that eightbyte should use SSE or GP registers.
@@ -283,6 +286,9 @@ pub struct CallInfo {
     pub num_fixed_args: usize,
     /// Which args are struct/union by-value: Some(size) for struct args, None otherwise.
     pub struct_arg_sizes: Vec<Option<usize>>,
+    /// Struct alignment: Some(align) for struct args, None otherwise.
+    /// Used on RISC-V to even-align register pairs for 2×XLEN-aligned structs.
+    pub struct_arg_aligns: Vec<Option<usize>>,
     /// Per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class passing).
     pub struct_arg_classes: Vec<Vec<EightbyteClass>>,
     /// True if the call uses a hidden pointer argument for struct returns (i386 SysV ABI).
