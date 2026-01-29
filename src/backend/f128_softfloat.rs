@@ -13,7 +13,7 @@
 //!   arg positions is `mv a2, a0; mv a3, a1`. Sign bit flip uses `li`+`slli`+`xor`
 //!   on the high register.
 //!
-//! The `F128SoftFloat` trait captures these ~10 arch-specific primitives, and the
+//! The `F128SoftFloat` trait captures these ~34 arch-specific primitives, and the
 //! `f128_*` free functions implement the shared orchestration once. This eliminates
 //! ~350 lines of structural duplication between `arm/codegen/f128.rs` and
 //! `riscv/codegen/f128.rs`.

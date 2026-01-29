@@ -11,4 +11,4 @@ Orchestrates the compilation pipeline from command-line arguments through to fin
 
 ## CLI Compatibility
 
-The driver accepts a broad set of GCC flags, silently ignoring unsupported ones (like `-W` warnings, `-f` flags, `-m` arch flags). This allows using ccc as a drop-in replacement for GCC in test harnesses.
+The driver accepts a broad set of GCC flags, silently ignoring unrecognized ones (e.g., unknown `-f` flags, `-m` arch flags). Some flags like `-Werror`, `-Wall`, and `-Werror=implicit-function-declaration` are functional. This allows using ccc as a drop-in replacement for GCC in build systems.

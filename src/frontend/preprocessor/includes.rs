@@ -375,10 +375,10 @@ impl Preprocessor {
             "complex.h" => {
                 // C99 <complex.h> support
                 // Define standard complex macros
-                self.macros.define(parse_define("complex _Complex").unwrap());
-                self.macros.define(parse_define("_Complex_I (__extension__ 1.0fi)").unwrap());
-                self.macros.define(parse_define("I _Complex_I").unwrap());
-                self.macros.define(parse_define("__STDC_IEC_559_COMPLEX__ 1").unwrap());
+                self.macros.define(parse_define("complex _Complex").expect("static define"));
+                self.macros.define(parse_define("_Complex_I (__extension__ 1.0fi)").expect("static define"));
+                self.macros.define(parse_define("I _Complex_I").expect("static define"));
+                self.macros.define(parse_define("__STDC_IEC_559_COMPLEX__ 1").expect("static define"));
                 // Declare complex math functions
                 self.pending_injections.push(concat!(
                     "double creal(double _Complex __z);\n",

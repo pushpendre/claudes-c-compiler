@@ -11,7 +11,7 @@
 
 use crate::ir::ir::{
     BasicBlock, BlockId, CallInfo, GlobalInit, IrFunction, IrModule, Instruction, Operand,
-    Terminator, Value, IrConst, IrBinOp, IrCmpOp,
+    Terminator, Value, IrConst, IrBinOp,
 };
 use crate::common::asm_constraints::constraint_is_immediate_only;
 use crate::common::types::{IrType, AddressSpace};

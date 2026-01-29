@@ -1,9 +1,9 @@
-Documentation Verification (2026-01-29)
-========================================
+Documentation Verification (2026-01-29, updated)
+=================================================
 
 All README.md files and ideas/*.txt files have been audited for correctness.
 
-Fixes Applied:
+Fixes Applied (round 1, 2026-01-29):
 - README.md: -dumpversion output corrected from "6.5.0" to "6" (matches actual code)
 - README.md: test count updated from "~690" to "~718" directories
 - README.md: added note that i686/ lacks its own README.md
@@ -16,18 +16,26 @@ Fixes Applied:
 - ideas/reduce_stack_frame_size_for_postgres.txt: updated from "three" to "four"
 - ideas/high_use_def_chains.txt: updated pass pipeline description from 4 to 14 passes
 
+Fixes Applied (round 2, 2026-01-29):
+- README.md: removed outdated i686 README exception (i686/ now has its own README.md)
+- README.md: test count updated from "~718" to "~724" directories
+- src/backend/f128_softfloat.rs: doc comment corrected from "~10" to "~34" primitives
+- src/driver/README.md: clarified that -Werror/-Wall are functional, only unrecognized
+  flags are silently ignored (was misleadingly saying "-W warnings" are ignored)
+
 Verified Correct (no changes needed):
 - Cargo.toml binary targets match README description
 - Architecture tree listing in README matches actual directory structure
 - All 14 optimization pass files exist as documented
 - Pass pipeline runs 3 iterations as documented
 - All backend files match their README listings
-- F128SoftFloat trait has exactly 34 arch-specific primitives as documented
+- F128SoftFloat trait has exactly 34 arch-specific primitives (now matches doc comment)
 - RISC-V callee-saved registers (s1, s7-s11 = 6) match documentation
 - Frontend module descriptions (preprocessor, lexer, parser, sema) are accurate
 - IR lowering file listing (~42 files) matches actual directory
 - mem2reg module files match documentation
 - Testing commands in README are accurate
+- All 17 README.md files use consistent markdown formatting
 
 Known Stale (informational snapshots, not fixing):
 - ideas/fix_remaining_{arm,x86,riscv}_tests.txt: pass rate numbers from 2026-01-25

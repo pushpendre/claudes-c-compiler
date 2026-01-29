@@ -804,7 +804,7 @@ impl<'a> ExprParser<'a> {
             Some(ExprToken::Defined) => {
                 self.advance();
                 // defined(X) or defined X
-                let _has_paren = if self.peek() == Some(&ExprToken::LParen) {
+                let has_paren = if self.peek() == Some(&ExprToken::LParen) {
                     self.advance();
                     true
                 } else {
@@ -815,7 +815,7 @@ impl<'a> ExprParser<'a> {
                 if let Some(ExprToken::Ident(_)) = self.peek() {
                     self.advance();
                 }
-                if self.peek() == Some(&ExprToken::RParen) {
+                if has_paren && self.peek() == Some(&ExprToken::RParen) {
                     self.advance();
                 }
                 // If we reach here during evaluation, the macro was not resolved

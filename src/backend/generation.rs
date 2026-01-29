@@ -818,7 +818,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
             // Emit .loc directive if source location changed.
             if emit_debug {
                 if let Some(span) = block.source_spans.get(idx) {
-                    emit_loc_directive(cg, span, source_mgr.unwrap(), file_table,
+                    emit_loc_directive(cg, span, source_mgr.expect("debug mode requires source manager"), file_table,
                                        &mut last_debug_file, &mut last_debug_line);
                 }
             }

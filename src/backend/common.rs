@@ -689,7 +689,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         if !matches!(sect, GlobalSection::Custom) {
             continue;
         }
-        let section_name = g.section.as_ref().unwrap();
+        let section_name = g.section.as_ref().expect("custom section must have a name");
         // Use "a" (read-only) for const-qualified globals or rodata sections,
         // "aw" (writable) otherwise. GCC uses the const qualification of the
         // variable to determine section flags, not just the section name.

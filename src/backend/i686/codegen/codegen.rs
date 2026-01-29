@@ -853,7 +853,7 @@ impl I686Codegen {
 
         // Spill indirect function pointer before stack manipulation.
         if indirect {
-            self.emit_call_spill_fptr(func_ptr.unwrap());
+            self.emit_call_spill_fptr(func_ptr.expect("indirect call requires func_ptr"));
         }
 
         // Phase 1: Allocate stack space and write stack args.

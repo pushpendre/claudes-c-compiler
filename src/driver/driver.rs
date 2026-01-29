@@ -422,7 +422,7 @@ impl Driver {
                 // Write dependency file if requested (e.g., -Wp,-MMD,<depfile>).
                 // The kernel build uses this when preprocessing linker scripts
                 // (.lds.S -> .lds) and fixdep expects the .d file to exist.
-                self.write_dep_file(input_file, &self.output_path.clone());
+                self.write_dep_file(input_file, &self.output_path);
             } else {
                 print!("{}", output);
             }
@@ -743,7 +743,7 @@ impl Driver {
         for lib in &self.linker_libs {
             args.push(format!("-l{}", lib));
         }
-        args.extend(self.linker_extra_args.clone());
+        args.extend_from_slice(&self.linker_extra_args);
         args
     }
 

@@ -202,8 +202,8 @@ impl Lowerer {
                     && layout.fields[fi].offset == storage_unit_offset
                     && layout.fields[fi].bit_offset.is_some()
                 {
-                    let bit_offset = layout.fields[fi].bit_offset.unwrap();
-                    let bit_width = layout.fields[fi].bit_width.unwrap();
+                    let bit_offset = layout.fields[fi].bit_offset.expect("bitfield must have bit_offset");
+                    let bit_width = layout.fields[fi].bit_width.expect("bitfield must have bit_width");
                     let field_ir_ty = IrType::from_ctype(&layout.fields[fi].ty);
 
                     let inits = &field_inits[fi];

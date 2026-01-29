@@ -370,7 +370,7 @@ pub trait ArchCodegen {
         // Phase 0: Spill indirect function pointer before any stack manipulation.
         let indirect = func_ptr.is_some() && direct_name.is_none();
         if indirect {
-            self.emit_call_spill_fptr(func_ptr.unwrap());
+            self.emit_call_spill_fptr(func_ptr.expect("indirect call requires func_ptr"));
         }
 
         // Compute stack space needed for overflow args.
@@ -995,8 +995,8 @@ pub trait ArchCodegen {
         let use_jump_table = if self.state_ref().no_jump_tables {
             false
         } else if cases.len() >= MIN_JUMP_TABLE_CASES {
-            let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
-            let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+            let min_val = cases.iter().map(|&(v, _)| v).min().expect("switch must have cases");
+            let max_val = cases.iter().map(|&(v, _)| v).max().expect("switch must have cases");
             let range = (max_val - min_val + 1) as usize;
             range <= MAX_JUMP_TABLE_RANGE && cases.len() * 100 / range >= MIN_JUMP_TABLE_DENSITY_PERCENT
         } else {
@@ -1230,8 +1230,8 @@ pub trait ArchCodegen {
 /// Build a jump table from switch cases: maps each index in [min..max] to a BlockId.
 /// Returns (table, min_val, range).
 pub fn build_jump_table(cases: &[(i64, BlockId)], default: &BlockId) -> (Vec<BlockId>, i64, usize) {
-    let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
-    let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+    let min_val = cases.iter().map(|&(v, _)| v).min().expect("switch must have cases");
+    let max_val = cases.iter().map(|&(v, _)| v).max().expect("switch must have cases");
     let range = (max_val - min_val + 1) as usize;
 
     let mut table = vec![*default; range];

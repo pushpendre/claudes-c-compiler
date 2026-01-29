@@ -742,7 +742,7 @@ impl Lowerer {
                     _ => return None,
                 };
                 // Check if one side is a global address and the other is zero/NULL
-                let (addr_side, scalar_side) = if self.eval_global_addr_expr(lhs).is_some() {
+                let (_, scalar_side) = if self.eval_global_addr_expr(lhs).is_some() {
                     (lhs.as_ref(), rhs.as_ref())
                 } else if self.eval_global_addr_expr(rhs).is_some() {
                     (rhs.as_ref(), lhs.as_ref())
@@ -755,9 +755,8 @@ impl Lowerer {
                     return None;
                 }
                 // A defined function/global address is always non-zero
-                // (already validated by eval_global_addr_expr above).
-                let _addr = addr_side;
-                // fn == 0 is false (0), fn != 0 is true (1)
+                // (already validated by eval_global_addr_expr above),
+                // so fn == 0 is false (0), fn != 0 is true (1).
                 Some(IrConst::I64(if is_eq { 0 } else { 1 }))
             }
             // Handle !func (logical not of function pointer)

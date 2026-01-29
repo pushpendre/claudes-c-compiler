@@ -6,7 +6,7 @@ fn main() {
     // in our recursive descent parser and IR lowering. Spawn with a larger stack.
     const STACK_SIZE: usize = 64 * 1024 * 1024; // 64 MB
     let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
-    let handler = builder.spawn(|| { real_main(); }).unwrap();
+    let handler = builder.spawn(|| { real_main(); }).expect("failed to spawn main thread");
     let result = handler.join();
     if result.is_err() {
         std::process::exit(1);

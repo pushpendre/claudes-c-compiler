@@ -708,11 +708,11 @@ impl Lowerer {
             let rhs_is_true = rhs_const.is_nonzero();
             if is_and && !rhs_is_true {
                 // LHS && false => always false. Evaluate LHS for side effects, return 0.
-                let _lhs_val = self.lower_condition_expr(lhs);
+                let _ = self.lower_condition_expr(lhs);
                 return Operand::Const(make_int_const(0));
             } else if !is_and && rhs_is_true {
                 // LHS || true => always true. Evaluate LHS for side effects, return 1.
-                let _lhs_val = self.lower_condition_expr(lhs);
+                let _ = self.lower_condition_expr(lhs);
                 return Operand::Const(make_int_const(1));
             }
             // For "LHS && true" or "LHS || false", fall through to normal lowering

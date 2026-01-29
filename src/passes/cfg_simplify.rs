@@ -1482,7 +1482,7 @@ mod tests {
             source_spans: Vec::new(),
         });
 
-        let count = simplify_cfg(&mut func);
+        let _ = simplify_cfg(&mut func);
         // No jump threading should occur (block 1 has instructions)
         assert!(matches!(func.blocks[0].terminator, Terminator::Branch(BlockId(1))));
         // But the function still has all 3 blocks
@@ -1715,7 +1715,7 @@ mod tests {
             source_spans: Vec::new(),
         });
 
-        let _count = simplify_cfg(&mut func);
+        let _ = simplify_cfg(&mut func);
 
         // Verify Block 1 (the RHS of &&) is eliminated as unreachable
         let has_block_1 = func.blocks.iter().any(|b| b.label == BlockId(1));

@@ -535,6 +535,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -607,6 +608,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -670,6 +672,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -739,6 +742,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -808,6 +812,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -882,6 +887,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -985,6 +991,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -1038,6 +1045,7 @@ mod tests {
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
             uses_sret: false,
+            global_init_label_blocks: Vec::new(),
         }
     }
 

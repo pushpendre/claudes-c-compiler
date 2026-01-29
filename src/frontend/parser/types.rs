@@ -42,7 +42,6 @@ impl Parser {
     /// Handles arbitrary ordering of type keywords (C allows "long unsigned int"
     /// or "unsigned long int"), struct/union/enum definitions, typedef names,
     /// typeof expressions, and _Complex types.
-    #[allow(unused_assignments)]
     pub(super) fn parse_type_specifier(&mut self) -> Option<TypeSpecifier> {
         self.skip_gcc_extensions();
 
@@ -178,7 +177,7 @@ impl Parser {
                 }
                 // __int128 can combine with signed/unsigned
                 TokenKind::Int128 => {
-                    self.advance(); any_base_specifier = true;
+                    self.advance();
                     // GCC rejects __int128 on 32-bit targets
                     if crate::common::types::target_is_32bit() {
                         self.error_count += 1;
@@ -194,7 +193,7 @@ impl Parser {
                 }
                 // __uint128_t is always unsigned
                 TokenKind::UInt128 => {
-                    self.advance(); any_base_specifier = true;
+                    self.advance();
                     // GCC rejects __int128 on 32-bit targets
                     if crate::common::types::target_is_32bit() {
                         self.error_count += 1;
