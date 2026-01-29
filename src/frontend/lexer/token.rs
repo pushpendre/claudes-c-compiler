@@ -198,7 +198,10 @@ impl Token {
 
 impl TokenKind {
     /// Convert a keyword string to its token kind.
-    pub fn from_keyword(s: &str) -> Option<TokenKind> {
+    /// When `gnu_extensions` is false (strict C standard mode, e.g. -std=c99),
+    /// bare GNU keywords like `typeof` and `asm` are treated as identifiers.
+    /// The double-underscore forms (`__typeof__`, `__asm__`) are always keywords.
+    pub fn from_keyword(s: &str, gnu_extensions: bool) -> Option<TokenKind> {
         match s {
             "auto" => Some(TokenKind::Auto),
             "break" => Some(TokenKind::Break),
@@ -248,8 +251,10 @@ impl TokenKind {
             "_Noreturn" | "__noreturn__" => Some(TokenKind::Noreturn),
             "_Static_assert" | "static_assert" => Some(TokenKind::StaticAssert),
             "_Thread_local" | "__thread" => Some(TokenKind::ThreadLocal),
-            "typeof" | "__typeof__" | "__typeof" => Some(TokenKind::Typeof),
-            "asm" | "__asm__" | "__asm" => Some(TokenKind::Asm),
+            "typeof" if gnu_extensions => Some(TokenKind::Typeof),
+            "__typeof__" | "__typeof" => Some(TokenKind::Typeof),
+            "asm" if gnu_extensions => Some(TokenKind::Asm),
+            "__asm__" | "__asm" => Some(TokenKind::Asm),
             "__attribute__" | "__attribute" => Some(TokenKind::Attribute),
             "__extension__" => Some(TokenKind::Extension),
             "__builtin_va_list" => Some(TokenKind::Builtin),

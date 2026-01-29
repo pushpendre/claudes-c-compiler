@@ -82,6 +82,10 @@ struct StackLayoutContext {
     dead_param_allocas: FxHashSet<u32>,
     /// Alloca coalescing analysis results.
     coalescable_allocas: CoalescableAllocas,
+    /// Values that are produced and immediately consumed by the next instruction,
+    /// as the first operand loaded into the accumulator. These values don't need
+    /// stack slots — the accumulator register cache keeps them alive.
+    immediately_consumed: FxHashSet<u32>,
 }
 
 // ── Value use-block map ───────────────────────────────────────────────────
@@ -601,6 +605,9 @@ fn build_layout_context(
         func, &def_block, &multi_def_values, reg_assigned, &use_blocks_map,
     );
 
+    // Immediately-consumed value analysis: identify values that can skip stack slots.
+    let immediately_consumed = compute_immediately_consumed(func);
+
     // Propagate copy-alias uses into use_blocks_map so that root values account
     // for their aliases' use sites when deciding block-local vs. multi-block.
     if coalesce && !copy_alias.is_empty() {
@@ -625,6 +632,7 @@ fn build_layout_context(
         used_values,
         dead_param_allocas,
         coalescable_allocas,
+        immediately_consumed,
     }
 }
 
@@ -787,6 +795,174 @@ fn build_copy_alias_map(
     }
 
     copy_alias
+}
+
+// ── Immediately-consumed value analysis ───────────────────────────────────
+
+/// Identify values that can skip stack slot allocation because they are
+/// produced and consumed in adjacent instructions within the same block.
+///
+/// A value V defined at instruction I can skip its slot if:
+/// 1. V has exactly one use as an Operand (loaded via operand_to_rax/rcx)
+/// 2. That use is at instruction I+1 (or in the block terminator if I is last)
+/// 3. V is the FIRST Operand of the consumer (loaded first into the accumulator)
+/// 4. V is NOT used as a Value reference (ptr in Store/Load, base in GEP, etc.)
+/// 5. V is not i128/f128 (these need 16-byte slots with special handling)
+/// 6. V is not from a Copy instruction (copy aliasing needs the root's slot)
+/// 7. V is not from an Alloca (allocas always need addressable slots)
+///
+/// The codegen accumulator cache ensures correctness: store_rax_to sets the
+/// cache, and the next instruction's operand_to_rax finds V there.
+fn compute_immediately_consumed(func: &IrFunction) -> FxHashSet<u32> {
+    let mut result = FxHashSet::default();
+
+    // First pass: count uses per value (both Operand and Value-ref uses).
+    let mut operand_use_count: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut has_value_ref_use: FxHashSet<u32> = FxHashSet::default();
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            for_each_operand_in_instruction(inst, |op| {
+                if let Operand::Value(v) = op {
+                    *operand_use_count.entry(v.0).or_insert(0) += 1;
+                }
+            });
+            for_each_value_use_in_instruction(inst, |v| {
+                has_value_ref_use.insert(v.0);
+            });
+        }
+        for_each_operand_in_terminator(&block.terminator, |op| {
+            if let Operand::Value(v) = op {
+                *operand_use_count.entry(v.0).or_insert(0) += 1;
+            }
+        });
+    }
+
+    // Collect all copy-alias roots: values that serve as the slot source for copies.
+    // These must keep their slots since aliased copies will use them.
+    let mut copy_alias_roots: FxHashSet<u32> = FxHashSet::default();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::Copy { src: Operand::Value(v), .. } = inst {
+                copy_alias_roots.insert(v.0);
+            }
+        }
+    }
+
+    // Second pass: check adjacency and first-operand conditions.
+    for block in &func.blocks {
+        let insts = &block.instructions;
+        for (i, inst) in insts.iter().enumerate() {
+            let dest = match inst.dest() {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Only acc-preserving producers are safe: after these execute,
+            // the accumulator cache still holds the result. Cache-invalidating
+            // instructions (Call, Atomic*, DynAlloca, etc.) clear the cache
+            // after store_rax_to, so the next instruction can't find the value.
+            if !is_acc_preserving_producer(inst) { continue; }
+            // Skip i128/f128 (special 16-byte handling uses emit_load_acc_pair /
+            // emit_store_acc_pair which bypass the normal accumulator cache).
+            if involves_i128_or_f128(inst) { continue; }
+            // Skip if value has Value-ref uses (ptr/base in Store/Load/GEP).
+            if has_value_ref_use.contains(&dest.0) { continue; }
+            // Skip if value is a copy-alias root (other values share its slot).
+            if copy_alias_roots.contains(&dest.0) { continue; }
+            // Must have exactly one Operand use.
+            if operand_use_count.get(&dest.0).copied().unwrap_or(0) != 1 { continue; }
+
+            // Check if the single use is in the immediately next instruction
+            // or in the block terminator (if this is the last instruction).
+            if i + 1 < insts.len() {
+                // Use must be in instruction i+1, as the first Operand.
+                let next = &insts[i + 1];
+                if is_safe_sole_consumer(next, dest.0) {
+                    result.insert(dest.0);
+                }
+            } else {
+                // Last instruction: use must be in the terminator, as the sole Operand.
+                if is_sole_operand_of_terminator(&block.terminator, dest.0) {
+                    result.insert(dest.0);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Check if an instruction is an "acc-preserving" producer: after execution,
+/// the accumulator register cache still holds the result value. Only these
+/// instructions can participate in the skip-slot optimization as producers.
+///
+/// Cache-invalidating instructions (Call, Store, Atomic*, DynAlloca, InlineAsm,
+/// etc.) call invalidate_all() after execution, clearing the cache.
+fn is_acc_preserving_producer(inst: &Instruction) -> bool {
+    matches!(inst,
+        Instruction::Load { .. }
+        | Instruction::BinOp { .. }
+        | Instruction::UnaryOp { .. }
+        | Instruction::Cmp { .. }
+        | Instruction::Cast { .. }
+        | Instruction::GetElementPtr { .. }
+        | Instruction::GlobalAddr { .. }
+        | Instruction::Select { .. }
+        | Instruction::LabelAddr { .. }
+    )
+}
+
+/// Check if an instruction involves I128/U128/F128 types in any operand position.
+/// These use emit_load_acc_pair / emit_store_acc_pair which bypass the normal
+/// accumulator cache, so they cannot participate in skip-slot optimization.
+fn involves_i128_or_f128(inst: &Instruction) -> bool {
+    fn is_wide(ty: IrType) -> bool {
+        matches!(ty, IrType::I128 | IrType::U128 | IrType::F128)
+    }
+    match inst {
+        Instruction::Cast { from_ty, to_ty, .. } => is_wide(*from_ty) || is_wide(*to_ty),
+        Instruction::UnaryOp { ty, .. } => is_wide(*ty),
+        Instruction::BinOp { ty, .. } => is_wide(*ty),
+        Instruction::Cmp { ty, .. } => is_wide(*ty),
+        Instruction::Load { ty, .. } => is_wide(*ty),
+        _ => {
+            // For other instructions, just check the result type.
+            matches!(inst.result_type(), Some(ty) if is_wide(ty))
+        }
+    }
+}
+
+/// Check if value_id is the sole Operand loaded by the given instruction,
+/// with guaranteed loading order (no other operand loaded before it).
+///
+/// Only single-operand consumers are safe: Store (val loaded first), Cast,
+/// UnaryOp, Copy. Two-operand instructions (BinOp, Cmp) are excluded because
+/// codegen may load the OTHER operand first (e.g. BinOp's rhs_conflicts path,
+/// float Cmp's Lt/Le operand swap). GEP excluded because OverAligned base
+/// computation clobbers %rax before offset is loaded.
+fn is_safe_sole_consumer(inst: &Instruction, value_id: u32) -> bool {
+    match inst {
+        // Store: val is always loaded first via emit_load_operand (operand_to_rax)
+        Instruction::Store { val: Operand::Value(v), .. } => v.0 == value_id,
+        // Single-operand instructions: loaded via operand_to_rax, no other operand
+        Instruction::Cast { src: Operand::Value(v), .. } => v.0 == value_id,
+        Instruction::UnaryOp { src: Operand::Value(v), .. } => v.0 == value_id,
+        Instruction::Copy { src: Operand::Value(v), .. } => v.0 == value_id,
+        // All other instructions: not safe (BinOp, Cmp, GEP, Call, Select, etc.)
+        _ => false,
+    }
+}
+
+/// Check if value_id is the sole operand of a block terminator.
+fn is_sole_operand_of_terminator(term: &Terminator, value_id: u32) -> bool {
+    match term {
+        Terminator::Return(Some(Operand::Value(v))) => v.0 == value_id,
+        Terminator::CondBranch { cond: Operand::Value(v), .. } => v.0 == value_id,
+        Terminator::Switch { val: Operand::Value(v), .. } => v.0 == value_id,
+        Terminator::IndirectBranch { target: Operand::Value(v), .. } => v.0 == value_id,
+        _ => false,
+    }
 }
 
 // ── Phase 2: Classify instructions into tiers ─────────────────────────────
@@ -1013,6 +1189,13 @@ fn classify_value(
 
     // Skip copy-aliased values (they'll share root's slot). Not for i128/f128.
     if !is_i128 && !is_f128 && ctx.copy_alias.contains_key(&dest.0) {
+        return;
+    }
+
+    // Skip immediately-consumed values: produced and consumed in adjacent
+    // instructions, kept alive in the accumulator register cache without
+    // needing a stack slot. Not for i128/f128 (need 16-byte special handling).
+    if !is_i128 && !is_f128 && ctx.immediately_consumed.contains(&dest.0) {
         return;
     }
 

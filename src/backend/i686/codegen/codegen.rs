@@ -312,6 +312,11 @@ impl I686Codegen {
                     } else {
                         emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
                     }
+                } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
+                    // Value is in accumulator (no stack slot) — move eax to ecx.
+                    self.state.emit("    movl %eax, %ecx");
+                } else {
+                    self.state.emit("    xorl %ecx, %ecx");
                 }
             }
         }

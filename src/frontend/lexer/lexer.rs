@@ -7,6 +7,7 @@ pub struct Lexer {
     input: Vec<u8>,
     pos: usize,
     file_id: u32,
+    gnu_extensions: bool,
 }
 
 impl Lexer {
@@ -15,7 +16,12 @@ impl Lexer {
             input: input.bytes().collect(),
             pos: 0,
             file_id,
+            gnu_extensions: true,
         }
+    }
+
+    pub fn set_gnu_extensions(&mut self, enabled: bool) {
+        self.gnu_extensions = enabled;
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
@@ -900,7 +906,7 @@ impl Lexer {
             return Token::new(vis_tok, span);
         }
 
-        if let Some(kw) = TokenKind::from_keyword(text) {
+        if let Some(kw) = TokenKind::from_keyword(text, self.gnu_extensions) {
             Token::new(kw, span)
         } else {
             Token::new(TokenKind::Identifier(text.to_string()), span)

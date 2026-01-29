@@ -140,6 +140,11 @@ pub struct Driver {
     /// enabled, disabled, or promoted to errors. Processed left-to-right from
     /// the command line to match GCC semantics.
     warning_config: WarningConfig,
+    /// Whether GNU C extensions are enabled. Defaults to true.
+    /// Set to false when -std=c99, -std=c11, etc. (strict ISO C mode) is used.
+    /// When false, bare GNU keywords like `typeof` and `asm` are treated as
+    /// identifiers (the __typeof__/__asm__ forms always work).
+    gnu_extensions: bool,
 }
 
 impl Driver {
@@ -183,6 +188,7 @@ impl Driver {
             nostdinc: false,
             undef_macros: Vec::new(),
             warning_config: WarningConfig::new(),
+            gnu_extensions: true,
         }
     }
 
@@ -418,8 +424,14 @@ impl Driver {
                     self.undef_macros.push(arg[2..].to_string());
                 }
 
-                // Standard version flag
-                arg if arg.starts_with("-std=") => {}
+                // Standard version flag: -std=c99 disables GNU extensions,
+                // -std=gnu99 (or no flag) enables them.
+                arg if arg.starts_with("-std=") => {
+                    let std_value = &arg[5..];
+                    // GNU dialects: gnu89, gnu99, gnu11, gnu17, gnu23, etc.
+                    // Strict ISO: c89, c99, c11, c17, c23, iso9899:*, etc.
+                    self.gnu_extensions = std_value.starts_with("gnu");
+                }
 
                 // Machine/target flags
                 "-mfunction-return=thunk-extern" => self.function_return_thunk = true,
@@ -1265,6 +1277,7 @@ impl Driver {
         // Build line map from preprocessor line markers for source location tracking
         source_manager.build_line_map(&preprocessed);
         let mut lexer = Lexer::new(&preprocessed, file_id);
+        lexer.set_gnu_extensions(self.gnu_extensions);
         let tokens = lexer.tokenize();
         if time_phases { eprintln!("[TIME] lex: {:.3}s ({} tokens)", t1.elapsed().as_secs_f64(), tokens.len()); }
 

@@ -472,6 +472,10 @@ impl RiscvCodegen {
                         self.emit_load_from_s0("t0", slot.0, "ld");
                     }
                     self.state.reg_cache.set_acc(v.0, is_alloca);
+                } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
+                    // Value has no slot or register but is in the accumulator cache
+                    // (skip-slot optimization: immediately-consumed values stay in t0).
+                    return;
                 } else {
                     self.state.emit("    li t0, 0");
                     self.state.reg_cache.invalidate_acc();

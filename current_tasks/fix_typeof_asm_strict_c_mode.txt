@@ -1,0 +1,18 @@
+Task: Treat typeof/asm as identifiers in strict C standard mode (-std=c99, etc.)
+
+Problem: The compiler treats bare `typeof` and `asm` as keywords even when
+-std=c99 or -std=c11 is specified. In strict ISO C mode, these should be
+regular identifiers. Only the __typeof__/__asm__ forms are always keywords.
+
+This prevents compiling projects like scc (a C compiler) which defines a
+function named `typeof` and builds with -std=c99.
+
+Fix:
+- Parse -std= flag in driver to detect strict C vs GNU dialect mode
+- Thread gnu_extensions flag through to lexer
+- Make bare typeof/asm conditional on gnu_extensions in keyword recognition
+- __typeof__/__asm__ forms always recognized as keywords
+
+Unblocks: scc (passes all 4 architectures)
+
+Status: in_progress

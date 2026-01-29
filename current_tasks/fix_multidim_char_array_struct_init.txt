@@ -1,0 +1,14 @@
+Fix multi-dimensional char array initialization inside structs.
+
+Bug: When a struct contains a multi-dimensional char array field
+(e.g., char headers[13][2][2048]) and the struct is initialized with
+string literal initializers, the char arrays are incorrectly left as
+all zeros instead of being filled with the string contents.
+
+Three code paths needed fixing:
+1. fill_multidim_array_field: string literal Expr items for char arrays
+2. fill_array_field_recursive: string literal in brace-wrapped char array init
+3. fill_composite_or_array_with_ptrs: multi-dimensional array dispatch in compound path
+4. emit_compound_field_init: multi-dimensional array in non-pointer compound path
+
+Status: in_progress

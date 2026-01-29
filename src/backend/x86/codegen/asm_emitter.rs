@@ -557,7 +557,8 @@ impl InlineAsmEmitter for X86Codegen {
             // Store the result (0 or 1) to the output variable
             if let Some(slot) = self.state.get_slot(ptr.0) {
                 let ty = op.operand_type;
-                if self.state.is_direct_slot(ptr.0) {
+                if self.state.is_alloca(ptr.0) {
+                    // True alloca: typed store
                     let store_instr = Self::mov_store_for_type(ty);
                     let src_reg = match ty {
                         IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
@@ -566,6 +567,10 @@ impl InlineAsmEmitter for X86Codegen {
                         _ => format!("%{}", reg),
                     };
                     self.state.emit_fmt(format_args!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
+                } else if self.state.is_direct_slot(ptr.0) {
+                    // Promoted asm output: movzbl already zero-extended, use
+                    // full 8-byte store to match value_to_reg's movq load.
+                    self.state.emit_fmt(format_args!("    movq %{}, {}(%rbp)", reg, slot.0));
                 } else {
                     let scratch = if reg != "rcx" { "rcx" } else { "rdx" };
                     self.state.out.emit_instr_reg("    pushq", scratch);
@@ -612,15 +617,36 @@ impl InlineAsmEmitter for X86Codegen {
                     self.state.out.emit_instr_reg("    popq", scratch);
                 }
             } else if self.state.is_direct_slot(ptr.0) {
-                // Alloca/promoted asm output: store directly to the stack slot
-                let store_instr = Self::mov_store_for_type(ty);
-                let src_reg = match ty {
-                    IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
-                    IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
-                    IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
-                    _ => format!("%{}", reg),
-                };
-                self.state.emit_fmt(format_args!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
+                if self.state.is_alloca(ptr.0) {
+                    // True alloca: store with type-appropriate size (loads go
+                    // through the typed C-level load path).
+                    let store_instr = Self::mov_store_for_type(ty);
+                    let src_reg = match ty {
+                        IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
+                        IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
+                        IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                        _ => format!("%{}", reg),
+                    };
+                    self.state.emit_fmt(format_args!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
+                } else {
+                    // Promoted asm output value: the slot holds the value itself
+                    // and value_to_reg loads it with movq (8 bytes), so we must
+                    // store all 8 bytes. Zero-extend sub-64-bit results first.
+                    match ty {
+                        IrType::I8 | IrType::U8 => {
+                            self.state.emit_fmt(format_args!("    movzbl %{}, %{}", Self::reg_to_8l(reg), Self::reg_to_32(reg)));
+                        }
+                        IrType::I16 | IrType::U16 => {
+                            self.state.emit_fmt(format_args!("    movzwl %{}, %{}", Self::reg_to_16(reg), Self::reg_to_32(reg)));
+                        }
+                        IrType::I32 | IrType::U32 | IrType::F32 => {
+                            // mov to 32-bit register implicitly zeros upper 32 bits
+                            self.state.emit_fmt(format_args!("    movl %{}, %{}", Self::reg_to_32(reg), Self::reg_to_32(reg)));
+                        }
+                        _ => {}
+                    }
+                    self.state.emit_fmt(format_args!("    movq %{}, {}(%rbp)", reg, slot.0));
+                }
             } else {
                 // Non-alloca: slot holds a pointer, store through it.
                 let scratch = if reg != "rcx" { "rcx" } else { "rdx" };
