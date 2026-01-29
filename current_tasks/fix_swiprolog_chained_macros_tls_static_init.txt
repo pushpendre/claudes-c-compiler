@@ -1,0 +1,16 @@
+Fix three compiler bugs discovered while investigating SWI-Prolog compilation:
+
+1. Preprocessor: chained macro expansion across newlines
+   - When a macro expansion produces a trailing function-like macro name,
+     and the arguments '(' are on the next line, the preprocessor must
+     accumulate lines to let the chained expansion work.
+   - Pattern: STEP1(x) expands to "x STEP2", and STEP2(y) is on the next line.
+
+2. x86-64 TLS: use Initial Exec model when -fPIC is enabled
+   - Shared libraries need @GOTTPOFF (Initial Exec) instead of @TPOFF (Local Exec)
+   - for thread-local variable access, or the linker rejects them.
+
+3. Static initializer: handle &((&global)->field) as relocatable constant
+   - When a struct initializer uses &((&global_struct)->field.member), the compiler
+     must resolve this as GlobalAddrOffset("global_struct", offset).
+   - Previously only handled &global.field (dot access), not -> (arrow through &).
