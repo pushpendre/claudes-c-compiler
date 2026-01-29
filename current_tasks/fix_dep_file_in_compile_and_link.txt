@@ -1,0 +1,14 @@
+Task: Fix dependency file generation in compile-and-link mode (run_full)
+
+Problem: When compiling and linking in one step (without -c), the compiler does not
+generate Make dependency files (.d files), even when -MD, -MMD, -MF, or -Wp,-MMD,<path>
+flags are specified. This prevents the compiler from being used as HOSTCC in the Linux
+kernel build, since the kernel expects the .d file to exist for fixdep to process.
+
+Root cause: The run_full method in driver/driver.rs does not call write_dep_file(),
+while run_preprocess_only, run_assembly_only, and run_object_only all do.
+
+Fix: Add write_dep_file call in run_full for each compiled .c file, using the first
+input file to derive the dependency target (matching GCC behavior).
+
+File: src/driver/driver.rs
