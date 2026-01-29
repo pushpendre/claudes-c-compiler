@@ -1,10 +1,11 @@
 Task: Fix Nix build setup for offline use
-Status: in_progress
+Status: in_progress (STOLEN - previous owner's work incomplete)
 
-Problem: /verify/setup_nix.sh fails because it creates a flake.nix without a
-flake.lock, causing nix to try to fetch flake-utils and nixpkgs from the
-internet (which is unavailable in this environment).
+Problem: /verify/setup_nix.sh and subsequent nix build commands fail in the
+offline container environment. The flake.lock was added but the full pipeline
+may still have issues.
 
-Solution: Add a flake.lock file to /verify/ that pins the inputs to the store
-paths already available in /nix-template. Update setup_nix.sh to copy the
-flake.lock alongside the flake.nix.
+Solution: Ensure the complete pipeline works:
+1. /verify/setup_nix.sh runs successfully
+2. cd /workspace/nix-build && CCC_PATH=... nix build --impure .#cccPkgs.hello
+Fix any remaining issues in the compiler or nix setup.
