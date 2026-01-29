@@ -1,0 +1,13 @@
+Fix conditional expression (ternary) type resolution when one branch is void*
+
+get_expr_ctype for Conditional expressions (line 1609 in expr_types.rs) currently
+just returns the type of the 'then' branch. This is wrong when one branch is void*
+and the other is T* — per C semantics, the composite type should be T*.
+
+This causes sizeof(*(cond ? (void*)e : (int*)8)) to return 1 instead of 4,
+which breaks the kernel's __builtin_choose_expr type-checking pattern used in
+min/max macros, causing ~30 files to fail with "could not resolve type of 'typeof'
+expression" during defconfig build.
+
+Fix: Update get_expr_ctype's Conditional arm to compute proper composite type,
+especially handling void* + T* → T* and T* + void* → T*.
