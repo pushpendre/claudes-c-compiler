@@ -22,4 +22,4 @@ Test results:
 - RISC-V: 2848/2859 (99.6%) tests, 11/12 projects PASS (mbedtls pre-existing)
 - i686: 2734/2737 (99.9%) tests, 11/12 projects PASS (mbedtls pre-existing)
 
-Status: in_progress
+Status: completed

@@ -757,17 +757,20 @@ impl<'a> ExprTypeChecker<'a> {
             | "__builtin_sin" | "__builtin_cos" | "__builtin_log"
             | "__builtin_log2" | "__builtin_exp" | "__builtin_pow"
             | "__builtin_floor" | "__builtin_ceil" | "__builtin_round"
-            | "__builtin_fmin" | "__builtin_fmax" | "__builtin_copysign" => Some(CType::Double),
+            | "__builtin_fmin" | "__builtin_fmax" | "__builtin_copysign"
+            | "__builtin_nextafter" => Some(CType::Double),
 
             "__builtin_inff" | "__builtin_huge_valf"
             | "__builtin_nanf" | "__builtin_fabsf" | "__builtin_sqrtf"
             | "__builtin_sinf" | "__builtin_cosf" | "__builtin_logf"
             | "__builtin_expf" | "__builtin_powf" | "__builtin_floorf"
             | "__builtin_ceilf" | "__builtin_roundf"
-            | "__builtin_copysignf" => Some(CType::Float),
+            | "__builtin_copysignf"
+            | "__builtin_nextafterf" => Some(CType::Float),
 
             "__builtin_infl" | "__builtin_huge_vall"
-            | "__builtin_nanl" | "__builtin_fabsl" => Some(CType::LongDouble),
+            | "__builtin_nanl" | "__builtin_fabsl"
+            | "__builtin_nextafterl" => Some(CType::LongDouble),
 
             // Integer-returning builtins
             "__builtin_fpclassify" | "__builtin_isnan" | "__builtin_isinf"

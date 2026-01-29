@@ -295,12 +295,14 @@ impl Lowerer {
             "__builtin_fabs" | "__builtin_sqrt" | "__builtin_sin" | "__builtin_cos"
             | "__builtin_log" | "__builtin_log2" | "__builtin_exp" | "__builtin_pow"
             | "__builtin_floor" | "__builtin_ceil" | "__builtin_round"
-            | "__builtin_fmin" | "__builtin_fmax" | "__builtin_copysign" => Some(IrType::F64),
+            | "__builtin_fmin" | "__builtin_fmax" | "__builtin_copysign"
+            | "__builtin_nextafter" => Some(IrType::F64),
             "__builtin_fabsf" | "__builtin_sqrtf" | "__builtin_sinf" | "__builtin_cosf"
             | "__builtin_logf" | "__builtin_expf" | "__builtin_powf"
             | "__builtin_floorf" | "__builtin_ceilf" | "__builtin_roundf"
-            | "__builtin_copysignf" => Some(IrType::F32),
-            "__builtin_fabsl" => Some(IrType::F128),
+            | "__builtin_copysignf"
+            | "__builtin_nextafterf" => Some(IrType::F32),
+            "__builtin_fabsl" | "__builtin_nextafterl" => Some(IrType::F128),
             // Integer-returning classification builtins
             "__builtin_fpclassify" | "__builtin_isnan" | "__builtin_isinf"
             | "__builtin_isfinite" | "__builtin_isnormal" | "__builtin_signbit"

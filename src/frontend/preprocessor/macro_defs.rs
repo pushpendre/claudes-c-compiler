@@ -834,14 +834,17 @@ impl MacroTable {
 
                 if ident == "__VA_ARGS__" && is_variadic {
                     let va_args = self.get_va_args(params, args);
-                    result.push_str(&va_args);
+                    let next = if i < len { Some(bytes[i]) } else { None };
+                    Self::append_with_paste_guard(&mut result, &va_args, next);
                 } else if let Some(idx) = params.iter().position(|p| p == ident) {
                     if is_variadic && has_named_variadic && idx == params.len() - 1 {
                         let va_args = self.get_named_va_args(idx, args);
-                        result.push_str(&va_args);
+                        let next = if i < len { Some(bytes[i]) } else { None };
+                        Self::append_with_paste_guard(&mut result, &va_args, next);
                     } else {
                         let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-                        result.push_str(arg);
+                        let next = if i < len { Some(bytes[i]) } else { None };
+                        Self::append_with_paste_guard(&mut result, arg, next);
                     }
                 } else {
                     result.push_str(ident);
