@@ -12,11 +12,11 @@ PASSING projects (confirmed):
 - libyaml (parsing)
 - Lua, TinyScheme, s7, pforth, 8cc (interpreters/compilers)
 - zopfli (compression - FIXED in this session, pointer-to-array-of-pointers stride bug)
+- parson (JSON - passes all 4 architectures)
+- MuJS (JavaScript interpreter - passes x86/ARM/RISC-V; i686 has pre-existing float issues)
 
 FAILING projects (investigated):
-- parson: segfault (139) - many test failures, possibly related to hex char literal sign extension (separate task)
 - yyjson: cmake build fails
-- MuJS: some test failures
 - picoc: linker error
 - femtolisp: test failures
 - Wren: 21 test failures + timeouts

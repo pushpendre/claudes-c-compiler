@@ -234,6 +234,296 @@ impl Driver {
         self.include_paths.push(path.to_string());
     }
 
+    /// Parse GCC-compatible command-line arguments and populate driver fields.
+    /// Returns `true` if early exit was handled (query flags like -dumpmachine).
+    pub fn parse_cli_args(&mut self, args: &[String]) -> bool {
+        // Detect target from binary name (argv[0])
+        let binary_name = std::path::Path::new(&args[0])
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("ccc");
+
+        self.target = if binary_name.contains("arm") || binary_name.contains("aarch64") {
+            Target::Aarch64
+        } else if binary_name.contains("riscv") {
+            Target::Riscv64
+        } else if binary_name.contains("i686") || binary_name.contains("i386") {
+            Target::I686
+        } else {
+            Target::X86_64
+        };
+
+        // Handle GCC query flags that exit immediately (before requiring input files).
+        // These are used by configure scripts to detect the compiler and target.
+        for arg in &args[1..] {
+            match arg.as_str() {
+                "-dumpmachine" => {
+                    println!("{}", self.target.triple());
+                    return true;
+                }
+                "-dumpversion" => {
+                    println!("6");
+                    return true;
+                }
+                "--version" | "-v" if args.len() == 2 => {
+                    println!("ccc 0.1.0 (GCC-compatible C compiler)");
+                    println!("Target: {}", self.target.triple());
+                    return true;
+                }
+                "-print-search-dirs" => {
+                    println!("install: /usr/lib/gcc/{}/13/", self.target.triple());
+                    println!("programs: /usr/bin/");
+                    println!("libraries: /usr/lib/");
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Save original args (excluding argv[0]) for gcc_fallback mode
+        self.original_args = args[1..].to_vec();
+
+        let mut explicit_language: Option<String> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                // Output file
+                "-o" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.output_path = args[i].clone();
+                        self.output_path_set = true;
+                    } else {
+                        eprintln!("error: -o requires an argument");
+                        std::process::exit(1);
+                    }
+                }
+
+                // Compilation mode flags
+                "-S" => self.mode = CompileMode::AssemblyOnly,
+                "-c" => self.mode = CompileMode::ObjectOnly,
+                "-E" => self.mode = CompileMode::PreprocessOnly,
+                "-P" => self.suppress_line_markers = true,
+
+                // Optimization levels
+                "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" => {
+                    self.opt_level = 2;
+                }
+
+                // Debug info
+                "-g" => self.debug_info = true,
+                arg if arg.starts_with("-g") && arg.len() > 2 => self.debug_info = true,
+
+                // Verbose/diagnostic flags
+                "-v" | "--verbose" => self.verbose = true,
+
+                // Linker library flags: -lfoo
+                arg if arg.starts_with("-l") => {
+                    self.linker_libs.push(arg[2..].to_string());
+                }
+
+                // Linker pass-through: -Wl,flag1,flag2,...
+                arg if arg.starts_with("-Wl,") => {
+                    for flag in arg[4..].split(',') {
+                        if !flag.is_empty() {
+                            self.linker_extra_args.push(format!("-Wl,{}", flag));
+                        }
+                    }
+                }
+
+                // Assembler pass-through: -Wa,flag1,flag2,...
+                arg if arg.starts_with("-Wa,") => {
+                    for flag in arg[4..].split(',') {
+                        if !flag.is_empty() {
+                            self.assembler_extra_args.push(flag.to_string());
+                        }
+                    }
+                }
+
+                // Preprocessor pass-through: -Wp,-MMD,path or -Wp,-MD,path
+                arg if arg.starts_with("-Wp,") => {
+                    let flags: Vec<&str> = arg[4..].splitn(2, ',').collect();
+                    if flags.len() == 2 && (flags[0] == "-MMD" || flags[0] == "-MD") {
+                        self.dep_file = Some(flags[1].to_string());
+                    }
+                }
+
+                // Warning flags
+                arg if arg.starts_with("-W") => {
+                    let flag = &arg[2..];
+                    if !flag.is_empty() {
+                        self.warning_config.process_flag(flag);
+                    }
+                }
+
+                // Preprocessor defines
+                "-D" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.add_define(&args[i]);
+                    } else {
+                        eprintln!("error: -D requires an argument");
+                        std::process::exit(1);
+                    }
+                }
+                arg if arg.starts_with("-D") => self.add_define(&arg[2..]),
+
+                // Force-include files
+                "-include" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.force_includes.push(args[i].clone());
+                    } else {
+                        eprintln!("error: -include requires an argument");
+                        std::process::exit(1);
+                    }
+                }
+
+                // Include paths
+                "-I" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.add_include_path(&args[i]);
+                    } else {
+                        eprintln!("error: -I requires an argument");
+                        std::process::exit(1);
+                    }
+                }
+                arg if arg.starts_with("-I") => self.add_include_path(&arg[2..]),
+
+                // Library search paths
+                "-L" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.linker_paths.push(args[i].clone());
+                    }
+                }
+                arg if arg.starts_with("-L") => {
+                    self.linker_paths.push(arg[2..].to_string());
+                }
+
+                // Undefine macro
+                "-U" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.undef_macros.push(args[i].clone());
+                    }
+                }
+                arg if arg.starts_with("-U") => {
+                    self.undef_macros.push(arg[2..].to_string());
+                }
+
+                // Standard version flag
+                arg if arg.starts_with("-std=") => {}
+
+                // Machine/target flags
+                "-mfunction-return=thunk-extern" => self.function_return_thunk = true,
+                "-mindirect-branch=thunk-extern" => self.indirect_branch_thunk = true,
+                "-m16" | "-m32" => self.gcc_fallback = true,
+                "-mno-sse" | "-mno-sse2" | "-mno-mmx" | "-mno-sse3" | "-mno-ssse3"
+                | "-mno-sse4" | "-mno-sse4.1" | "-mno-sse4.2" | "-mno-avx"
+                | "-mno-avx2" | "-mno-avx512f" | "-mno-3dnow" => {
+                    self.no_sse = true;
+                }
+                "-mgeneral-regs-only" => self.general_regs_only = true,
+                "-mcmodel=kernel" => self.code_model_kernel = true,
+                "-mcmodel=small" | "-mcmodel=medlow" | "-mcmodel=medium" | "-mcmodel=medany" | "-mcmodel=large" => {
+                    self.code_model_kernel = false;
+                }
+                arg if arg.starts_with("-mabi=") => {
+                    self.riscv_abi = Some(arg["-mabi=".len()..].to_string());
+                }
+                arg if arg.starts_with("-march=") => {
+                    self.riscv_march = Some(arg["-march=".len()..].to_string());
+                }
+                "-mno-relax" => self.riscv_no_relax = true,
+                arg if arg.starts_with("-m") => {}
+
+                // Feature flags
+                "-fPIC" | "-fpic" | "-fPIE" | "-fpie" => self.pic = true,
+                "-fno-PIC" | "-fno-pic" | "-fno-PIE" | "-fno-pie" => self.pic = false,
+                "-fcf-protection=branch" | "-fcf-protection=full" => self.cf_protection_branch = true,
+                "-fcf-protection=none" => self.cf_protection_branch = false,
+                arg if arg.starts_with("-fpatchable-function-entry=") => {
+                    let val = &arg["-fpatchable-function-entry=".len()..];
+                    let parts: Vec<&str> = val.split(',').collect();
+                    let total: u32 = parts[0].parse().unwrap_or(0);
+                    let before: u32 = if parts.len() > 1 { parts[1].parse().unwrap_or(0) } else { 0 };
+                    self.patchable_function_entry = Some((total, before));
+                }
+                "-fno-jump-tables" => self.no_jump_tables = true,
+                arg if arg.starts_with("-f") => {}
+
+                // Linker flags
+                "-static" => self.static_link = true,
+                "-shared" => self.shared_lib = true,
+                "-no-pie" | "-pie" => {}
+                "-nostdlib" => self.nostdlib = true,
+                "-nostdinc" => self.nostdinc = true,
+                "-nodefaultlibs" => {}
+
+                // Language selection
+                "-x" => {
+                    i += 1;
+                    if i < args.len() {
+                        let lang = args[i].as_str();
+                        if lang == "none" {
+                            explicit_language = None;
+                        } else {
+                            explicit_language = Some(args[i].clone());
+                        }
+                    } else {
+                        eprintln!("error: -x requires an argument");
+                        std::process::exit(1);
+                    }
+                }
+
+                // Dependency generation flags
+                "-MD" | "-MMD" => {
+                    if self.dep_file.is_none() {
+                        self.dep_file = Some(String::new());
+                    }
+                }
+                "-MP" | "-M" | "-MM" => {}
+                "-MF" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.dep_file = Some(args[i].clone());
+                    }
+                }
+                "-MT" | "-MQ" => { i += 1; }
+
+                // Misc flags
+                "-rdynamic" => self.linker_extra_args.push("-rdynamic".to_string()),
+                "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
+
+                // Stdin input
+                "-" => {
+                    self.input_files.push("-".to_string());
+                    self.explicit_language = explicit_language.clone();
+                }
+
+                // Unknown flags
+                arg if arg.starts_with('-') => {
+                    if self.verbose {
+                        eprintln!("warning: unknown flag: {}", arg);
+                    }
+                }
+
+                // Input file
+                _ => {
+                    if explicit_language.is_some() {
+                        self.explicit_language = explicit_language.clone();
+                    }
+                    self.input_files.push(args[i].clone());
+                }
+            }
+            i += 1;
+        }
+
+        false
+    }
+
     /// Determine the output path for a given input file and mode.
     fn output_for_input(&self, input_file: &str) -> String {
         if self.output_path_set {

@@ -58,7 +58,7 @@ impl I686Codegen {
                 self.emit_f64_to_signed(src, to_ty, dest);
             }
             CastKind::FloatToUnsigned { from_f64: true, to_u64 } => {
-                self.emit_f64_to_unsigned(src, to_u64, dest);
+                self.emit_f64_to_unsigned(src, to_u64, to_ty, dest);
             }
             CastKind::FloatToFloat { widen: false } => {
                 // F64 -> F32: load full 8-byte F64, convert to F32 on x87
@@ -241,13 +241,19 @@ impl I686Codegen {
             self.state.emit("    fisttpl (%esp)");
             self.state.emit("    movl (%esp), %eax");
             self.state.emit("    addl $4, %esp");
+            // Truncate to target width for sub-32-bit signed types
+            match to_ty {
+                IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                _ => {}
+            }
             self.state.reg_cache.invalidate_acc();
             self.store_eax_to(dest);
         }
     }
 
     /// F64 -> unsigned integer via x87 FPU.
-    fn emit_f64_to_unsigned(&mut self, src: &Operand, to_u64: bool, dest: &Value) {
+    fn emit_f64_to_unsigned(&mut self, src: &Operand, to_u64: bool, to_ty: IrType, dest: &Value) {
         self.emit_f64_load_to_x87(src);
         if to_u64 {
             // F64 -> U64: use fisttpq for full 64-bit conversion
@@ -258,11 +264,17 @@ impl I686Codegen {
             self.state.emit("    addl $8, %esp");
             self.emit_store_acc_pair(dest);
         } else {
-            // F64 -> unsigned 32-bit: use fisttpq then take low 32 bits
+            // F64 -> unsigned sub-64-bit: use fisttpq then take low 32 bits
             self.state.emit("    subl $8, %esp");
             self.state.emit("    fisttpq (%esp)");
             self.state.emit("    movl (%esp), %eax");
             self.state.emit("    addl $8, %esp");
+            // Truncate to target width for sub-32-bit unsigned types
+            match to_ty {
+                IrType::U8 => self.state.emit("    movzbl %al, %eax"),
+                IrType::U16 => self.state.emit("    movzwl %ax, %eax"),
+                _ => {}
+            }
             self.state.reg_cache.invalidate_acc();
             self.store_eax_to(dest);
         }
@@ -529,6 +541,12 @@ impl I686Codegen {
                 // F32 -> signed int via SSE
                 self.state.emit("    movd %eax, %xmm0");
                 self.state.emit("    cvttss2si %xmm0, %eax");
+                // Truncate to target width for sub-32-bit signed types
+                match to_ty {
+                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                    _ => {}
+                }
             }
 
             CastKind::FloatToUnsigned { from_f64: false, to_u64 } => {
@@ -546,6 +564,12 @@ impl I686Codegen {
                     // F32 -> unsigned int: cvttss2si treats result as signed
                     self.state.emit("    movd %eax, %xmm0");
                     self.state.emit("    cvttss2si %xmm0, %eax");
+                    // Truncate to target width for sub-32-bit unsigned types
+                    match to_ty {
+                        IrType::U8 => self.state.emit("    movzbl %al, %eax"),
+                        IrType::U16 => self.state.emit("    movzwl %ax, %eax"),
+                        _ => {}
+                    }
                 }
             }
 

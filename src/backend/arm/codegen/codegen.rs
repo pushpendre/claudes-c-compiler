@@ -3080,6 +3080,13 @@ impl ArchCodegen for ArmCodegen {
                     self.state.emit("    fmov s0, w0");
                     self.state.emit("    fcvtzs x0, s0");
                 }
+                // Truncate to target width for sub-64-bit signed types
+                match to_ty {
+                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
+                    IrType::I16 => self.state.emit("    sxth x0, w0"),
+                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
+                    _ => {}
+                }
             }
 
             CastKind::FloatToUnsigned { from_f64, .. } => {
@@ -3089,6 +3096,13 @@ impl ArchCodegen for ArmCodegen {
                 } else {
                     self.state.emit("    fmov s0, w0");
                     self.state.emit("    fcvtzu x0, s0");
+                }
+                // Truncate to target width for sub-64-bit unsigned types
+                match to_ty {
+                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::U32 => self.state.emit("    mov w0, w0"),
+                    _ => {}
                 }
             }
 

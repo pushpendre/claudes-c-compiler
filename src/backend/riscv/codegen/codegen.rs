@@ -2343,6 +2343,19 @@ impl ArchCodegen for RiscvCodegen {
                     self.state.emit("    fmv.w.x ft0, t0");
                     self.state.emit("    fcvt.l.s t0, ft0, rtz");
                 }
+                // Truncate to target width for sub-64-bit signed types
+                match to_ty {
+                    IrType::I8 => {
+                        self.state.emit("    slli t0, t0, 56");
+                        self.state.emit("    srai t0, t0, 56");
+                    }
+                    IrType::I16 => {
+                        self.state.emit("    slli t0, t0, 48");
+                        self.state.emit("    srai t0, t0, 48");
+                    }
+                    IrType::I32 => self.state.emit("    sext.w t0, t0"),
+                    _ => {}
+                }
             }
 
             CastKind::FloatToUnsigned { from_f64, .. } => {
@@ -2352,6 +2365,19 @@ impl ArchCodegen for RiscvCodegen {
                 } else {
                     self.state.emit("    fmv.w.x ft0, t0");
                     self.state.emit("    fcvt.lu.s t0, ft0, rtz");
+                }
+                // Truncate to target width for sub-64-bit unsigned types
+                match to_ty {
+                    IrType::U8 => self.state.emit("    andi t0, t0, 0xff"),
+                    IrType::U16 => {
+                        self.state.emit("    slli t0, t0, 48");
+                        self.state.emit("    srli t0, t0, 48");
+                    }
+                    IrType::U32 => {
+                        self.state.emit("    slli t0, t0, 32");
+                        self.state.emit("    srli t0, t0, 32");
+                    }
+                    _ => {}
                 }
             }
 

@@ -408,6 +408,13 @@ impl X86Codegen {
                     self.state.emit("    movd %eax, %xmm0");
                     self.state.emit("    cvttss2siq %xmm0, %rax");
                 }
+                // Truncate to target width for sub-64-bit signed types
+                match to_ty {
+                    IrType::I8 => self.state.emit("    movsbq %al, %rax"),
+                    IrType::I16 => self.state.emit("    movswq %ax, %rax"),
+                    IrType::I32 => self.state.emit("    movslq %eax, %rax"),
+                    _ => {}
+                }
             }
 
             CastKind::FloatToUnsigned { from_f64, to_u64 } => {
@@ -435,6 +442,15 @@ impl X86Codegen {
                 } else {
                     self.state.emit("    movd %eax, %xmm0");
                     self.state.emit("    cvttss2siq %xmm0, %rax");
+                }
+                // Truncate to target width for sub-64-bit unsigned types
+                if !to_u64 {
+                    match to_ty {
+                        IrType::U8 => self.state.emit("    movzbq %al, %rax"),
+                        IrType::U16 => self.state.emit("    movzwq %ax, %rax"),
+                        IrType::U32 => self.state.emit("    movl %eax, %eax"),
+                        _ => {}
+                    }
                 }
             }
 
