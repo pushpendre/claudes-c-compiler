@@ -30,9 +30,8 @@
 //!   `long long / 10`) fall through to the native div/idiv instruction.
 //!   TODO: Implement 64-bit division using 128-bit magic numbers.
 //!
-//! - Only positive divisors >= 2 are handled. Division by negative constants
-//!   (e.g. `x / -7`) is not optimized.
-//!   TODO: Support negative divisors via negation of the positive-divisor result.
+//! - Negative divisors are handled via identity: `x / -C == -(x / C)` and
+//!   `x % -C == x % C` (in C, the sign of the remainder follows the dividend).
 
 use crate::common::types::IrType;
 use crate::ir::ir::{
@@ -197,6 +196,11 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                                         IrType::I64 if lhs_is_i32(lhs) => expand_sdiv32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
                                         _ => None,
                                     }
+                                } else if divisor < -1 && divisor > i32::MIN as i64 {
+                                    // Negative divisor: x / -C == -(x / C)
+                                    // Exclude i32::MIN because -i32::MIN overflows i32.
+                                    let pos_divisor = (-divisor) as i32;
+                                    expand_sdiv_neg(*dest, lhs, pos_divisor, *ty, &lhs_is_i32, &mut next_id)
                                 } else {
                                     None
                                 }
@@ -217,6 +221,15 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                                     match *ty {
                                         IrType::I32 => expand_srem32(*dest, lhs, divisor as i32, *ty, &mut next_id),
                                         IrType::I64 if lhs_is_i32(lhs) => expand_srem32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
+                                        _ => None,
+                                    }
+                                } else if divisor < -1 && divisor > i32::MIN as i64 {
+                                    // Negative divisor: x % -C == x % C (sign follows dividend in C)
+                                    // Exclude i32::MIN because -i32::MIN overflows i32.
+                                    let pos_divisor = (-divisor) as i32;
+                                    match *ty {
+                                        IrType::I32 => expand_srem32(*dest, lhs, pos_divisor, *ty, &mut next_id),
+                                        IrType::I64 if lhs_is_i32(lhs) => expand_srem32_in_i64(*dest, lhs, pos_divisor, &mut next_id),
                                         _ => None,
                                     }
                                 } else {
@@ -959,6 +972,36 @@ fn expand_sdiv32_in_i64(
     Some(insts)
 }
 
+/// Expand `dest = x /s -C` by computing `-(x /s C)`.
+/// Handles both native I32 and I64-promoted cases.
+fn expand_sdiv_neg(
+    dest: Value,
+    x: &Operand,
+    pos_d: i32,
+    ty: IrType,
+    lhs_is_i32: &dyn Fn(&Operand) -> bool,
+    next_id: &mut u32,
+) -> Option<Vec<Instruction>> {
+    // Compute x / pos_d into a temporary
+    let quotient = fresh_value(next_id);
+    let mut insts = match ty {
+        IrType::I32 => expand_sdiv32(quotient, x, pos_d, ty, next_id)?,
+        IrType::I64 if lhs_is_i32(x) => expand_sdiv32_in_i64(quotient, x, pos_d, next_id)?,
+        _ => return None,
+    };
+
+    // Negate: dest = 0 - quotient
+    insts.push(Instruction::BinOp {
+        dest,
+        op: IrBinOp::Sub,
+        lhs: Operand::Const(IrConst::from_i64(0, ty)),
+        rhs: Operand::Value(quotient),
+        ty,
+    });
+
+    Some(insts)
+}
+
 /// Expand `dest = x %u C` in I64.
 fn expand_urem32_in_i64(
     dest: Value,
@@ -1140,6 +1183,47 @@ mod tests {
                 let sign_bit = (shifted as u64) >> 63;
                 let result = (shifted + sign_bit as i64) as i32;
                 assert_eq!(result, x / d, "Failed for x={} d={}", x, d);
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_divisor_sdiv() {
+        // Negative divisor: x / -C == -(x / C)
+        // We compute x / C using the magic number, then negate.
+        for pos_d in 2i32..=20 {
+            let neg_d = -pos_d;
+            let (magic, shift) = compute_signed_magic_32(pos_d);
+            let test_vals: Vec<i32> = (-1000..1000)
+                .chain(std::iter::once(i32::MAX))
+                .chain(std::iter::once(i32::MIN + 1))
+                .collect();
+            for &x in &test_vals {
+                // Compute x / pos_d using magic numbers
+                let x64 = x as i64;
+                let product = x64 * magic;
+                let hi = product >> 32;
+                let shifted = hi >> shift;
+                let sign_bit = (shifted as u64) >> 63;
+                let pos_result = (shifted + sign_bit as i64) as i32;
+                // Negate for negative divisor
+                let result = -pos_result;
+                assert_eq!(result, x / neg_d, "Failed for x={} d={}", x, neg_d);
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_divisor_srem() {
+        // Negative divisor remainder: x % -C == x % C (sign follows dividend in C)
+        for pos_d in 2i32..=20 {
+            let neg_d = -pos_d;
+            let test_vals: Vec<i32> = (-1000..1000)
+                .chain(std::iter::once(i32::MAX))
+                .chain(std::iter::once(i32::MIN + 1))
+                .collect();
+            for &x in &test_vals {
+                assert_eq!(x % pos_d, x % neg_d, "x % {} != x % {} for x={}", pos_d, neg_d, x);
             }
         }
     }
