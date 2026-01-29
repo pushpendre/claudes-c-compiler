@@ -1,0 +1,14 @@
+Deduplicate long_double.rs: Unify x87/f128 parsing pipeline
+
+Status: in_progress
+
+Task:
+- Unify parse_long_double_to_x87_bytes and parse_long_double_to_f128_bytes into a
+  shared preprocessing function that handles suffix stripping, sign, hex/special detection
+- Unify parse_decimal_float_to_x87 and parse_decimal_float_to_f128 into a single
+  function that collects digits and computes the decimal exponent
+- Unify decimal_to_x87_bigint and decimal_to_f128_bigint into a generic function
+  parameterized by mantissa bit width
+
+Files affected:
+- src/common/long_double.rs (primary)
