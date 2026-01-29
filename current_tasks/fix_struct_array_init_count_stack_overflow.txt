@@ -1,0 +1,24 @@
+Task: Fix stack overflow from struct-valued expressions in unsized array init count
+
+Status: in_progress
+
+Problem:
+When an unsized local array of structs is initialized with struct-valued expressions
+(e.g., global struct variables), compute_struct_array_init_count() miscounts the
+elements. It treats struct-valued expressions like `g1` as single scalar field slots
+instead of whole struct elements, resulting in an undersized array allocation.
+
+This causes stack buffer overflows because the actual initialization code correctly
+handles struct-valued expressions and writes all elements, overwriting the return
+address and other stack data.
+
+Example:
+  S g1 = {...}, g2 = {...};
+  int main() {
+      const S arr[] = { g1, g2, {0,0,0,0,0} };  // counted as 2 elements instead of 3
+  }
+
+Fix: In const_eval_init_size.rs, check if an Initializer::Expr is a struct-valued
+expression using struct_value_size(), and count it as a complete array element.
+
+Affected project: nghttp2 (segfault in test suite due to stack corruption in main())
