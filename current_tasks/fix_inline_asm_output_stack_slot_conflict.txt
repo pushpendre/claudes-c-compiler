@@ -1,0 +1,18 @@
+Task: Fix inline assembly output operand stack slot conflict
+
+Problem: When inline assembly has memory-indirect output operands (like "=a"(*eax)),
+the compiler stores the output destination pointers on the stack. However, during
+input value preparation, those same stack slots get reused for loading the input
+values, overwriting the output pointers. After the inline asm executes, the compiler
+tries to store the results to the corrupted pointers, causing NULL dereferences.
+
+Example from Linux kernel (cpu_detect using cpuid inline asm):
+  asm volatile("cpuid"
+      : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+      : "0"(*eax), "2"(*ecx) : "memory");
+
+The stack slot for the edx output pointer gets overwritten by the eax input value.
+
+Impact: Causes kernel crash during boot in cpu_detect(), prevents Linux from booting.
+
+Status: in_progress
