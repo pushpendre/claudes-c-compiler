@@ -1,0 +1,10 @@
+Task: Fix i686 inline asm 64-bit register pair handling
+Status: in_progress
+
+Problem: On i686, inline asm constraints like "+r" with 64-bit (unsigned long long)
+values only allocate a single 32-bit register, causing the high 32 bits to be lost.
+This breaks xxhash's XXH_COMPILER_GUARD macro: __asm__("" : "+r" (val))
+
+Fix: Implement register pair allocation for 64-bit inline asm operands on i686.
+When a GP register constraint is used with an I64/U64 type, allocate two registers
+(e.g., eax:edx), load both halves, and store both halves back.
