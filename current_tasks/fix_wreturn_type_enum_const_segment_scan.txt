@@ -7,19 +7,24 @@ Two remaining -Wreturn-type false positives blocking the Linux kernel build:
    - while(true) is not recognized as an infinite loop because try_eval_constant_bool
      only handles integer literals, not enum constant identifiers
    - Fix: Look up Expr::Identifier names in the enum_constants table
-   - Affected files: interval_tree.c (4 errors), xz_dec_stream.c (1 error)
+   - Affected files: interval_tree.c (4 errors), xz_dec_stream.c (1 error),
+     zstd_decompress.c (1 error), zstd_decompress_block.c (2 errors), workqueue.c (1 error)
 
 2. Switch segment outcome scanning past trailing null statements
-   - Macros like RETURN_ERROR(...) expand to: do { return ...; } while(0);
-   - When used as the last case in a switch, the trailing semicollon after while(0)
-     creates an empty/null statement: do { return ...; } while(0);;
-   - segment_outcome() only checks the LAST BlockItem in a segment
-   - The last BlockItem is the null statement (falls through), not the do-while (returns)
-   - Fix: scan backwards past Stmt::Expr(None) and similar empty statements
-   - Affected files: zstd_decompress.c, zstd_decompress_block.c (3 errors)
+   - Investigation showed this was NOT needed: all errors were caused by (1) above.
+   - The existing forward-scanning logic in segment_outcome() already handles the
+     do-while pattern correctly.
 
-Together these fix 8 of the 9 remaining -Wreturn-type errors (the 9th is workqueue.c
-which needs investigation into -DKBUILD_MODNAME interaction).
+Results:
+   - Enum constant fix resolves ALL 9 remaining -Wreturn-type errors in kernel build
+   - Another agent (fix_switch_exhaustiveness_wreturn_type) also implemented the same
+     sema.rs fix; our commit provides additional regression tests
+   - 311/312 unit tests pass (1 pre-existing RISC-V failure)
+   - 824/850 integration tests pass (26 pre-existing arch-specific failures, 0 regressions)
 
-Status: in_progress
+Commits:
+   - ee208fa7: Test files for enum constant while loops and exhaustive switch return type
+
+Status: completed
 Started: 2026-01-30
+Completed: 2026-01-30
