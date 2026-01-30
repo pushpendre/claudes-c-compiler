@@ -1,0 +1,9 @@
+Improve peephole optimizer: eliminate redundant cltq past non-rax-clobbering instructions
+
+Two changes:
+1. Add Cltq as a producer for Cltq (back-to-back cltq;cltq elimination)
+2. When a cltq consumer is found but the immediately preceding instruction is not
+   a sign-extension producer, scan backward past instructions that don't write %rax
+   to find the actual producer (e.g., cltq; mov %rax,%r8; cltq -> eliminate second cltq)
+
+Status: in_progress
