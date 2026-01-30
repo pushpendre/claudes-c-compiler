@@ -1,0 +1,17 @@
+Task: Add register-to-register copy propagation to x86 peephole optimizer
+
+The CCC peephole optimizer handles store-to-stack/load-from-stack forwarding
+(global_store_forwarding) but does NOT handle register-to-register copy
+propagation. This means patterns like:
+
+    movq %rax, %rcx         # copy rax to rcx
+    movslq (%rcx), %rax     # use rcx as base address
+
+are not optimized to:
+
+    movslq (%rax), %rax     # use rax directly
+
+This causes ~3x code bloat compared to GCC in hot DOOM rendering loops.
+
+Plan: Add a new peephole pass that propagates register copies into
+subsequent memory operands, eliminating intermediate register copies.
