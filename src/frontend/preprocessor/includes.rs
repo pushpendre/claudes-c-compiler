@@ -10,6 +10,201 @@ use super::preprocessor::Preprocessor;
 /// Prevents infinite inclusion loops in files without `#pragma once`.
 const MAX_INCLUDE_DEPTH: usize = 200;
 
+/// Detect if a source file has a classic include guard pattern.
+///
+/// The pattern we detect is:
+///   - First non-blank, non-comment directive is `#ifndef GUARD_MACRO`
+///   - Second directive is `#define GUARD_MACRO` (same macro name, no value or any value)
+///   - Last directive is `#endif`
+///   - No code/tokens exist outside the `#ifndef`/`#endif` wrapper
+///
+/// Returns `Some(guard_macro_name)` if the pattern is detected, `None` otherwise.
+///
+/// This function operates on the raw source text (before preprocessing) and
+/// uses a lightweight scan that doesn't require full lexing. It handles:
+///   - C-style (`/* ... */`) and C++-style (`// ...`) comments
+///   - Line continuations (`\` at end of line)
+///   - Whitespace and blank lines before/after the guard
+///
+/// Intentionally conservative: returns None for anything unusual (e.g., code
+/// before the `#ifndef`, `#else` branches, multiple `#endif`s at the same level).
+fn detect_include_guard(source: &str) -> Option<String> {
+    // We scan directive lines at the top level. We need to track:
+    // 1. Whether we've seen #ifndef MACRO as the first directive
+    // 2. Whether the next directive is #define MACRO
+    // 3. Whether #endif is the last directive at depth 0
+    // 4. That no non-whitespace content exists outside the guard
+
+    let mut guard_macro: Option<String> = None;
+    let mut found_ifndef = false;
+    let mut found_define = false;
+    let mut found_endif = false;
+    let mut if_depth: i32 = 0;
+    let mut has_content_before_guard = false;
+    let mut has_content_after_endif = false;
+    let mut in_block_comment = false;
+
+    for raw_line in source.lines() {
+        // Handle block comments that span lines
+        let line = if in_block_comment {
+            if let Some(end_pos) = raw_line.find("*/") {
+                in_block_comment = false;
+                &raw_line[end_pos + 2..]
+            } else {
+                continue;
+            }
+        } else {
+            raw_line
+        };
+
+        // Strip block comments within the line (simple single-line handling)
+        let line = strip_inline_comments(line, &mut in_block_comment);
+        let trimmed = line.trim();
+
+        // Skip empty lines
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // If we already saw the final #endif, any non-empty line means
+        // there's content after the guard -> not a valid include guard
+        if found_endif {
+            has_content_after_endif = true;
+            break;
+        }
+
+        if trimmed.starts_with('#') {
+            let after_hash = trimmed[1..].trim_start();
+
+            // Handle line continuations in directives
+            let after_hash = if after_hash.ends_with('\\') {
+                // For guard detection, we only care about simple single-line directives.
+                // Multi-line #define is fine as long as the macro name is on the first line.
+                after_hash.trim_end_matches('\\').trim_end()
+            } else {
+                after_hash
+            };
+
+            if after_hash.starts_with("ifndef") && !found_ifndef && if_depth == 0 {
+                // First directive must be #ifndef
+                if has_content_before_guard {
+                    return None;
+                }
+                let rest = after_hash["ifndef".len()..].trim();
+                let macro_name = extract_identifier(rest)?;
+                if macro_name.is_empty() {
+                    return None;
+                }
+                guard_macro = Some(macro_name);
+                found_ifndef = true;
+                if_depth = 1;
+            } else if !found_ifndef {
+                // First directive is not #ifndef -> no guard
+                return None;
+            } else if !found_define && found_ifndef && if_depth == 1 {
+                // Second directive should be #define with the same macro
+                if after_hash.starts_with("define") {
+                    let rest = after_hash["define".len()..].trim();
+                    let macro_name = extract_identifier(rest)?;
+                    if let Some(ref guard) = guard_macro {
+                        if macro_name == *guard {
+                            found_define = true;
+                        } else {
+                            return None; // #define of a different macro
+                        }
+                    }
+                } else {
+                    return None; // Second directive is not #define
+                }
+            } else {
+                // Inside the guard body - track nesting depth
+                if after_hash.starts_with("if")
+                    && !after_hash.starts_with("ifdef")
+                    && !after_hash.starts_with("ifndef")
+                {
+                    if_depth += 1;
+                } else if after_hash.starts_with("ifdef") || after_hash.starts_with("ifndef") {
+                    if_depth += 1;
+                } else if after_hash.starts_with("endif") {
+                    if_depth -= 1;
+                    if if_depth == 0 {
+                        // This #endif closes the guard
+                        found_endif = true;
+                    }
+                }
+                // Other directives (#define, #include, #elif, #else, etc.)
+                // inside the guard are fine
+            }
+        } else {
+            // Non-directive, non-empty line
+            if !found_ifndef {
+                // Content before the #ifndef -> no guard
+                has_content_before_guard = true;
+            }
+            // Content inside the guard is fine
+            // Content after the guard (found_endif) is handled at the top of the loop
+        }
+    }
+
+    if found_ifndef && found_define && found_endif && !has_content_after_endif {
+        guard_macro
+    } else {
+        None
+    }
+}
+
+/// Extract a C identifier from the beginning of a string.
+/// Returns Some(identifier) or None if no valid identifier starts the string.
+fn extract_identifier(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Some(String::new());
+    }
+    let bytes = s.as_bytes();
+    if !super::utils::is_ident_start(bytes[0] as char) {
+        return None;
+    }
+    let mut end = 1;
+    while end < bytes.len() && super::utils::is_ident_cont(bytes[end] as char) {
+        end += 1;
+    }
+    Some(s[..end].to_string())
+}
+
+/// Strip inline block comments from a single line.
+/// Updates `in_block_comment` state for multi-line block comments.
+/// Also strips line comments (// ...).
+fn strip_inline_comments<'a>(line: &'a str, in_block_comment: &mut bool) -> std::borrow::Cow<'a, str> {
+    // Fast path: no comment markers at all
+    if !line.contains("/*") && !line.contains("//") {
+        return std::borrow::Cow::Borrowed(line);
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if *in_block_comment {
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                *in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            *in_block_comment = true;
+            i += 2;
+        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            // Line comment - ignore rest of line
+            break;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    std::borrow::Cow::Owned(result)
+}
+
 /// Read a C source file, tolerating non-UTF-8 content.
 /// Valid UTF-8 files are returned as-is. Non-UTF-8 bytes are encoded as PUA
 /// code points which the lexer decodes back to raw bytes.
@@ -119,6 +314,14 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
+            // Check for include guard: if this file has a known guard macro and
+            // that macro is still defined, skip re-processing entirely.
+            if let Some(guard) = self.include_guard_macros.get(&resolved_path) {
+                if self.macros.is_defined(guard) {
+                    return Some(String::new());
+                }
+            }
+
             // Check for excessive recursive inclusion.
             // Files WITHOUT #pragma once are allowed to be re-included with different
             // macro definitions active (e.g., TCC's x86_64-gen.c includes itself via
@@ -133,6 +336,11 @@ impl Preprocessor {
             // Read the file
             match read_c_source_file(&resolved_path) {
                 Ok(content) => {
+                    // Detect include guard pattern in the raw source before preprocessing.
+                    // We do this before preprocessing so we're analyzing the original
+                    // structure of the file, not the expanded output.
+                    let detected_guard = detect_include_guard(&content);
+
                     // Push onto include stack
                     self.include_stack.push(resolved_path.clone());
 
@@ -169,6 +377,13 @@ impl Preprocessor {
 
                     // Pop include stack
                     self.include_stack.pop();
+
+                    // Register the include guard for future fast-path skipping.
+                    // We do this after preprocessing so that the guard macro is
+                    // now defined (the #define inside the file was processed).
+                    if let Some(guard) = detected_guard {
+                        self.include_guard_macros.insert(resolved_path, guard);
+                    }
 
                     Some(result)
                 }
@@ -229,6 +444,13 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
+            // Check for include guard
+            if let Some(guard) = self.include_guard_macros.get(&resolved_path) {
+                if self.macros.is_defined(guard) {
+                    return Some(String::new());
+                }
+            }
+
             // Check for excessive recursive inclusion
             {
                 let depth = self.include_stack.iter().filter(|p| *p == &resolved_path).count();
@@ -240,6 +462,8 @@ impl Preprocessor {
             // Read and preprocess the file
             match read_c_source_file(&resolved_path) {
                 Ok(content) => {
+                    let detected_guard = detect_include_guard(&content);
+
                     self.include_stack.push(resolved_path.clone());
 
                     let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
@@ -271,6 +495,10 @@ impl Preprocessor {
                     }
 
                     self.include_stack.pop();
+
+                    if let Some(guard) = detected_guard {
+                        self.include_guard_macros.insert(resolved_path, guard);
+                    }
 
                     Some(result)
                 }

@@ -63,6 +63,18 @@ pub struct Preprocessor {
     /// The current_dir_key is the parent directory of the including file for quoted
     /// includes (since resolution depends on it), or empty for system includes.
     pub(super) include_resolve_cache: FxHashMap<(String, bool, PathBuf), Option<PathBuf>>,
+    /// Include guard detection: maps file paths to their guard macro names.
+    ///
+    /// After preprocessing an included file, we scan the raw source to detect if
+    /// the entire file is wrapped in a classic include guard pattern:
+    ///   #ifndef GUARD_MACRO
+    ///   #define GUARD_MACRO
+    ///   ...
+    ///   #endif
+    ///
+    /// On subsequent #include of the same file, if the guard macro is still defined,
+    /// we skip re-processing entirely (same optimization as GCC/Clang).
+    pub(super) include_guard_macros: FxHashMap<PathBuf, String>,
 }
 
 impl Preprocessor {
@@ -86,6 +98,7 @@ impl Preprocessor {
             redefine_extname_pragmas: Vec::new(),
             force_include_output: String::new(),
             include_resolve_cache: FxHashMap::default(),
+            include_guard_macros: FxHashMap::default(),
         };
         pp.define_predefined_macros();
         define_builtin_macros(&mut pp.macros);
@@ -530,6 +543,13 @@ impl Preprocessor {
         // Check for #pragma once
         if self.pragma_once_files.contains(&resolved) {
             return;
+        }
+
+        // Check for include guard
+        if let Some(guard) = self.include_guard_macros.get(&resolved) {
+            if self.macros.is_defined(guard) {
+                return;
+            }
         }
 
         // Push onto include stack

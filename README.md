@@ -103,7 +103,7 @@ and PostgreSQL.
 ```
 src/
   frontend/                C source -> AST
-    preprocessor/          Macro expansion, #include, #ifdef, #pragma once
+    preprocessor/          Macro expansion, #include, #ifdef, #pragma once, include guard detection
     lexer/                 Tokenization with source locations
     parser/                Recursive descent, produces AST
     sema/                  Type checking, symbol table, const evaluation
@@ -169,7 +169,8 @@ C source
 - **Linear scan register allocation**: Loop-aware liveness analysis feeds a
   three-phase allocator (callee-saved, caller-saved, spill) on all backends.
 - **Text-to-text preprocessor**: The preprocessor operates on raw text, emitting
-  GCC-style `# line "file"` markers for source location tracking.
+  GCC-style `# line "file"` markers for source location tracking. Include guard
+  detection avoids re-processing headers with `#ifndef`/`#define`/`#endif` guards.
 
 ## Testing
 
@@ -188,7 +189,7 @@ python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86
 
 - `src/` -- Compiler source code (Rust)
 - `include/` -- Bundled C headers (SSE/AVX intrinsic stubs)
-- `tests/` -- Test suite (~762 test directories)
+- `tests/` -- Test suite (~797 test directories)
 - `ideas/` -- Design docs and future work proposals
 - `current_tasks/` -- Active work items (lock files for coordination)
 - `completed_tasks/` -- Finished work items (for reference)

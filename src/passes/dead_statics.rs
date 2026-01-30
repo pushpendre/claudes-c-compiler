@@ -24,14 +24,15 @@ pub(crate) fn eliminate_dead_static_functions(module: &mut IrModule) {
     let func_refs = build_func_refs(module, &mut name_to_id, &mut next_id);
     let global_refs_lists = build_global_refs(module, &mut name_to_id, &mut next_id);
 
-    // Phase 3: Reachability BFS from roots.
+    // Phase 3: Build address_taken set (moved before BFS so we can use it as roots).
+    let address_taken = build_address_taken(module, &name_to_id, next_id as usize);
+
+    // Phase 4: Reachability BFS from roots, including address-taken functions.
     let reachable = compute_reachability(
         module, &func_id, &global_id, &id_func_idx, &id_global_idx,
-        &func_refs, &global_refs_lists, &mut name_to_id, &mut next_id,
+        &func_refs, &global_refs_lists, &address_taken,
+        &mut name_to_id, &mut next_id,
     );
-
-    // Phase 4: Build address_taken set.
-    let address_taken = build_address_taken(module, &name_to_id, reachable.len());
 
     // Drop the borrow on module strings so we can mutate module below.
     drop(name_to_id);
@@ -86,13 +87,11 @@ fn build_symbol_index<'a>(module: &'a IrModule) -> (
 
 /// Look up or create an ID for a name that may not already exist.
 fn get_or_create_id<'a>(name: &'a str, name_to_id: &mut FxHashMap<&'a str, u32>, next_id: &mut u32) -> u32 {
-    if let Some(&id) = name_to_id.get(name) {
-        id
-    } else {
+    *name_to_id.entry(name).or_insert_with(|| {
         let id = *next_id;
         *next_id += 1;
         id
-    }
+    })
 }
 
 /// Phase 2a: Build per-function reference lists using symbol IDs.
@@ -145,12 +144,17 @@ fn mark_reachable(id: u32, reachable: &mut Vec<bool>, worklist: &mut Vec<u32>, n
     }
 }
 
-/// Phase 3: Compute reachability from roots via BFS.
+/// Phase 4: Compute reachability from roots via BFS.
+///
+/// Roots include: non-static functions, non-static globals, aliases, constructors,
+/// destructors, toplevel asm references, and address-taken static always_inline functions
+/// (which survive dead elimination because they're used as function pointers).
 fn compute_reachability<'a>(
     module: &'a IrModule,
     func_id: &[u32], global_id: &[u32],
     id_func_idx: &[Option<usize>], id_global_idx: &[Option<usize>],
     func_refs: &[Vec<u32>], global_refs_lists: &[Vec<u32>],
+    address_taken: &[bool],
     name_to_id: &mut FxHashMap<&'a str, u32>, next_id: &mut u32,
 ) -> Vec<bool> {
     let mut reachable = vec![false; *next_id as usize];
@@ -192,6 +196,19 @@ fn compute_reachability<'a>(
 
     if reachable.len() < *next_id as usize {
         reachable.resize(*next_id as usize, false);
+    }
+
+    // Roots: address-taken static always_inline functions.
+    // These survive dead elimination (Phase 5) because their address is used as a
+    // function pointer, so their referenced globals/functions must also survive.
+    for (i, func) in module.functions.iter().enumerate() {
+        if func.is_declaration { continue; }
+        if func.is_static && func.is_always_inline {
+            let fid = func_id[i] as usize;
+            if fid < address_taken.len() && address_taken[fid] {
+                mark_reachable(func_id[i], &mut reachable, &mut worklist, *next_id);
+            }
+        }
     }
 
     // Toplevel asm: conservatively mark static symbols whose names appear in asm
@@ -250,7 +267,7 @@ fn compute_reachability<'a>(
     reachable
 }
 
-/// Phase 4: Build address_taken bitvector from GlobalAddr and InlineAsm instructions.
+/// Phase 3: Build address_taken bitvector from GlobalAddr and InlineAsm instructions.
 fn build_address_taken<'a>(module: &'a IrModule, name_to_id: &FxHashMap<&'a str, u32>, len: usize) -> Vec<bool> {
     let mut address_taken = vec![false; len];
 
