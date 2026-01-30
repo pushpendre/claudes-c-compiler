@@ -368,6 +368,7 @@ impl Lowerer {
                     struct_arg_sizes: vec![None],
                     struct_arg_aligns: vec![],
                     struct_arg_classes: Vec::new(),
+                    struct_arg_riscv_float_classes: Vec::new(),
                     is_sret: false,
                     is_fastcall: false,
                 },
@@ -896,6 +897,19 @@ impl Lowerer {
             }
         }).collect();
 
+        // Compute RISC-V LP64D float field classification for struct params
+        let param_riscv_float_classes: Vec<Option<crate::common::types::RiscvFloatClass>> = params.iter().enumerate().map(|(i, p)| {
+            if param_struct_sizes.get(i).copied().flatten().is_some() {
+                if let Some(layout) = self.get_struct_layout_for_type(&p.type_spec) {
+                    layout.classify_riscv_float_fields(&*self.types.borrow_struct_layouts())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
         let sig = if !variadic || !param_tys.is_empty() {
             FuncSig {
                 return_type: ret_ty,
@@ -908,6 +922,7 @@ impl Lowerer {
                 two_reg_ret_size,
                 param_struct_sizes,
                 param_struct_classes,
+                param_riscv_float_classes,
             }
         } else {
             FuncSig {
@@ -921,6 +936,7 @@ impl Lowerer {
                 two_reg_ret_size,
                 param_struct_sizes: Vec::new(),
                 param_struct_classes: Vec::new(),
+                param_riscv_float_classes: Vec::new(),
             }
         };
         self.func_meta.sigs.insert(name.to_string(), sig);

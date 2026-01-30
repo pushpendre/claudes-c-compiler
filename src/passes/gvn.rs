@@ -1173,6 +1173,7 @@ mod tests {
                         struct_arg_sizes: vec![],
                         struct_arg_aligns: vec![],
                         struct_arg_classes: vec![],
+                        struct_arg_riscv_float_classes: Vec::new(),
                         is_sret: false,
                         is_fastcall: false,
                     },

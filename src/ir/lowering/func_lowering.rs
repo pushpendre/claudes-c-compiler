@@ -154,7 +154,7 @@ impl Lowerer {
         // Check if function returns a large struct via sret
         if let Some(sig) = self.func_meta.sigs.get(&func.name) {
             if let Some(sret_size) = sig.sret_size {
-                params.push(IrParam { name: String::new(), ty: IrType::Ptr, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new() });
+                params.push(IrParam { name: String::new(), ty: IrType::Ptr, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new(), riscv_float_class: None });
                 uses_sret = true;
                 let _ = sret_size; // used for alloca sizing in allocate_function_params
             }
@@ -180,7 +180,7 @@ impl Lowerer {
                 } else if matches!(param_ctype, CType::ComplexFloat) && self.uses_packed_complex_float() {
                     // x86-64: _Complex float packed into single F64
                     let ir_idx = params.len();
-                    params.push(IrParam { name: param_name, ty: IrType::F64, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new() });
+                    params.push(IrParam { name: param_name, ty: IrType::F64, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new(), riscv_float_class: None });
                     param_kinds.push(ParamKind::ComplexFloatPacked(ir_idx));
                     continue;
                 } else {
@@ -188,9 +188,9 @@ impl Lowerer {
                     // ComplexLongDouble on ARM64 only)
                     let comp_ty = Self::complex_component_ir_type(&param_ctype);
                     let real_idx = params.len();
-                    params.push(IrParam { name: format!("{}.real", param_name), ty: comp_ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new() });
+                    params.push(IrParam { name: format!("{}.real", param_name), ty: comp_ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new(), riscv_float_class: None });
                     let imag_idx = params.len();
-                    params.push(IrParam { name: format!("{}.imag", param_name), ty: comp_ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new() });
+                    params.push(IrParam { name: format!("{}.imag", param_name), ty: comp_ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new(), riscv_float_class: None });
                     param_kinds.push(ParamKind::ComplexDecomposed(real_idx, imag_idx));
                     continue;
                 }
@@ -216,18 +216,21 @@ impl Lowerer {
                 } else {
                     Some(self.sizeof_type(&param.type_spec))
                 };
-                // Compute struct alignment and per-eightbyte SysV ABI classification
-                let (struct_align, struct_eightbyte_classes) = if struct_size.is_some() {
+                // Compute struct alignment, per-eightbyte SysV ABI classification,
+                // and RISC-V LP64D float field classification
+                let (struct_align, struct_eightbyte_classes, riscv_float_class) = if struct_size.is_some() {
                     if let Some(layout) = self.get_struct_layout_for_type(&param.type_spec) {
-                        let classes = layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts());
-                        (Some(layout.align), classes)
+                        let ctx = &*self.types.borrow_struct_layouts();
+                        let classes = layout.classify_sysv_eightbytes(ctx);
+                        let rv_class = layout.classify_riscv_float_fields(ctx);
+                        (Some(layout.align), classes, rv_class)
                     } else {
-                        (None, Vec::new())
+                        (None, Vec::new(), None)
                     }
                 } else {
-                    (None, Vec::new())
+                    (None, Vec::new(), None)
                 };
-                params.push(IrParam { name: param_name, ty: IrType::Ptr, struct_size, struct_align, struct_eightbyte_classes });
+                params.push(IrParam { name: param_name, ty: IrType::Ptr, struct_size, struct_align, struct_eightbyte_classes, riscv_float_class });
                 param_kinds.push(ParamKind::Struct(ir_idx));
                 continue;
             }
@@ -243,7 +246,7 @@ impl Lowerer {
                     other => other,
                 };
             }
-            params.push(IrParam { name: param_name, ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new() });
+            params.push(IrParam { name: param_name, ty, struct_size: None, struct_align: None, struct_eightbyte_classes: Vec::new(), riscv_float_class: None });
             param_kinds.push(ParamKind::Normal(ir_idx));
         }
 

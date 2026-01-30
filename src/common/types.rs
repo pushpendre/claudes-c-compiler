@@ -131,6 +131,36 @@ impl EightbyteClass {
     }
 }
 
+/// Classification of a struct for RISC-V LP64D hardware floating-point calling convention.
+///
+/// The psABI specifies that small structs with specific field patterns should be
+/// passed in FP registers rather than GP registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiscvFloatClass {
+    /// Struct with exactly one float/double member, no other data members.
+    /// Passed in a single FP register (fa0-fa7).
+    OneFloat { is_double: bool },
+    /// Struct with exactly two float/double members, no other data members.
+    /// Passed in two FP registers (fa0-fa7).
+    TwoFloats { lo_is_double: bool, hi_is_double: bool },
+    /// Struct with one float/double + one integer, float comes first in memory.
+    /// Float in FP register, integer in GP register.
+    FloatAndInt {
+        float_is_double: bool,
+        float_offset: usize,
+        int_offset: usize,
+        int_size: usize,
+    },
+    /// Struct with one integer + one float/double, integer comes first in memory.
+    /// Integer in GP register, float in FP register.
+    IntAndFloat {
+        float_is_double: bool,
+        int_offset: usize,
+        int_size: usize,
+        float_offset: usize,
+    },
+}
+
 /// Address space for pointer types (GCC named address space extension).
 /// Used for x86 segment-relative memory access (%gs: / %fs: prefix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -787,6 +817,174 @@ impl StructLayout {
                 }
             }
         }
+    }
+
+    /// Classify this struct for the RISC-V LP64D hardware floating-point calling convention.
+    ///
+    /// The RISC-V psABI specifies that small structs (≤ 2×XLEN = 16 bytes on RV64)
+    /// with floating-point members should be passed in FP registers:
+    /// - Struct with exactly 1 float/double member (no other data): 1 FP register
+    /// - Struct with exactly 2 float/double members (no other data): 2 FP registers
+    /// - Struct with 1 float/double + 1 integer (≤ XLEN): FP reg + GP reg (or GP + FP)
+    /// - All other structs: use integer calling convention (GP registers)
+    ///
+    /// Returns `None` if the struct does not qualify for FP register passing.
+    /// Returns `Some(RiscvFloatClass)` describing the FP register assignment.
+    pub fn classify_riscv_float_fields(&self, ctx: &dyn StructLayoutProvider) -> Option<RiscvFloatClass> {
+        // Only for small structs (≤ 16 bytes on RV64, ≤ 8 bytes on RV32)
+        let xlen = target_ptr_size();
+        if self.size > 2 * xlen || self.size == 0 {
+            return None;
+        }
+
+        // Unions cannot be classified as float aggregates per the psABI
+        if self.is_union {
+            return None;
+        }
+
+        // Flatten all scalar fields (recursing into nested structs/arrays)
+        let mut float_fields: Vec<(usize, usize)> = Vec::new(); // (offset, size_bytes: 4=float, 8=double)
+        let mut int_fields: Vec<(usize, usize)> = Vec::new(); // (offset, size_bytes)
+        if !Self::collect_riscv_fields(&self.fields, 0, &mut float_fields, &mut int_fields, ctx) {
+            return None;
+        }
+
+        // Apply RISC-V psABI rules:
+        match (float_fields.len(), int_fields.len()) {
+            // 1 float, no int: pass float in 1 FP reg
+            (1, 0) => {
+                let is_double = float_fields[0].1 == 8;
+                Some(RiscvFloatClass::OneFloat { is_double })
+            }
+            // 2 floats, no int: pass both in FP regs
+            (2, 0) => {
+                let lo_is_double = float_fields[0].1 == 8;
+                let hi_is_double = float_fields[1].1 == 8;
+                Some(RiscvFloatClass::TwoFloats { lo_is_double, hi_is_double })
+            }
+            // 1 float + 1 int: pass float in FP reg, int in GP reg
+            (1, 1) => {
+                let float_is_double = float_fields[0].1 == 8;
+                let int_size = int_fields[0].1;
+                // Integer field must fit in one XLEN register
+                if int_size > xlen {
+                    return None;
+                }
+                // Determine which comes first in memory layout
+                if float_fields[0].0 < int_fields[0].0 {
+                    Some(RiscvFloatClass::FloatAndInt {
+                        float_is_double,
+                        float_offset: float_fields[0].0,
+                        int_offset: int_fields[0].0,
+                        int_size,
+                    })
+                } else {
+                    Some(RiscvFloatClass::IntAndFloat {
+                        float_is_double,
+                        int_offset: int_fields[0].0,
+                        int_size,
+                        float_offset: float_fields[0].0,
+                    })
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Recursively collect scalar float and int fields from a struct.
+    /// Returns false if the struct contains unsupported field types (e.g., bitfields,
+    /// empty arrays, complex types) that prevent FP classification.
+    fn collect_riscv_fields(
+        fields: &[StructFieldLayout],
+        base_offset: usize,
+        float_fields: &mut Vec<(usize, usize)>,
+        int_fields: &mut Vec<(usize, usize)>,
+        ctx: &dyn StructLayoutProvider,
+    ) -> bool {
+        for field in fields {
+            // Skip zero-width bitfields (padding only)
+            if field.bit_width == Some(0) {
+                continue;
+            }
+            // Any bitfield prevents FP classification
+            if field.bit_width.is_some() {
+                return false;
+            }
+            let offset = base_offset + field.offset;
+            match &field.ty {
+                CType::Float => {
+                    float_fields.push((offset, 4));
+                }
+                CType::Double => {
+                    float_fields.push((offset, 8));
+                }
+                // Nested struct: recurse
+                CType::Struct(key) | CType::Union(key) => {
+                    if let Some(layout) = ctx.get_struct_layout(key) {
+                        if layout.is_union {
+                            // Unions break FP classification
+                            return false;
+                        }
+                        if !Self::collect_riscv_fields(&layout.fields, offset, float_fields, int_fields, ctx) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                // Array: unroll elements
+                CType::Array(elem_ty, Some(count)) => {
+                    let elem_size = elem_ty.size();
+                    if elem_size == 0 {
+                        continue; // zero-size arrays (FAMs) are ignored
+                    }
+                    for i in 0..*count {
+                        let elem_offset = offset + i * elem_size;
+                        match elem_ty.as_ref() {
+                            CType::Float => float_fields.push((elem_offset, 4)),
+                            CType::Double => float_fields.push((elem_offset, 8)),
+                            CType::Struct(key) | CType::Union(key) => {
+                                if let Some(layout) = ctx.get_struct_layout(key) {
+                                    if layout.is_union {
+                                        return false;
+                                    }
+                                    if !Self::collect_riscv_fields(&layout.fields, elem_offset, float_fields, int_fields, ctx) {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            _ => {
+                                let size = elem_ty.size();
+                                if size > 0 {
+                                    int_fields.push((elem_offset, size));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Zero-size arrays or VLAs don't contribute
+                CType::Array(_, None) => {}
+                // All other scalar types: integer-class
+                _ => {
+                    let size = field.ty.size();
+                    if size > 0 {
+                        int_fields.push((offset, size));
+                    }
+                }
+            }
+
+            // If we already have more than 2 fields total, can't classify as FP
+            if float_fields.len() + int_fields.len() > 2 {
+                return false;
+            }
+            // If we have more than 1 int field, can't classify as FP
+            if int_fields.len() > 1 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Resolve which field index an initializer targets, given either a field designator

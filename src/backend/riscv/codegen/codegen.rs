@@ -65,7 +65,7 @@ fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize 
                 Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => info,
                 _ => continue,
             };
-            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, info.is_variadic, config);
+            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_variadic, config);
             let gp_count = classes.iter().filter(|c| matches!(c, CallArgClass::IntReg { .. })).count();
             if gp_count > max_gp {
                 max_gp = gp_count;
@@ -1100,10 +1100,72 @@ impl ArchCodegen for RiscvCodegen {
                         self.emit_store_to_s0("t0", dst_off, "sd");
                     }
                 }
-                // F128 in FP reg doesn't happen on RISC-V. SysV SSE-class structs don't happen on RISC-V.
+                // F128 in FP reg doesn't happen on RISC-V.
                 ParamClass::F128FpReg { .. } |
-                ParamClass::StructSseReg { .. } | ParamClass::StructMixedIntSseReg { .. } | ParamClass::StructMixedSseIntReg { .. } |
                 ParamClass::ZeroSizeSkip => {}
+
+                // RISC-V LP64D: struct with float/double fields passed in FP registers.
+                ParamClass::StructSseReg { lo_fp_idx, hi_fp_idx, size } => {
+                    let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+                    // Get the RISC-V float class to determine field sizes
+                    let rv_class = func.params[i].riscv_float_class;
+                    let (lo_is_double, hi_is_double) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::OneFloat { is_double }) => (is_double, false),
+                        Some(crate::common::types::RiscvFloatClass::TwoFloats { lo_is_double, hi_is_double }) => (lo_is_double, hi_is_double),
+                        _ => (size > 4, true), // fallback guess
+                    };
+                    // Store first float/double field
+                    if lo_is_double {
+                        self.state.emit_fmt(format_args!("    fsd {}, {}(s0)", float_arg_regs[lo_fp_idx], slot.0));
+                    } else {
+                        self.state.emit_fmt(format_args!("    fsw {}, {}(s0)", float_arg_regs[lo_fp_idx], slot.0));
+                    }
+                    // Store second float/double field (if present)
+                    if let Some(hi_idx) = hi_fp_idx {
+                        let hi_offset = if lo_is_double { 8 } else { 4 };
+                        if hi_is_double {
+                            self.state.emit_fmt(format_args!("    fsd {}, {}(s0)", float_arg_regs[hi_idx], slot.0 + hi_offset));
+                        } else {
+                            self.state.emit_fmt(format_args!("    fsw {}, {}(s0)", float_arg_regs[hi_idx], slot.0 + hi_offset));
+                        }
+                    }
+                }
+                ParamClass::StructMixedIntSseReg { int_reg_idx, fp_reg_idx, size: _ } => {
+                    // Integer first, float second (in memory layout)
+                    let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+                    let rv_class = func.params[i].riscv_float_class;
+                    let (float_is_double, int_size, float_offset) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::IntAndFloat { float_is_double, int_size, float_offset, .. }) => (float_is_double, int_size, float_offset),
+                        _ => (true, 8, 8), // fallback
+                    };
+                    // Store integer part at beginning of struct
+                    let int_store = if int_size <= 4 { "sw" } else { "sd" };
+                    self.state.emit_fmt(format_args!("    {} {}, {}(s0)", int_store, RISCV_ARG_REGS[int_reg_idx], slot.0));
+                    // Store float part at its offset
+                    if float_is_double {
+                        self.state.emit_fmt(format_args!("    fsd {}, {}(s0)", float_arg_regs[fp_reg_idx], slot.0 + float_offset as i64));
+                    } else {
+                        self.state.emit_fmt(format_args!("    fsw {}, {}(s0)", float_arg_regs[fp_reg_idx], slot.0 + float_offset as i64));
+                    }
+                }
+                ParamClass::StructMixedSseIntReg { fp_reg_idx, int_reg_idx, size: _ } => {
+                    // Float first, integer second (in memory layout)
+                    let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+                    let rv_class = func.params[i].riscv_float_class;
+                    let (float_is_double, int_offset, int_size) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::FloatAndInt { float_is_double, int_offset, int_size, .. }) => (float_is_double, int_offset, int_size),
+                        _ => (true, 8, 8), // fallback
+                    };
+                    // Store float part at beginning of struct
+                    if float_is_double {
+                        self.state.emit_fmt(format_args!("    fsd {}, {}(s0)", float_arg_regs[fp_reg_idx], slot.0));
+                    } else {
+                        self.state.emit_fmt(format_args!("    fsw {}, {}(s0)", float_arg_regs[fp_reg_idx], slot.0));
+                    }
+                    // Store integer part at its offset
+                    let int_store = if int_size <= 4 { "sw" } else { "sd" };
+                    self.state.emit_fmt(format_args!("    {} {}, {}(s0)", int_store, RISCV_ARG_REGS[int_reg_idx], slot.0 + int_offset as i64));
+                }
             }
         }
 
@@ -1799,6 +1861,7 @@ impl ArchCodegen for RiscvCodegen {
             variadic_floats_in_gp: true,
             large_struct_by_ref: true, // RISC-V LP64: composites > 16 bytes passed by reference (pointer in GP reg)
             use_sysv_struct_classification: false, // RISC-V uses its own ABI, not SysV
+            use_riscv_float_struct_classification: true, // RISC-V LP64D: structs with float fields use FP registers
         }
     }
 
@@ -1948,7 +2011,8 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
-                          arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, stack_arg_space: usize) {
+                          arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, stack_arg_space: usize,
+                          struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
 
         // GP args go to temps first, then FP args, then move GP from temp to aX.
@@ -2068,6 +2132,89 @@ impl ArchCodegen for RiscvCodegen {
                 if regs_needed > 1 {
                     self.state.emit_fmt(format_args!("    ld {}, 8(t0)", RISCV_ARG_REGS[base_reg_idx + 1]));
                 }
+            }
+        }
+
+        // Load RISC-V LP64D float struct args into FP registers
+        for (i, arg) in args.iter().enumerate() {
+            let needs_ptr = matches!(arg_classes[i],
+                CallArgClass::StructSseReg { .. } | CallArgClass::StructMixedIntSseReg { .. } | CallArgClass::StructMixedSseIntReg { .. });
+            if !needs_ptr { continue; }
+
+            // Get the RiscvFloatClass for this argument (for precise field sizes/offsets)
+            let rv_class = struct_arg_riscv_float_classes.get(i).copied().flatten();
+
+            // Load struct pointer into t0 (same pattern as StructByValReg)
+            match arg {
+                Operand::Value(v) => {
+                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                        let reg_name = callee_saved_name(reg);
+                        self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                    } else if let Some(slot) = self.state.get_slot(v.0) {
+                        if self.state.is_alloca(v.0) {
+                            self.emit_addi_s0("t0", slot.0);
+                        } else {
+                            self.emit_load_from_s0("t0", slot.0, "ld");
+                        }
+                    } else {
+                        self.state.emit("    li t0, 0");
+                    }
+                }
+                Operand::Const(_) => { self.operand_to_t0(arg); }
+            }
+
+            // Now t0 points to the struct data. Load fields into appropriate registers.
+            match arg_classes[i] {
+                CallArgClass::StructSseReg { lo_fp_idx, hi_fp_idx, size } => {
+                    // All-float struct: use RiscvFloatClass for precise field info
+                    let (lo_is_double, hi_is_double) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::OneFloat { is_double }) => (is_double, false),
+                        Some(crate::common::types::RiscvFloatClass::TwoFloats { lo_is_double, hi_is_double }) => (lo_is_double, hi_is_double),
+                        _ => (size > 4, true), // fallback
+                    };
+                    if lo_is_double {
+                        self.state.emit_fmt(format_args!("    fld {}, 0(t0)", float_arg_regs[lo_fp_idx]));
+                    } else {
+                        self.state.emit_fmt(format_args!("    flw {}, 0(t0)", float_arg_regs[lo_fp_idx]));
+                    }
+                    if let Some(hi_idx) = hi_fp_idx {
+                        let hi_offset = if lo_is_double { 8 } else { 4 };
+                        if hi_is_double {
+                            self.state.emit_fmt(format_args!("    fld {}, {}(t0)", float_arg_regs[hi_idx], hi_offset));
+                        } else {
+                            self.state.emit_fmt(format_args!("    flw {}, {}(t0)", float_arg_regs[hi_idx], hi_offset));
+                        }
+                    }
+                }
+                CallArgClass::StructMixedIntSseReg { int_reg_idx, fp_reg_idx, size: _ } => {
+                    // Integer first, float second in memory
+                    let (float_is_double, int_size, float_offset) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::IntAndFloat { float_is_double, int_size, float_offset, .. }) => (float_is_double, int_size, float_offset),
+                        _ => (true, 8, 8), // fallback
+                    };
+                    let int_load = if int_size <= 4 { "lw" } else { "ld" };
+                    self.state.emit_fmt(format_args!("    {} {}, 0(t0)", int_load, RISCV_ARG_REGS[int_reg_idx]));
+                    if float_is_double {
+                        self.state.emit_fmt(format_args!("    fld {}, {}(t0)", float_arg_regs[fp_reg_idx], float_offset));
+                    } else {
+                        self.state.emit_fmt(format_args!("    flw {}, {}(t0)", float_arg_regs[fp_reg_idx], float_offset));
+                    }
+                }
+                CallArgClass::StructMixedSseIntReg { fp_reg_idx, int_reg_idx, size: _ } => {
+                    // Float first, integer second in memory
+                    let (float_is_double, int_offset, int_size) = match rv_class {
+                        Some(crate::common::types::RiscvFloatClass::FloatAndInt { float_is_double, int_offset, int_size, .. }) => (float_is_double, int_offset, int_size),
+                        _ => (true, 8, 8), // fallback
+                    };
+                    if float_is_double {
+                        self.state.emit_fmt(format_args!("    fld {}, 0(t0)", float_arg_regs[fp_reg_idx]));
+                    } else {
+                        self.state.emit_fmt(format_args!("    flw {}, 0(t0)", float_arg_regs[fp_reg_idx]));
+                    }
+                    let int_load = if int_size <= 4 { "lw" } else { "ld" };
+                    self.state.emit_fmt(format_args!("    {} {}, {}(t0)", int_load, RISCV_ARG_REGS[int_reg_idx], int_offset));
+                }
+                _ => {}
             }
         }
     }

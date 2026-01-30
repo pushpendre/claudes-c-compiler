@@ -190,27 +190,71 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
                 int_reg_idx += gp_used;
                 float_reg_idx += fp_used;
             } else if size <= 16 {
-                let regs_needed = if size <= slot_size { 1 } else { size.div_ceil(slot_size) };
-                // RISC-V psABI: 2×XLEN-aligned structs must start at even register.
-                if regs_needed == 2 && config.align_i128_pairs {
-                    let struct_align = param.struct_align.unwrap_or(slot_size);
-                    if struct_align > slot_size && !int_reg_idx.is_multiple_of(2) {
-                        int_reg_idx += 1; // skip to even register
+                // Check RISC-V LP64D hardware floating-point struct classification first
+                let rv_class = if config.use_riscv_float_struct_classification {
+                    param.riscv_float_class
+                } else {
+                    None
+                };
+                let mut classified = false;
+                if let Some(rv_fc) = rv_class {
+                    use crate::common::types::RiscvFloatClass;
+                    match rv_fc {
+                        RiscvFloatClass::OneFloat { .. } => {
+                            if float_reg_idx < config.max_float_regs {
+                                result.push(ParamClass::StructSseReg { lo_fp_idx: float_reg_idx, hi_fp_idx: None, size });
+                                float_reg_idx += 1;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::TwoFloats { .. } => {
+                            if float_reg_idx + 1 < config.max_float_regs {
+                                result.push(ParamClass::StructSseReg { lo_fp_idx: float_reg_idx, hi_fp_idx: Some(float_reg_idx + 1), size });
+                                float_reg_idx += 2;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::FloatAndInt { .. } => {
+                            if float_reg_idx < config.max_float_regs && int_reg_idx < config.max_int_regs {
+                                result.push(ParamClass::StructMixedSseIntReg { fp_reg_idx: float_reg_idx, int_reg_idx, size });
+                                float_reg_idx += 1;
+                                int_reg_idx += 1;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::IntAndFloat { .. } => {
+                            if int_reg_idx < config.max_int_regs && float_reg_idx < config.max_float_regs {
+                                result.push(ParamClass::StructMixedIntSseReg { int_reg_idx, fp_reg_idx: float_reg_idx, size });
+                                int_reg_idx += 1;
+                                float_reg_idx += 1;
+                                classified = true;
+                            }
+                        }
                     }
                 }
-                if int_reg_idx + regs_needed <= config.max_int_regs {
-                    result.push(ParamClass::StructByValReg {
-                        base_reg_idx: int_reg_idx,
-                        size,
-                    });
-                    int_reg_idx += regs_needed;
-                } else {
-                    result.push(ParamClass::StructStack {
-                        offset: stack_offset,
-                        size,
-                    });
-                    stack_offset += (size as i64 + slot_align_mask) & !slot_align_mask;
-                    int_reg_idx = config.max_int_regs;
+                if !classified {
+                    let regs_needed = if size <= slot_size { 1 } else { size.div_ceil(slot_size) };
+                    // RISC-V psABI: 2×XLEN-aligned structs must start at even register.
+                    if regs_needed == 2 && config.align_i128_pairs {
+                        let struct_align = param.struct_align.unwrap_or(slot_size);
+                        if struct_align > slot_size && !int_reg_idx.is_multiple_of(2) {
+                            int_reg_idx += 1; // skip to even register
+                        }
+                    }
+                    if int_reg_idx + regs_needed <= config.max_int_regs {
+                        result.push(ParamClass::StructByValReg {
+                            base_reg_idx: int_reg_idx,
+                            size,
+                        });
+                        int_reg_idx += regs_needed;
+                    } else {
+                        result.push(ParamClass::StructStack {
+                            offset: stack_offset,
+                            size,
+                        });
+                        stack_offset += (size as i64 + slot_align_mask) & !slot_align_mask;
+                        int_reg_idx = config.max_int_regs;
+                    }
                 }
             } else if config.large_struct_by_ref {
                 // AAPCS64: large composites arrive as a pointer in a GP register or on stack.

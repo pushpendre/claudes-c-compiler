@@ -374,11 +374,12 @@ pub trait ArchCodegen {
                  is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
                  struct_arg_aligns: &[Option<usize>],
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
+                 struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>],
                  is_sret: bool,
                  _is_fastcall: bool) {
         use super::call_abi::*;
         let config = self.call_abi_config();
-        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, is_variadic, &config);
+        let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, struct_arg_riscv_float_classes, is_variadic, &config);
 
         // Phase 0: Spill indirect function pointer before any stack manipulation.
         let indirect = func_ptr.is_some() && direct_name.is_none();
@@ -404,7 +405,8 @@ pub trait ArchCodegen {
         self.state().reg_cache.invalidate_acc();
 
         // Phase 3: Load register args (GP, FP, i128, struct-by-val, F128).
-        self.emit_call_reg_args(args, &arg_classes, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space);
+        self.emit_call_reg_args(args, &arg_classes, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space,
+                                struct_arg_riscv_float_classes);
 
         // Phase 4: Emit the actual call instruction.
         self.emit_call_instruction(direct_name, func_ptr, indirect, stack_arg_space);
@@ -450,7 +452,8 @@ pub trait ArchCodegen {
 
     /// Load arguments into registers (GP, FP, i128, struct-by-val, F128).
     fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[super::call_abi::CallArgClass],
-                          arg_types: &[IrType], total_sp_adjust: i64, f128_temp_space: usize, stack_arg_space: usize);
+                          arg_types: &[IrType], total_sp_adjust: i64, f128_temp_space: usize, stack_arg_space: usize,
+                          struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]);
 
     /// Emit the call/bl/jalr instruction.
     /// `stack_arg_space` is passed so ARM can reload the spilled fptr at the correct offset.
@@ -1256,6 +1259,12 @@ pub trait ArchCodegen {
     /// Emit a target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
     /// Each backend must implement this to emit the appropriate native instructions.
     fn emit_intrinsic(&mut self, _dest: &Option<Value>, _op: &IntrinsicOp, _dest_ptr: &Option<Value>, _args: &[Operand]) {}
+
+    /// Emit runtime helper stubs needed by this architecture.
+    /// Called after all functions are generated, before the .note.GNU-stack section.
+    /// The i686 backend uses this to emit __divdi3/__udivdi3/__moddi3/__umoddi3
+    /// as weak symbols for standalone builds without libgcc.
+    fn emit_runtime_stubs(&mut self) {}
 }
 
 // ── Shared jump table helpers ─────────────────────────────────────────────────

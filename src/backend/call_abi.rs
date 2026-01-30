@@ -90,6 +90,10 @@ pub struct CallAbiConfig {
     /// Whether to use SysV per-eightbyte struct classification (x86-64 only).
     /// When true, struct eightbytes classified as SSE are passed in xmm registers.
     pub use_sysv_struct_classification: bool,
+    /// Whether to use RISC-V LP64D hardware floating-point struct classification.
+    /// When true, small structs with float/double fields are passed in FP registers
+    /// per the RISC-V psABI.
+    pub use_riscv_float_struct_classification: bool,
 }
 
 /// Result of SysV per-eightbyte struct classification.
@@ -159,12 +163,15 @@ pub fn classify_sysv_struct(
 /// long double with 16-byte alignment per the RISC-V psABI).
 /// `struct_arg_classes` provides per-eightbyte SysV ABI classification for struct args
 /// (used when `config.use_sysv_struct_classification` is true, i.e. x86-64).
+/// `struct_arg_riscv_float_classes` provides RISC-V LP64D float field classification for struct args
+/// (used when `config.use_riscv_float_struct_classification` is true).
 pub fn classify_call_args(
     args: &[Operand],
     arg_types: &[IrType],
     struct_arg_sizes: &[Option<usize>],
     struct_arg_aligns: &[Option<usize>],
     struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
+    struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>],
     is_variadic: bool,
     config: &CallAbiConfig,
 ) -> Vec<CallArgClass> {
@@ -220,23 +227,68 @@ pub fn classify_call_args(
                 int_idx += gp_used;
                 float_idx += fp_used;
             } else if size <= 16 {
-                // Non-SysV path (ARM, RISC-V): always use GP registers for small structs
-                let regs_needed = if size <= 8 { 1 } else { 2 };
-                // RISC-V psABI: 2×XLEN-aligned structs (alignment > XLEN) must start
-                // at an even-numbered register, matching i128/f128 pair alignment.
-                let slot_size = crate::common::types::target_ptr_size();
-                if regs_needed == 2 && config.align_i128_pairs {
-                    let struct_align = struct_arg_aligns.get(i).copied().flatten().unwrap_or(slot_size);
-                    if struct_align > slot_size && !int_idx.is_multiple_of(2) {
-                        int_idx += 1; // skip to even register
+                // Non-SysV path (ARM, RISC-V)
+                // Check RISC-V LP64D hardware floating-point struct classification first
+                let rv_class = if config.use_riscv_float_struct_classification {
+                    struct_arg_riscv_float_classes.get(i).copied().flatten()
+                } else {
+                    None
+                };
+                let mut classified = false;
+                if let Some(rv_fc) = rv_class {
+                    use crate::common::types::RiscvFloatClass;
+                    match rv_fc {
+                        RiscvFloatClass::OneFloat { .. } => {
+                            if float_idx < config.max_float_regs {
+                                result.push(CallArgClass::StructSseReg { lo_fp_idx: float_idx, hi_fp_idx: None, size });
+                                float_idx += 1;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::TwoFloats { .. } => {
+                            if float_idx + 1 < config.max_float_regs {
+                                result.push(CallArgClass::StructSseReg { lo_fp_idx: float_idx, hi_fp_idx: Some(float_idx + 1), size });
+                                float_idx += 2;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::FloatAndInt { .. } => {
+                            if float_idx < config.max_float_regs && int_idx < config.max_int_regs {
+                                result.push(CallArgClass::StructMixedSseIntReg { fp_reg_idx: float_idx, int_reg_idx: int_idx, size });
+                                float_idx += 1;
+                                int_idx += 1;
+                                classified = true;
+                            }
+                        }
+                        RiscvFloatClass::IntAndFloat { .. } => {
+                            if int_idx < config.max_int_regs && float_idx < config.max_float_regs {
+                                result.push(CallArgClass::StructMixedIntSseReg { int_reg_idx: int_idx, fp_reg_idx: float_idx, size });
+                                int_idx += 1;
+                                float_idx += 1;
+                                classified = true;
+                            }
+                        }
                     }
                 }
-                if int_idx + regs_needed <= config.max_int_regs {
-                    result.push(CallArgClass::StructByValReg { base_reg_idx: int_idx, size });
-                    int_idx += regs_needed;
-                } else {
-                    result.push(CallArgClass::StructByValStack { size });
-                    int_idx = config.max_int_regs;
+                if !classified {
+                    // Fallback: use GP registers for small structs
+                    let regs_needed = if size <= 8 { 1 } else { 2 };
+                    // RISC-V psABI: 2×XLEN-aligned structs (alignment > XLEN) must start
+                    // at an even-numbered register, matching i128/f128 pair alignment.
+                    let slot_size = crate::common::types::target_ptr_size();
+                    if regs_needed == 2 && config.align_i128_pairs {
+                        let struct_align = struct_arg_aligns.get(i).copied().flatten().unwrap_or(slot_size);
+                        if struct_align > slot_size && !int_idx.is_multiple_of(2) {
+                            int_idx += 1; // skip to even register
+                        }
+                    }
+                    if int_idx + regs_needed <= config.max_int_regs {
+                        result.push(CallArgClass::StructByValReg { base_reg_idx: int_idx, size });
+                        int_idx += regs_needed;
+                    } else {
+                        result.push(CallArgClass::StructByValStack { size });
+                        int_idx = config.max_int_regs;
+                    }
                 }
             } else if config.large_struct_by_ref {
                 // AAPCS64: composites > 16 bytes are passed by reference.

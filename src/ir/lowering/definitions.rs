@@ -254,6 +254,9 @@ pub(super) struct FuncSig {
     /// Per-parameter SysV ABI eightbyte classification for struct params.
     /// Each entry is the classification for that parameter (empty vec for non-struct params).
     pub param_struct_classes: Vec<Vec<crate::common::types::EightbyteClass>>,
+    /// Per-parameter RISC-V LP64D float field classification for struct params.
+    /// Each entry is Some(..) for struct params that qualify for FP register passing.
+    pub param_riscv_float_classes: Vec<Option<crate::common::types::RiscvFloatClass>>,
 }
 
 impl FuncSig {
@@ -271,6 +274,7 @@ impl FuncSig {
             two_reg_ret_size: None,
             param_struct_sizes: Vec::new(),
             param_struct_classes: Vec::new(),
+            param_riscv_float_classes: Vec::new(),
         }
     }
 }

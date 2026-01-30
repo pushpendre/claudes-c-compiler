@@ -2718,6 +2718,7 @@ impl ArchCodegen for ArmCodegen {
             variadic_floats_in_gp: false,
             large_struct_by_ref: true, // AAPCS64: composites > 16 bytes passed by reference
             use_sysv_struct_classification: false, // ARM uses AAPCS64, not SysV
+            use_riscv_float_struct_classification: false,
         }
     }
 
@@ -2925,7 +2926,8 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
-                          arg_types: &[IrType], total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize) {
+                          arg_types: &[IrType], total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize,
+                          _struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) {
         // When has_dyn_alloca is true, slots use x29-relative offsets, so no sp adjustment.
         let slot_adjust = if self.state.has_dyn_alloca { 0 } else { total_sp_adjust };
         let needs_adjusted_load = total_sp_adjust > 0;

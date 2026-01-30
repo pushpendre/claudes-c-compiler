@@ -187,6 +187,11 @@ pub struct CodegenState {
     pub function_sections: bool,
     /// Whether to place each data object in its own section (-fdata-sections).
     pub data_sections: bool,
+    /// Whether any 64-bit division/modulo runtime helpers (__divdi3, __udivdi3,
+    /// __moddi3, __umoddi3) were referenced during code generation.
+    /// When true, the i686 backend emits weak implementations of these functions
+    /// so that standalone builds (without libgcc) can link successfully.
+    pub needs_divdi3_helpers: bool,
 }
 
 impl CodegenState {
@@ -226,6 +231,7 @@ impl CodegenState {
             uses_sret: false,
             function_sections: false,
             data_sections: false,
+            needs_divdi3_helpers: false,
         }
     }
 

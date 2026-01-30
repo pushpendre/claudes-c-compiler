@@ -251,6 +251,11 @@ pub struct IrParam {
     /// Empty for non-struct params or when classification is not applicable.
     /// Each entry indicates whether that eightbyte should use SSE or GP registers.
     pub struct_eightbyte_classes: Vec<crate::common::types::EightbyteClass>,
+    /// RISC-V LP64D float field classification for struct params.
+    /// When Some, indicates this struct should use FP registers per the psABI
+    /// hardware floating-point calling convention. None for non-struct params
+    /// or structs that don't qualify for FP register passing.
+    pub riscv_float_class: Option<crate::common::types::RiscvFloatClass>,
 }
 
 /// A basic block in the CFG.
@@ -296,6 +301,8 @@ pub struct CallInfo {
     pub struct_arg_aligns: Vec<Option<usize>>,
     /// Per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class passing).
     pub struct_arg_classes: Vec<Vec<EightbyteClass>>,
+    /// RISC-V LP64D float field classification for struct args.
+    pub struct_arg_riscv_float_classes: Vec<Option<crate::common::types::RiscvFloatClass>>,
     /// True if the call uses a hidden pointer argument for struct returns (i386 SysV ABI).
     pub is_sret: bool,
     /// True if the callee uses the fastcall calling convention.

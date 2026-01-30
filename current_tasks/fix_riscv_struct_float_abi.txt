@@ -1,9 +1,0 @@
-Task: Fix RISC-V LP64D struct float/double field ABI calling convention
-Status: in_progress
-Description: On RISC-V LP64D, structs containing float/double members should be
-passed in FP registers per the psABI "hardware floating-point calling convention":
-- struct with 1 float/double only → 1 FP register
-- struct with 2 float/double members (HFA) → 2 FP registers
-- struct with 1 float/double + 1 integer ≤ XLEN → FP reg + GP reg
-Currently all structs are passed in GP registers, causing ABI incompatibility
-with GCC-compiled code and failing tests compiler_suite_0147_0047 and 0147_0051.

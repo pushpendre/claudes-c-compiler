@@ -2394,6 +2394,7 @@ impl ArchCodegen for I686Codegen {
             variadic_floats_in_gp: false,
             large_struct_by_ref: false,
             use_sysv_struct_classification: false,
+            use_riscv_float_struct_classification: false,
         }
     }
 
@@ -2405,6 +2406,7 @@ impl ArchCodegen for I686Codegen {
                  is_variadic: bool, _num_fixed_args: usize, struct_arg_sizes: &[Option<usize>],
                  struct_arg_aligns: &[Option<usize>],
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
+                 _struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>],
                  is_sret: bool,
                  is_fastcall: bool) {
         if !is_fastcall {
@@ -2414,7 +2416,7 @@ impl ArchCodegen for I686Codegen {
             // the call to the shared skeleton.
             use crate::backend::call_abi::*;
             let config = self.call_abi_config();
-            let arg_classes_vec = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, is_variadic, &config);
+            let arg_classes_vec = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, &[], is_variadic, &config);
             let indirect = func_ptr.is_some() && direct_name.is_none();
             if indirect {
                 self.emit_call_spill_fptr(func_ptr.expect("indirect call requires func_ptr"));
@@ -2426,7 +2428,7 @@ impl ArchCodegen for I686Codegen {
                                                             if indirect { self.emit_call_fptr_spill_size() } else { 0 },
                                                             f128_temp_space);
             self.state().reg_cache.invalidate_acc();
-            self.emit_call_reg_args(args, &arg_classes_vec, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space);
+            self.emit_call_reg_args(args, &arg_classes_vec, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space, &[]);
             self.emit_call_instruction(direct_name, func_ptr, indirect, stack_arg_space);
             // On i386 SysV, sret calls have the callee pop the hidden pointer with
             // `ret $4`, so subtract those bytes from the caller's stack cleanup.
@@ -2522,7 +2524,8 @@ impl ArchCodegen for I686Codegen {
 
     fn emit_call_reg_args(&mut self, _args: &[Operand], _arg_classes: &[call_abi::CallArgClass],
                           _arg_types: &[IrType], _total_sp_adjust: i64,
-                          _f128_temp_space: usize, _stack_arg_space: usize) {
+                          _f128_temp_space: usize, _stack_arg_space: usize,
+                          _struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) {
         // cdecl: no register args, nothing to do
     }
 
@@ -3786,6 +3789,9 @@ impl ArchCodegen for I686Codegen {
             _ => func_name,
         };
 
+        // Track that we need runtime helpers for standalone builds (without libgcc)
+        self.state.needs_divdi3_helpers = true;
+
         // cdecl: push rhs (high then low), then lhs (high then low)
         // Stack layout for call: [lhs_lo, lhs_hi, rhs_lo, rhs_hi]
         self.emit_load_acc_pair(rhs);
@@ -4012,5 +4018,292 @@ impl ArchCodegen for I686Codegen {
             _ => "%edx",
         };
         emit!(self.state, "    {} {}, {}(%ecx)", store_instr, reg, seg_prefix);
+    }
+
+    fn emit_runtime_stubs(&mut self) {
+        if !self.state.needs_divdi3_helpers {
+            return;
+        }
+
+        // Emit runtime helper functions for 64-bit division on i686.
+        // These are emitted as .weak symbols so that libgcc versions take precedence
+        // if linked. All functions use cdecl calling convention:
+        //   args: 4(%esp)=lhs_lo, 8(%esp)=lhs_hi, 12(%esp)=rhs_lo, 16(%esp)=rhs_hi
+        //   return: edx:eax (64-bit result)
+
+        self.emit_udivdi3_stub();
+        self.emit_umoddi3_stub();
+        self.emit_divdi3_stub();
+        self.emit_moddi3_stub();
+    }
+}
+
+// ─── 64-bit division runtime stubs for i686 ──────────────────────────────────
+//
+// On 32-bit x86, 64-bit division/modulo requires runtime helpers normally
+// provided by libgcc (__divdi3, __udivdi3, __moddi3, __umoddi3).  Standalone
+// builds (e.g. musl libc) that don't link libgcc need the compiler to provide
+// these.  We emit them as .weak symbols so that if libgcc IS linked, its
+// versions take precedence.
+//
+// Calling convention (cdecl, stack-based):
+//   4(%esp)  = dividend low  (A_lo)
+//   8(%esp)  = dividend high (A_hi)
+//   12(%esp) = divisor low   (B_lo)
+//   16(%esp) = divisor high  (B_hi)
+//   Return: edx:eax = 64-bit result
+
+impl I686Codegen {
+    /// Emit __udivdi3: unsigned 64-bit division, returns quotient in edx:eax.
+    /// Algorithm based on compiler-rt's i386/udivdi3.S (Stephen Canon, 2008).
+    /// Uses normalized-divisor estimation with remainder-based adjustment.
+    fn emit_udivdi3_stub(&mut self) {
+        let s = &mut self.state;
+        s.emit("");
+        s.emit(".weak __udivdi3");
+        s.emit(".type __udivdi3, @function");
+        s.emit("__udivdi3:");
+        // Stack: ret(0), A_lo(4), A_hi(8), B_lo(12), B_hi(16)
+        s.emit("    pushl %ebx");
+        // Stack: ebx(0), ret(4), A_lo(8), A_hi(12), B_lo(16), B_hi(20)
+        s.emit("    movl 20(%esp), %ebx");  // B_hi
+        s.emit("    bsrl %ebx, %ecx");      // ecx = i = index of leading bit of B_hi
+        s.emit("    jz .Ludiv_b_hi_zero");  // B_hi == 0 -> special case
+
+        // --- B_hi != 0: quotient fits in 32 bits ---
+        // Construct bhi = bits [1+i : 32+i] of B (top 32 bits of B, normalized).
+        //   bhi = (B_lo >> (1+i)) | (B_hi << (31-i))
+        s.emit("    movl 16(%esp), %eax");  // B_lo
+        s.emit("    shrl %cl, %eax");       // B_lo >> i
+        s.emit("    shrl %eax");            // B_lo >> (1+i)
+        s.emit("    notl %ecx");            // cl = 31-i (mod 32)
+        s.emit("    shll %cl, %ebx");       // B_hi << (31-i)
+        s.emit("    orl %eax, %ebx");       // ebx = bhi
+        s.emit("    movl 12(%esp), %edx");  // A_hi
+        s.emit("    movl 8(%esp), %eax");   // A_lo
+        s.emit("    cmpl %ebx, %edx");      // if A_hi >= bhi, need overflow path
+        s.emit("    jae .Ludiv_big_overflow");
+
+        // A_hi < bhi: divide edx:eax by bhi directly (no overflow)
+        s.emit("    divl %ebx");            // eax = qs
+        s.emit("    pushl %edi");
+        // Stack: edi(0), ebx(4), ret(8), A_lo(12), A_hi(16), B_lo(20), B_hi(24)
+        s.emit("    notl %ecx");            // cl = i again
+        s.emit("    shrl %eax");
+        s.emit("    shrl %cl, %eax");       // q = qs >> (1+i)
+        s.emit("    movl %eax, %edi");      // edi = q
+        // Verify: compute a - q*b, adjust if negative
+        s.emit("    mull 20(%esp)");        // edx:eax = q * B_lo
+        s.emit("    movl 12(%esp), %ebx");
+        s.emit("    movl 16(%esp), %ecx");  // ecx:ebx = a
+        s.emit("    subl %eax, %ebx");
+        s.emit("    sbbl %edx, %ecx");      // ecx:ebx = a - q*B_lo
+        s.emit("    movl 24(%esp), %eax");  // B_hi
+        s.emit("    imull %edi, %eax");     // q * B_hi (low 32 bits)
+        s.emit("    subl %eax, %ecx");      // ecx:ebx = a - q*b
+        s.emit("    sbbl $0, %edi");        // if remainder was negative, decrement q
+        s.emit("    xorl %edx, %edx");
+        s.emit("    movl %edi, %eax");
+        s.emit("    popl %edi");
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+
+        // A_hi >= bhi: subtract bhi first to avoid divl overflow
+        s.emit(".Ludiv_big_overflow:");
+        s.emit("    subl %ebx, %edx");      // edx = A_hi - bhi
+        s.emit("    divl %ebx");            // eax = qs (for quotient 1:qs)
+        s.emit("    pushl %edi");
+        s.emit("    notl %ecx");            // cl = i
+        s.emit("    shrl %eax");
+        s.emit("    orl $0x80000000, %eax"); // set high bit (the '1' prefix)
+        s.emit("    shrl %cl, %eax");       // q = (1:qs) >> (1+i)
+        s.emit("    movl %eax, %edi");
+        s.emit("    mull 20(%esp)");        // q * B_lo
+        s.emit("    movl 12(%esp), %ebx");
+        s.emit("    movl 16(%esp), %ecx");
+        s.emit("    subl %eax, %ebx");
+        s.emit("    sbbl %edx, %ecx");
+        s.emit("    movl 24(%esp), %eax");
+        s.emit("    imull %edi, %eax");
+        s.emit("    subl %eax, %ecx");
+        s.emit("    sbbl $0, %edi");
+        s.emit("    xorl %edx, %edx");
+        s.emit("    movl %edi, %eax");
+        s.emit("    popl %edi");
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+
+        // --- B_hi == 0: two-step divide ---
+        s.emit(".Ludiv_b_hi_zero:");
+        s.emit("    movl 12(%esp), %eax");  // A_hi
+        s.emit("    movl 16(%esp), %ecx");  // B_lo
+        s.emit("    xorl %edx, %edx");
+        s.emit("    divl %ecx");            // eax = Q_hi, edx = rem
+        s.emit("    movl %eax, %ebx");      // save Q_hi
+        s.emit("    movl 8(%esp), %eax");   // A_lo
+        s.emit("    divl %ecx");            // eax = Q_lo
+        s.emit("    movl %ebx, %edx");      // edx = Q_hi
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+        s.emit(".size __udivdi3, .-__udivdi3");
+    }
+
+    /// Emit __umoddi3: unsigned 64-bit modulo, returns remainder in edx:eax.
+    /// Computes a % b = a - (a / b) * b, delegating division to __udivdi3.
+    fn emit_umoddi3_stub(&mut self) {
+        let s = &mut self.state;
+        s.emit("");
+        s.emit(".weak __umoddi3");
+        s.emit(".type __umoddi3, @function");
+        s.emit("__umoddi3:");
+        // Stack: ret(0), A_lo(4), A_hi(8), B_lo(12), B_hi(16)
+        s.emit("    pushl %ebx");
+        s.emit("    pushl %esi");
+        s.emit("    pushl %edi");
+        s.emit("    pushl %ebp");
+        // Stack: ebp(0), edi(4), esi(8), ebx(12), ret(16), A_lo(20), A_hi(24), B_lo(28), B_hi(32)
+
+        // Call __udivdi3(A, B) to get quotient
+        s.emit("    pushl 32(%esp)");       // B_hi
+        s.emit("    pushl 32(%esp)");       // B_lo (28+4=32 after push)
+        s.emit("    pushl 32(%esp)");       // A_hi (24+8=32 after two pushes)
+        s.emit("    pushl 32(%esp)");       // A_lo (20+12=32 after three pushes)
+        s.emit("    call __udivdi3");
+        s.emit("    addl $16, %esp");
+        // edx:eax = quotient (Q_hi:Q_lo)
+
+        // Compute q * B (64-bit), result in ecx:ebx
+        // q * B = Q_lo * B_lo + (Q_lo * B_hi + Q_hi * B_lo) << 32
+        // We only need the low 64 bits.
+        s.emit("    movl %eax, %ebx");      // save Q_lo
+        s.emit("    movl %edx, %ecx");      // save Q_hi
+        s.emit("    imull 28(%esp), %ecx");  // ecx = Q_hi * B_lo (low 32)
+        s.emit("    movl 32(%esp), %ebp");   // B_hi
+        s.emit("    imull %ebx, %ebp");      // ebp = Q_lo * B_hi (low 32)
+        s.emit("    addl %ebp, %ecx");       // ecx = cross terms sum
+        s.emit("    movl %ebx, %eax");       // eax = Q_lo
+        s.emit("    mull 28(%esp)");         // edx:eax = Q_lo * B_lo
+        s.emit("    addl %ecx, %edx");       // edx:eax = q * B (low 64 bits)
+
+        // remainder = A - q*B
+        s.emit("    movl 20(%esp), %ebx");   // A_lo
+        s.emit("    movl 24(%esp), %ecx");   // A_hi
+        s.emit("    subl %eax, %ebx");
+        s.emit("    sbbl %edx, %ecx");
+        s.emit("    movl %ebx, %eax");
+        s.emit("    movl %ecx, %edx");
+        s.emit("    popl %ebp");
+        s.emit("    popl %edi");
+        s.emit("    popl %esi");
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+        s.emit(".size __umoddi3, .-__umoddi3");
+    }
+
+    /// Emit __divdi3: signed 64-bit division.
+    /// Negates operands to unsigned, calls __udivdi3, negates result if needed.
+    fn emit_divdi3_stub(&mut self) {
+        let s = &mut self.state;
+        s.emit("");
+        s.emit(".weak __divdi3");
+        s.emit(".type __divdi3, @function");
+        s.emit("__divdi3:");
+        // Stack: ret, A_lo(4), A_hi(8), B_lo(12), B_hi(16)
+        s.emit("    pushl %ebx");
+        s.emit("    pushl %esi");
+        s.emit("    pushl %edi");
+        // Stack: edi, esi, ebx, ret, A_lo(16), A_hi(20), B_lo(24), B_hi(28)
+        s.emit("    movl 20(%esp), %edx");  // A_hi
+        s.emit("    movl 28(%esp), %ecx");  // B_hi
+        s.emit("    movl %edx, %edi");      // save A_hi for sign
+        s.emit("    xorl %ecx, %edi");      // edi = sign of result (bit 31)
+        s.emit("    movl 16(%esp), %eax");  // A_lo
+        s.emit("    movl 24(%esp), %ebx");  // B_lo
+        // Negate A if negative
+        s.emit("    testl %edx, %edx");
+        s.emit("    jns .Ldiv_a_pos");
+        s.emit("    negl %eax");
+        s.emit("    adcl $0, %edx");
+        s.emit("    negl %edx");
+        s.emit(".Ldiv_a_pos:");
+        // Negate B if negative
+        s.emit("    testl %ecx, %ecx");
+        s.emit("    jns .Ldiv_b_pos");
+        s.emit("    negl %ebx");
+        s.emit("    adcl $0, %ecx");
+        s.emit("    negl %ecx");
+        s.emit(".Ldiv_b_pos:");
+        // Push unsigned args and call __udivdi3
+        s.emit("    pushl %ecx");           // B_hi (unsigned)
+        s.emit("    pushl %ebx");           // B_lo (unsigned)
+        s.emit("    pushl %edx");           // A_hi (unsigned)
+        s.emit("    pushl %eax");           // A_lo (unsigned)
+        s.emit("    call __udivdi3");
+        s.emit("    addl $16, %esp");
+        // Result in edx:eax. Negate if sign differs.
+        s.emit("    testl %edi, %edi");
+        s.emit("    jns .Ldiv_done");
+        s.emit("    negl %eax");
+        s.emit("    adcl $0, %edx");
+        s.emit("    negl %edx");
+        s.emit(".Ldiv_done:");
+        s.emit("    popl %edi");
+        s.emit("    popl %esi");
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+        s.emit(".size __divdi3, .-__divdi3");
+    }
+
+    /// Emit __moddi3: signed 64-bit modulo.
+    /// Negates operands to unsigned, calls __umoddi3, negates result if dividend was negative.
+    fn emit_moddi3_stub(&mut self) {
+        let s = &mut self.state;
+        s.emit("");
+        s.emit(".weak __moddi3");
+        s.emit(".type __moddi3, @function");
+        s.emit("__moddi3:");
+        // Stack: ret, A_lo(4), A_hi(8), B_lo(12), B_hi(16)
+        s.emit("    pushl %ebx");
+        s.emit("    pushl %esi");
+        s.emit("    pushl %edi");
+        // Stack: edi, esi, ebx, ret, A_lo(16), A_hi(20), B_lo(24), B_hi(28)
+        s.emit("    movl 20(%esp), %edx");  // A_hi
+        s.emit("    movl 28(%esp), %ecx");  // B_hi
+        s.emit("    movl %edx, %edi");      // save A_hi sign (remainder sign = dividend sign)
+        s.emit("    movl 16(%esp), %eax");  // A_lo
+        s.emit("    movl 24(%esp), %ebx");  // B_lo
+        // Negate A if negative
+        s.emit("    testl %edx, %edx");
+        s.emit("    jns .Lmod_a_pos");
+        s.emit("    negl %eax");
+        s.emit("    adcl $0, %edx");
+        s.emit("    negl %edx");
+        s.emit(".Lmod_a_pos:");
+        // Negate B if negative
+        s.emit("    testl %ecx, %ecx");
+        s.emit("    jns .Lmod_b_pos");
+        s.emit("    negl %ebx");
+        s.emit("    adcl $0, %ecx");
+        s.emit("    negl %ecx");
+        s.emit(".Lmod_b_pos:");
+        // Push unsigned args and call __umoddi3
+        s.emit("    pushl %ecx");
+        s.emit("    pushl %ebx");
+        s.emit("    pushl %edx");
+        s.emit("    pushl %eax");
+        s.emit("    call __umoddi3");
+        s.emit("    addl $16, %esp");
+        // Negate result if dividend was negative
+        s.emit("    testl %edi, %edi");
+        s.emit("    jns .Lmod_done");
+        s.emit("    negl %eax");
+        s.emit("    adcl $0, %edx");
+        s.emit("    negl %edx");
+        s.emit(".Lmod_done:");
+        s.emit("    popl %edi");
+        s.emit("    popl %esi");
+        s.emit("    popl %ebx");
+        s.emit("    ret");
+        s.emit(".size __moddi3, .-__moddi3");
     }
 }

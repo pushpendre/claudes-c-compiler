@@ -2567,6 +2567,7 @@ impl ArchCodegen for X86Codegen {
             variadic_floats_in_gp: false,
             large_struct_by_ref: false, // x86-64 SysV: large structs passed on stack by value
             use_sysv_struct_classification: true, // x86-64 SysV: per-eightbyte SSE/INTEGER classification
+            use_riscv_float_struct_classification: false,
         }
     }
 
@@ -2690,7 +2691,8 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
-                          _arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize) {
+                          _arg_types: &[IrType], _total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize,
+                          _struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) {
         let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         let mut float_count = 0usize;
         for (i, arg) in args.iter().enumerate() {
