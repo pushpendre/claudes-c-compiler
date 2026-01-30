@@ -1,0 +1,7 @@
+Task: Reduce stack frame sizes by using 4-byte slots for 32-bit values
+Status: in_progress
+Description: SSA values of type I32/U32/F32 and smaller currently get 8-byte stack slots
+on 64-bit backends (x86-64, ARM64, RISC-V 64). This wastes ~40% of stack frame space.
+Fix: Track "small" values in CodegenState, use 4-byte slots in classify_value, update
+the assign_slot closures and store/load paths in all three 64-bit backends to use
+4-byte operations for small values.
