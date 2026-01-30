@@ -1,0 +1,19 @@
+Fix sema to error on variable declarations with incomplete struct/union types
+
+Problem:
+The compiler silently accepts variable declarations with incomplete (forward-declared
+but not defined) struct/union types, e.g.:
+  struct nonexistent x;  // should error: storage size of 'x' isn't known
+
+GCC/Clang correctly reject this with: error: storage size of 'x' isn't known
+
+This causes runit to fail because the build system's feature detection (tryuwtmpx.c)
+tries to declare `struct futmpx ut;` which should fail (struct futmpx doesn't exist
+on Linux), falling back to utmp. But our compiler accepts it, selecting the wrong
+header (uw_tmp.h2 instead of uw_tmp.h1), causing _UTMPX_FILE/_WTMPX_FILE undeclared errors.
+
+Fix: Add a check in sema for variable declarations to verify the type is complete
+(has known size) when declaring stack or file-scope variables.
+
+Status: in_progress
+Started: 2026-01-30
