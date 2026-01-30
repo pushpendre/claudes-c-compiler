@@ -10,6 +10,52 @@ use std::fmt::Write;
 use crate::common::types::IrType;
 use crate::ir::ir::BlockId;
 
+/// Resolve GCC inline asm dialect alternatives in a template string.
+///
+/// GCC inline asm supports `{alt0|alt1}` syntax where `alt0` is the AT&T
+/// dialect version and `alt1` is the Intel dialect version. Since we always
+/// emit AT&T syntax, we select the first alternative and strip the braces.
+///
+/// Examples:
+///   `"rep; bsr{q %1, %0| %0, %1}"` -> `"rep; bsrq %1, %0"`
+///   `"bt{l} %[Bit],%[Base]"`       -> `"btl %[Bit],%[Base]"`
+///   `"{lock }cmpxchg %1, %2"`      -> `"lock cmpxchg %1, %2"`
+///
+/// The `%{` escape (literal brace) is not used in practice, so we don't
+/// handle it specially here.
+fn resolve_dialect_alternatives(line: &str) -> Cow<'_, str> {
+    if !line.contains('{') {
+        return Cow::Borrowed(line);
+    }
+    let mut result = String::with_capacity(line.len());
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            // Collect the first alternative (AT&T) until '|' or '}'
+            i += 1; // skip '{'
+            while i < chars.len() && chars[i] != '|' && chars[i] != '}' {
+                result.push(chars[i]);
+                i += 1;
+            }
+            // Skip the second alternative (Intel) and closing '}'
+            if i < chars.len() && chars[i] == '|' {
+                i += 1; // skip '|'
+                while i < chars.len() && chars[i] != '}' {
+                    i += 1;
+                }
+            }
+            if i < chars.len() && chars[i] == '}' {
+                i += 1; // skip '}'
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    Cow::Owned(result)
+}
+
 /// Map GCC inline asm condition code suffix to x86 SETcc/Jcc suffix.
 ///
 /// GCC's `=@cc<cond>` output constraint maps directly to x86 condition codes.
@@ -144,6 +190,9 @@ pub(crate) fn substitute_x86_asm_operands(
         op_imm_symbols: &[Option<String>],
     ),
 ) -> String {
+    // Pre-process GCC dialect alternatives: {att_syntax|intel_syntax}
+    // We always target AT&T syntax, so select the first alternative.
+    let line = resolve_dialect_alternatives(line);
     let mut result = String::new();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;

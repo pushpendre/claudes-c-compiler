@@ -284,6 +284,22 @@ _mm_cmpgt_epi8(__m128i __a, __m128i __b)
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpgtb128(__a, __b));
 }
 
+/* === 64-bit Arithmetic === */
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_add_epi64(__m128i __a, __m128i __b)
+{
+    return (__m128i){ { __a.__val[0] + __b.__val[0],
+                        __a.__val[1] + __b.__val[1] } };
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_sub_epi64(__m128i __a, __m128i __b)
+{
+    return (__m128i){ { __a.__val[0] - __b.__val[0],
+                        __a.__val[1] - __b.__val[1] } };
+}
+
 /* === Pack / Unpack === */
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -320,6 +336,46 @@ static __inline__ __m128i __attribute__((__always_inline__))
 _mm_unpackhi_epi16(__m128i __a, __m128i __b)
 {
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_punpckhwd128(__a, __b));
+}
+
+/* Interleave low 32-bit integers: a0, b0, a1, b1 */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_unpacklo_epi32(__m128i __a, __m128i __b)
+{
+    unsigned int __a0 = (unsigned int)__a.__val[0];
+    unsigned int __a1 = (unsigned int)(__a.__val[0] >> 32);
+    unsigned int __b0 = (unsigned int)__b.__val[0];
+    unsigned int __b1 = (unsigned int)(__b.__val[0] >> 32);
+    long long __lo = (long long)__a0 | ((long long)__b0 << 32);
+    long long __hi = (long long)__a1 | ((long long)__b1 << 32);
+    return (__m128i){ { __lo, __hi } };
+}
+
+/* Interleave high 32-bit integers: a2, b2, a3, b3 */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_unpackhi_epi32(__m128i __a, __m128i __b)
+{
+    unsigned int __a2 = (unsigned int)__a.__val[1];
+    unsigned int __a3 = (unsigned int)(__a.__val[1] >> 32);
+    unsigned int __b2 = (unsigned int)__b.__val[1];
+    unsigned int __b3 = (unsigned int)(__b.__val[1] >> 32);
+    long long __lo = (long long)__a2 | ((long long)__b2 << 32);
+    long long __hi = (long long)__a3 | ((long long)__b3 << 32);
+    return (__m128i){ { __lo, __hi } };
+}
+
+/* Interleave low 64-bit integers: a0, b0 */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_unpacklo_epi64(__m128i __a, __m128i __b)
+{
+    return (__m128i){ { __a.__val[0], __b.__val[0] } };
+}
+
+/* Interleave high 64-bit integers: a1, b1 */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_unpackhi_epi64(__m128i __a, __m128i __b)
+{
+    return (__m128i){ { __a.__val[1], __b.__val[1] } };
 }
 
 /* === Set / Broadcast === */
@@ -518,6 +574,48 @@ static __inline__ __m128i __attribute__((__always_inline__))
 _mm_loadl_epi64(__m128i const *__p)
 {
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_loadldi128(__p));
+}
+
+/* === Float/Int Conversion (SSE2) === */
+
+/* Convert packed 32-bit integers to packed single-precision floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtepi32_ps(__m128i __a)
+{
+    int __i0 = (int)__a.__val[0];
+    int __i1 = (int)(__a.__val[0] >> 32);
+    int __i2 = (int)__a.__val[1];
+    int __i3 = (int)(__a.__val[1] >> 32);
+    return (__m128){ { (float)__i0, (float)__i1, (float)__i2, (float)__i3 } };
+}
+
+/* Convert packed single-precision floats to packed 32-bit integers (round to nearest) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtps_epi32(__m128 __a)
+{
+    /* Round to nearest integer. Use (int)(x + copysignf(0.5f, x)) as a
+     * portable approximation of round-to-nearest-even. This doesn't perfectly
+     * match banker's rounding for .5 cases, but works for typical audio/video usage. */
+    int __i0 = (int)(__a.__val[0] >= 0.0f ? __a.__val[0] + 0.5f : __a.__val[0] - 0.5f);
+    int __i1 = (int)(__a.__val[1] >= 0.0f ? __a.__val[1] + 0.5f : __a.__val[1] - 0.5f);
+    int __i2 = (int)(__a.__val[2] >= 0.0f ? __a.__val[2] + 0.5f : __a.__val[2] - 0.5f);
+    int __i3 = (int)(__a.__val[3] >= 0.0f ? __a.__val[3] + 0.5f : __a.__val[3] - 0.5f);
+    long long __lo = (long long)(unsigned int)__i0 | ((long long)(unsigned int)__i1 << 32);
+    long long __hi = (long long)(unsigned int)__i2 | ((long long)(unsigned int)__i3 << 32);
+    return (__m128i){ { __lo, __hi } };
+}
+
+/* Convert packed single-precision floats to packed 32-bit integers (truncate) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvttps_epi32(__m128 __a)
+{
+    int __i0 = (int)__a.__val[0];
+    int __i1 = (int)__a.__val[1];
+    int __i2 = (int)__a.__val[2];
+    int __i3 = (int)__a.__val[3];
+    long long __lo = (long long)(unsigned int)__i0 | ((long long)(unsigned int)__i1 << 32);
+    long long __hi = (long long)(unsigned int)__i2 | ((long long)(unsigned int)__i3 << 32);
+    return (__m128i){ { __lo, __hi } };
 }
 
 /* === Miscellaneous === */

@@ -1,0 +1,42 @@
+Fix statement expression local variables leaking as global symbol references
+==========================================================================
+Priority: HIGH (blocks kernel build)
+Date: 2026-01-30
+
+Problem:
+After fixing __compiletime_assert errors (block-scope error attribute propagation),
+the kernel build now fails with hundreds of undefined references to `____ptr` and
+`__v`. These are local variable names from statement expressions (({...})) that
+are being emitted as if they were global symbols.
+
+The kernel's READ_ONCE macro uses:
+  #define READ_ONCE(x) \
+  ({ \
+      compiletime_assert_rwonce_type(x); \
+      __READ_ONCE(x); \
+  })
+
+And macros like hlist_entry_safe use:
+  ({ typeof(ptr) ____ptr = (ptr); \
+     !is_a_nulls(____ptr) ? hlist_nulls_entry(____ptr, type, member) : NULL; \
+  })
+
+Local variables inside these statement expressions (____ptr, __v) are being
+emitted as global symbol references in the object file, causing linker errors.
+
+Root cause investigation:
+- lower_stmt_expr in expr_access.rs already uses push_scope/pop_scope around
+  the statement expression body - investigate whether the issue is in variable
+  lookup resolution rather than scope registration
+- The variable lookup may fall back to a global symbol when it doesn't find a
+  local, emitting an external reference to what should be a stack-local
+- Check the lvalue resolution chain for incorrect fallback behavior
+
+Key files:
+- src/ir/lowering/expr_access.rs (lower_stmt_expr, push_scope/pop_scope)
+- src/ir/lowering/lvalue.rs (variable name lookup and potential global fallback)
+- src/ir/lowering/stmt.rs (compound statement handling)
+- src/ir/lowering/stmt_init.rs (local variable registration)
+
+This is the primary remaining blocker for the kernel build after the
+__compiletime_assert fix.

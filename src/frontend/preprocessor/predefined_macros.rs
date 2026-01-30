@@ -338,6 +338,42 @@ impl Preprocessor {
         }
     }
 
+    /// Define x86/x86_64 SIMD feature macros (__SSE__, __SSE2__, __MMX__, etc.).
+    ///
+    /// GCC/Clang always define these for x86_64 (SSE2 is baseline for the ISA).
+    /// For i686, GCC only defines them with explicit -msse/-msse2, but since our
+    /// i686 backend always uses SSE2 instructions, we define them unconditionally.
+    ///
+    /// When `no_sse` is true (from -mno-sse or similar flags), these macros are
+    /// not defined (matching GCC behavior for kernel builds).
+    ///
+    /// Must be called after set_target() since it checks which arch is active.
+    pub fn set_sse_macros(&mut self, no_sse: bool) {
+        if no_sse {
+            return;
+        }
+        // Only define SSE macros for x86 targets (x86_64 and i686).
+        // Check that we're on an x86 target by looking for __x86_64__ or __i386__.
+        let is_x86_64 = self.macros.is_defined("__x86_64__");
+        let is_i386 = self.macros.is_defined("__i386__");
+        if !is_x86_64 && !is_i386 {
+            return;
+        }
+
+        // SSE and SSE2 are baseline for x86_64; our i686 backend also uses SSE2.
+        self.define_simple_macro("__SSE__", "1");
+        self.define_simple_macro("__SSE2__", "1");
+        self.define_simple_macro("__MMX__", "1");
+
+        if is_x86_64 {
+            // x86_64 uses SSE for floating-point math by default
+            self.define_simple_macro("__SSE_MATH__", "1");
+            self.define_simple_macro("__SSE2_MATH__", "1");
+            // GCC also defines this for x86_64
+            self.define_simple_macro("__MMX_WITH_SSE__", "1");
+        }
+    }
+
     /// Set the target architecture, updating predefined macros and include paths.
     pub fn set_target(&mut self, target: &str) {
         match target {

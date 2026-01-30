@@ -101,6 +101,17 @@ impl Lowerer {
         if let Some((params, variadic)) = func_info {
             self.register_block_func_meta(&declarator.name, &decl.type_spec, ptr_count, &params, variadic);
             self.shadow_local_for_scope(&declarator.name);
+            // Propagate __attribute__((error("..."))) and __attribute__((noreturn)) / _Noreturn
+            // from block-scope function declarations. Without this, the kernel's BUILD_BUG_ON
+            // macro (which uses block-scope `extern void __compiletime_assert_NNN(void)
+            // __attribute__((error(...)))`) would emit real calls to undefined symbols
+            // instead of replacing them with Unreachable.
+            if declarator.attrs.is_error_attr() && !declarator.name.is_empty() {
+                self.error_functions.insert(declarator.name.clone());
+            }
+            if declarator.attrs.is_noreturn() && !declarator.name.is_empty() {
+                self.noreturn_functions.insert(declarator.name.clone());
+            }
             return true;
         }
 
@@ -111,6 +122,12 @@ impl Lowerer {
                 if let Some(fti) = self.types.function_typedefs.get(tname).cloned() {
                     self.register_block_func_meta(&declarator.name, &fti.return_type, 0, &fti.params, fti.variadic);
                     self.shadow_local_for_scope(&declarator.name);
+                    if declarator.attrs.is_error_attr() && !declarator.name.is_empty() {
+                        self.error_functions.insert(declarator.name.clone());
+                    }
+                    if declarator.attrs.is_noreturn() && !declarator.name.is_empty() {
+                        self.noreturn_functions.insert(declarator.name.clone());
+                    }
                     return true;
                 }
             }

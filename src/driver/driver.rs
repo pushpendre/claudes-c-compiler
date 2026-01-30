@@ -599,6 +599,11 @@ impl Driver {
         // This is critical for kernel code where RIP_REL_REF() checks #ifndef __pic__
         // to decide whether to use RIP-relative inline asm for early boot code.
         preprocessor.set_pic(self.pic);
+        // Set SSE/SSE2/MMX predefined macros for x86 targets.
+        // GCC/Clang always define __SSE__, __SSE2__, __MMX__ for x86_64 (baseline ISA).
+        // Our i686 backend also uses SSE2, so we define them for i686 as well.
+        // Projects like stb_image, minimp3, dr_libs use #ifdef __SSE2__ to enable SIMD paths.
+        preprocessor.set_sse_macros(self.no_sse);
         for def in &self.defines {
             preprocessor.define_macro(&def.name, &def.value);
         }
