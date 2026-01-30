@@ -1,0 +1,12 @@
+Fix preprocessor rescan: object-like macro expanding to function-like macro name
+
+When an object-like macro expands to text ending with a function-like macro name,
+and the tokens following the expansion point include parenthesized arguments,
+the rescan should combine these to invoke the function-like macro.
+
+Example:
+  #define c_default_cmp(x, y) (...)
+  #define i_cmp -c_default_cmp
+  i_cmp(a, b) => should expand to -(...)  but currently stops at -c_default_cmp(a, b)
+
+This fixes the stc project which fails on all 4 architectures.
