@@ -168,6 +168,40 @@ _mm_adds_epu16(__m128i __a, __m128i __b)
     return __r;
 }
 
+/* === Signed Saturating Arithmetic === */
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_adds_epi16(__m128i __a, __m128i __b)
+{
+    /* Signed saturating add of 8 x 16-bit elements. */
+    short *__pa = (short *)&__a;
+    short *__pb = (short *)&__b;
+    __m128i __r;
+    short *__pr = (short *)&__r;
+    for (int __i = 0; __i < 8; __i++) {
+        int __s = (int)__pa[__i] + (int)__pb[__i];
+        if (__s > 32767) __s = 32767;
+        if (__s < -32768) __s = -32768;
+        __pr[__i] = (short)__s;
+    }
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_subs_epu16(__m128i __a, __m128i __b)
+{
+    /* Unsigned saturating subtract of 8 x 16-bit elements. */
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++) {
+        int __d = (int)__pa[__i] - (int)__pb[__i];
+        __pr[__i] = (unsigned short)(__d < 0 ? 0 : __d);
+    }
+    return __r;
+}
+
 /* === Arithmetic === */
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -199,6 +233,45 @@ _mm_min_epi16(__m128i __a, __m128i __b)
     short *__pr = (short *)&__r;
     for (int __i = 0; __i < 8; __i++)
         __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epi16(__m128i __a, __m128i __b)
+{
+    /* Signed 16-bit maximum for each of 8 lanes. */
+    short *__pa = (short *)&__a;
+    short *__pb = (short *)&__b;
+    __m128i __r;
+    short *__pr = (short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_min_epu8(__m128i __a, __m128i __b)
+{
+    /* Unsigned byte minimum for each of 16 lanes. */
+    unsigned char *__pa = (unsigned char *)&__a;
+    unsigned char *__pb = (unsigned char *)&__b;
+    __m128i __r;
+    unsigned char *__pr = (unsigned char *)&__r;
+    for (int __i = 0; __i < 16; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epu8(__m128i __a, __m128i __b)
+{
+    /* Unsigned byte maximum for each of 16 lanes. */
+    unsigned char *__pa = (unsigned char *)&__a;
+    unsigned char *__pb = (unsigned char *)&__b;
+    __m128i __r;
+    unsigned char *__pr = (unsigned char *)&__r;
+    for (int __i = 0; __i < 16; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
     return __r;
 }
 

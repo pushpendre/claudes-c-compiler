@@ -1,0 +1,16 @@
+Task: Implement -mregparm=N and -fomit-frame-pointer for i686 backend
+Status: in_progress
+
+Problem:
+The Linux kernel's 16-bit boot code (arch/x86/boot/) must fit in 32KB.
+It's compiled with: -m16 -Os -mregparm=3 -fomit-frame-pointer
+CCC currently ignores both -mregparm and -fomit-frame-pointer for i686,
+causing the generated code to be much larger than GCC's output, exceeding
+the 32KB limit ("Setup too big!" error).
+
+Plan:
+1. Add -mregparm=N CLI parsing (store N in CodegenOptions)
+2. Modify i686 call ABI to pass first N integer args in EAX/EDX/ECX
+3. Add -fomit-frame-pointer CLI parsing
+4. Modify i686 prologue/epilogue to skip frame pointer setup when omitted
+5. Test with kernel boot code build

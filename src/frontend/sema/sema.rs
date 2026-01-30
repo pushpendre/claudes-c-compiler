@@ -1200,9 +1200,11 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Check if an expression is a call to a noreturn function like
-    /// `__builtin_unreachable()`, `abort()`, `exit()`, or any function
-    /// declared with `__attribute__((noreturn))`.
+    /// Check if an expression diverges (never falls through to subsequent code).
+    /// This includes calls to noreturn functions (`abort()`, `exit()`,
+    /// `__builtin_unreachable()`, or any function declared with
+    /// `__attribute__((noreturn))`), and GCC statement expressions whose
+    /// compound body cannot fall through (e.g. `({ return val; })`).
     fn is_noreturn_call(&self, expr: &Expr) -> bool {
         match expr {
             Expr::FunctionCall(callee, _, _) => {
@@ -1239,6 +1241,11 @@ impl SemanticAnalyzer {
             Expr::Comma(_, rhs, _) => self.is_noreturn_call(rhs),
             // Handle cast expressions: (void)noreturn_call()
             Expr::Cast(_, inner, _) => self.is_noreturn_call(inner),
+            // Handle GCC statement expressions: ({ ...; return val; })
+            // A return inside a statement expression returns from the enclosing
+            // function, so if the compound body cannot fall through, the
+            // expression itself diverges.
+            Expr::StmtExpr(compound, _) => !self.compound_can_fall_through(compound),
             _ => false,
         }
     }
