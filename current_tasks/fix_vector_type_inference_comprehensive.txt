@@ -1,0 +1,15 @@
+Fix vector type inference for binop and compound assign (comprehensive)
+
+Combines fix_vector_binop_type_inference and fix_vector_compound_assign_type_inference.
+
+Bug: When a binary operation involves a vector and a scalar (e.g., float4 * float),
+usual_arithmetic_conversion returns the scalar type instead of the vector type.
+This causes compound assignments like `a += b * s` to produce garbage results.
+
+Root cause: usual_arithmetic_conversion, get_binop_ctype, infer_binop_ctype, and
+expr_ctype don't handle CType::Vector.
+
+Fix: Add vector type handling in usual_arithmetic_conversion and expr_ctype so that
+when either operand is a vector, the result type is the vector type.
+
+Status: in_progress
