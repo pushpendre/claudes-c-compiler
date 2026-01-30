@@ -1,0 +1,14 @@
+Task: Fix PortAudio project build scripts and ccc-i686 -m32 handling
+Status: in_progress
+
+Issues found:
+1. PortAudio check scripts are missing pa_test_harness.c (test file referenced but not included)
+2. check_i686.sh passes -m32 to ccc-i686, which triggers GCC fallback unnecessarily
+   since ccc-i686 is already a 32-bit compiler
+3. Compiler fix: -m32 should be a no-op when target is already I686
+
+Fix:
+- Create pa_test_harness.c that tests Pa_Initialize/Pa_Terminate and ring buffer API
+- Remove -m32 from check_i686.sh CMAKE_C_FLAGS
+- Make -m32 a no-op in cli.rs when target is already I686
+- Update new_projects.txt with PortAudio status
