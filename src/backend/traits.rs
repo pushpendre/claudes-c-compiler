@@ -694,6 +694,25 @@ pub trait ArchCodegen {
     /// va_list and store them at `dest_ptr`. The va_list is advanced appropriately.
     fn emit_va_arg_struct(&mut self, dest_ptr: &Value, va_list_ptr: &Value, size: usize);
 
+    /// Emit va_arg for struct types with eightbyte classification info.
+    ///
+    /// On x86-64, small structs (<=16 bytes) may be passed in registers.
+    /// `eightbyte_classes` carries the SysV ABI classification so the backend
+    /// can check if all required register slots are available. If not, the
+    /// entire struct is read from the overflow area (per ABI rules).
+    ///
+    /// Default implementation ignores the classification and calls
+    /// `emit_va_arg_struct`.
+    fn emit_va_arg_struct_ex(
+        &mut self,
+        dest_ptr: &Value,
+        va_list_ptr: &Value,
+        size: usize,
+        _eightbyte_classes: &[crate::common::types::EightbyteClass],
+    ) {
+        self.emit_va_arg_struct(dest_ptr, va_list_ptr, size);
+    }
+
     /// Emit an atomic read-modify-write operation.
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering);
 

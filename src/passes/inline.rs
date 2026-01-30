@@ -1450,10 +1450,11 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
             dest_ptr: remap_value(*dest_ptr, vo),
             src_ptr: remap_value(*src_ptr, vo),
         },
-        Instruction::VaArgStruct { dest_ptr, va_list_ptr, size } => Instruction::VaArgStruct {
+        Instruction::VaArgStruct { dest_ptr, va_list_ptr, size, ref eightbyte_classes } => Instruction::VaArgStruct {
             dest_ptr: remap_value(*dest_ptr, vo),
             va_list_ptr: remap_value(*va_list_ptr, vo),
             size: *size,
+            eightbyte_classes: eightbyte_classes.clone(),
         },
         Instruction::AtomicRmw { dest, op, ptr, val, ty, ordering } => Instruction::AtomicRmw {
             dest: remap_value(*dest, vo),

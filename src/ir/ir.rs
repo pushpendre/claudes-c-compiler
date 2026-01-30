@@ -378,7 +378,21 @@ pub enum Instruction {
     /// `size` is the struct size in bytes. The backend reads the appropriate
     /// number of bytes from the va_list (registers or overflow area) and stores
     /// them at `dest_ptr`, advancing the va_list state appropriately.
-    VaArgStruct { dest_ptr: Value, va_list_ptr: Value, size: usize },
+    ///
+    /// `eightbyte_classes` carries the SysV AMD64 ABI eightbyte classification
+    /// for small structs (<=16 bytes). When non-empty, the x86 backend uses this
+    /// to check if all required register slots (GP and/or FP) are available:
+    /// - If sufficient registers exist, each eightbyte is read from the register
+    ///   save area (GP or FP depending on classification).
+    /// - If not, the ENTIRE struct is read from the overflow area.
+    /// This ensures the ABI rule that multi-eightbyte structs must be entirely
+    /// in registers or entirely on the stack is respected.
+    VaArgStruct {
+        dest_ptr: Value,
+        va_list_ptr: Value,
+        size: usize,
+        eightbyte_classes: Vec<crate::common::types::EightbyteClass>,
+    },
 
     /// va_start: initialize a va_list. last_named_param is the pointer to the last named parameter.
     VaStart { va_list_ptr: Value, },

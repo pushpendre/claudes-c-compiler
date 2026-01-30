@@ -1099,16 +1099,31 @@ impl Lowerer {
             return Operand::Value(dest);
         }
 
-        // On x86-64, structs > 16 bytes are MEMORY class and always placed on
-        // the overflow area (not in GP registers). We use VaArgStruct to let
-        // the backend read the data directly from the overflow area.
-        if self.target == Target::X86_64 && struct_size > 16 {
+        // On x86-64, ALL structs use VaArgStruct for correct ABI handling.
+        // The SysV ABI requires that multi-eightbyte structs are passed entirely
+        // in registers OR entirely on the stack - never split across the boundary.
+        // By using VaArgStruct with eightbyte classification, the backend can
+        // atomically check if all required register slots are available and fall
+        // back to the overflow area if not.
+        if self.target == Target::X86_64 {
+            let eightbyte_classes = if struct_size <= 16 {
+                if let Some(layout) = self.get_struct_layout_for_ctype(ctype) {
+                    layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts())
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new() // >16 bytes = MEMORY class, always overflow
+            };
+
             let ap_val = self.lower_va_list_pointer(ap_expr);
             let va_list_ptr = self.operand_to_value(ap_val);
+            let num_slots = struct_size.div_ceil(8);
+            let alloc_size = if struct_size > 0 { num_slots * 8 } else { 8 };
             let alloca = self.fresh_value();
             self.emit(Instruction::Alloca {
                 dest: alloca,
-                size: struct_size,
+                size: alloc_size,
                 ty: IrType::I64,
                 align: struct_align,
                 volatile: false,
@@ -1117,30 +1132,15 @@ impl Lowerer {
                 dest_ptr: alloca,
                 va_list_ptr,
                 size: struct_size,
+                eightbyte_classes,
             });
             return Operand::Value(alloca);
         }
 
-        // Small structs (or any struct on i686): passed by value inline.
+        // Non-x86-64 targets: small structs passed by value inline.
         // Read each slot from the va_list and store to a temporary alloca.
         let slot_size = if self.target == Target::I686 { 4 } else { 8 };
         let default_slot_ty = if self.target == Target::I686 { IrType::I32 } else { IrType::I64 };
-
-        // On x86-64, get the SysV eightbyte classification for this struct so we
-        // read each eightbyte from the correct register save area (GP vs FP).
-        // A struct like {double d; long i} has eightbytes [Sse, Integer], meaning
-        // the first slot must be read as F64 (from FP area) and the second as I64
-        // (from GP area). Without this, all slots would be read as I64 from the
-        // GP area, corrupting fields that were passed in SSE registers.
-        let eightbyte_classes = if self.target == Target::X86_64 {
-            if let Some(layout) = self.get_struct_layout_for_ctype(ctype) {
-                layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts())
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
 
         // Number of slots needed (round up)
         let num_slots = struct_size.div_ceil(slot_size);
@@ -1201,24 +1201,13 @@ impl Lowerer {
         }
 
         // Read each slot and store it into the alloca.
-        // Use the eightbyte classification to determine the correct IrType:
-        // SSE-classified eightbytes use F64 (reads from fp_offset area),
-        // Integer-classified eightbytes use I64 (reads from gp_offset area).
         for i in 0..num_slots {
-            let slot_ty = if let Some(crate::common::types::EightbyteClass::Sse) = eightbyte_classes.get(i) {
-                IrType::F64
-            } else {
-                default_slot_ty
-            };
             let slot_val = self.fresh_value();
             self.emit(Instruction::VaArg {
                 dest: slot_val,
                 va_list_ptr,
-                result_ty: slot_ty,
+                result_ty: default_slot_ty,
             });
-            // The backend's emit_va_arg stores the result as a raw bit pattern in
-            // %rax regardless of type, so we can store it as default_slot_ty (I64)
-            // into the alloca without needing a bitcast.
             if i == 0 {
                 // Store directly to the alloca base
                 self.emit(Instruction::Store {

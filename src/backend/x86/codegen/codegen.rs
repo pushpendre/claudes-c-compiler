@@ -1069,6 +1069,20 @@ impl X86Codegen {
 
         false
     }
+
+    /// Helper to load va_list pointer into %rcx for va_arg operations.
+    fn load_va_list_ptr_to_rcx(&mut self, va_list_ptr: &Value) {
+        if let Some(&reg) = self.reg_assignments.get(&va_list_ptr.0) {
+            let reg_name = phys_reg_name(reg);
+            self.state.out.emit_instr_reg_reg("    movq", reg_name, "rcx");
+        } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rcx");
+            } else {
+                self.state.out.emit_instr_rbp_reg("    movq", slot.0, "rcx");
+            }
+        }
+    }
 }
 
 const X86_ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
@@ -3404,6 +3418,208 @@ impl ArchCodegen for X86Codegen {
         }
         let advance = size.div_ceil(8) * 8;
         self.state.out.emit_instr_imm_mem("    addq", advance as i64, 8, "rcx");
+        self.state.reg_cache.invalidate_all();
+    }
+
+    fn emit_va_arg_struct_ex(
+        &mut self,
+        dest_ptr: &Value,
+        va_list_ptr: &Value,
+        size: usize,
+        eightbyte_classes: &[crate::common::types::EightbyteClass],
+    ) {
+        // If no eightbyte classification (large struct >16 bytes or unknown),
+        // fall back to the overflow-only path.
+        if eightbyte_classes.is_empty() {
+            self.emit_va_arg_struct(dest_ptr, va_list_ptr, size);
+            return;
+        }
+
+        // Small struct (<=16 bytes) with eightbyte classification.
+        // Per the SysV AMD64 ABI, a multi-eightbyte argument must be passed
+        // entirely in registers or entirely on the stack. We must atomically
+        // check if ALL required register slots are available.
+        //
+        // Algorithm:
+        //   gp_needed = number of INTEGER-classified eightbytes
+        //   fp_needed = number of SSE-classified eightbytes
+        //   if (gp_offset + gp_needed*8 <= 48) && (fp_offset + fp_needed*16 <= 176):
+        //     read each eightbyte from reg_save_area (GP or FP)
+        //     advance gp_offset and fp_offset
+        //   else:
+        //     read entire struct from overflow_arg_area
+        //     advance overflow_arg_area by struct size (rounded up to 8)
+
+        use crate::common::types::EightbyteClass;
+
+        let gp_needed: usize = eightbyte_classes.iter()
+            .filter(|c| **c == EightbyteClass::Integer)
+            .count();
+        let fp_needed: usize = eightbyte_classes.iter()
+            .filter(|c| **c == EightbyteClass::Sse)
+            .count();
+
+        let label_reg = self.state.fresh_label("va_struct_reg");
+        let label_mem = self.state.fresh_label("va_struct_mem");
+        let label_end = self.state.fresh_label("va_struct_end");
+
+        // Load va_list pointer into %rcx
+        self.load_va_list_ptr_to_rcx(va_list_ptr);
+
+        // Load dest_ptr into %rdi
+        if let Some(&reg) = self.reg_assignments.get(&dest_ptr.0) {
+            let reg_name = phys_reg_name(reg);
+            self.state.out.emit_instr_reg_reg("    movq", reg_name, "rdi");
+        } else if let Some(slot) = self.state.get_slot(dest_ptr.0) {
+            if self.state.is_alloca(dest_ptr.0) {
+                self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rdi");
+            } else {
+                self.state.out.emit_instr_rbp_reg("    movq", slot.0, "rdi");
+            }
+        }
+
+        // Check if all required registers are available
+        let mut need_gp_check = gp_needed > 0;
+        let mut need_fp_check = fp_needed > 0;
+
+        if need_gp_check {
+            // gp_offset + gp_needed*8 <= 48  =>  gp_offset <= 48 - gp_needed*8
+            let gp_threshold = 48i64 - (gp_needed as i64 * 8);
+            if gp_threshold < 0 {
+                // Can never fit - always use overflow
+                self.state.out.emit_jmp_label(&label_mem);
+                need_gp_check = false;
+                need_fp_check = false;
+            } else {
+                self.state.emit("    movl (%rcx), %eax"); // gp_offset
+                self.state.emit(&format!("    cmpl ${}, %eax", gp_threshold));
+                self.state.out.emit_jcc_label("    ja", &label_mem);
+            }
+        }
+        if need_fp_check {
+            // fp_offset + fp_needed*16 <= 176  =>  fp_offset <= 176 - fp_needed*16
+            let fp_threshold = 176i64 - (fp_needed as i64 * 16);
+            if fp_threshold < 48 {
+                // Can never fit (fp_offset starts at 48 minimum)
+                self.state.out.emit_jmp_label(&label_mem);
+            } else {
+                self.state.emit("    movl 4(%rcx), %eax"); // fp_offset
+                self.state.emit(&format!("    cmpl ${}, %eax", fp_threshold));
+                self.state.out.emit_jcc_label("    ja", &label_mem);
+            }
+        }
+
+        // ==== Register path ====
+        self.state.out.emit_named_label(&label_reg);
+        {
+            // Load reg_save_area
+            self.state.emit("    movq 16(%rcx), %rsi"); // reg_save_area
+
+            for (i, class) in eightbyte_classes.iter().enumerate() {
+                let dest_offset = (i * 8) as i64;
+                match class {
+                    EightbyteClass::Integer => {
+                        // Read from reg_save_area + gp_offset
+                        self.state.emit("    movl (%rcx), %eax"); // gp_offset
+                        self.state.emit("    movslq %eax, %rdx");
+                        self.state.emit("    movq (%rsi,%rdx), %rax");
+                        self.state.out.emit_instr_reg_mem("    movq", "rax", dest_offset, "rdi");
+                        self.state.emit("    addl $8, (%rcx)"); // gp_offset += 8
+                    }
+                    EightbyteClass::Sse => {
+                        // Read from reg_save_area + fp_offset
+                        self.state.emit("    movl 4(%rcx), %eax"); // fp_offset
+                        self.state.emit("    movslq %eax, %rdx");
+                        self.state.emit("    movsd (%rsi,%rdx), %xmm0");
+                        self.state.emit(&format!("    movsd %xmm0, {}(%rdi)", dest_offset));
+                        self.state.emit("    addl $16, 4(%rcx)"); // fp_offset += 16
+                    }
+                    EightbyteClass::NoClass => {
+                        // Shouldn't happen after classification, but handle gracefully
+                        self.state.emit("    movl (%rcx), %eax");
+                        self.state.emit("    movslq %eax, %rdx");
+                        self.state.emit("    movq (%rsi,%rdx), %rax");
+                        self.state.out.emit_instr_reg_mem("    movq", "rax", dest_offset, "rdi");
+                        self.state.emit("    addl $8, (%rcx)");
+                    }
+                }
+            }
+        }
+        self.state.out.emit_jmp_label(&label_end);
+
+        // ==== Memory (overflow) path ====
+        self.state.out.emit_named_label(&label_mem);
+        {
+            // Reload va_list pointer (may have been clobbered by the check path)
+            self.load_va_list_ptr_to_rcx(va_list_ptr);
+
+            // Reload dest_ptr into %rdi
+            if let Some(&reg) = self.reg_assignments.get(&dest_ptr.0) {
+                let reg_name = phys_reg_name(reg);
+                self.state.out.emit_instr_reg_reg("    movq", reg_name, "rdi");
+            } else if let Some(slot) = self.state.get_slot(dest_ptr.0) {
+                if self.state.is_alloca(dest_ptr.0) {
+                    self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rdi");
+                } else {
+                    self.state.out.emit_instr_rbp_reg("    movq", slot.0, "rdi");
+                }
+            }
+
+            // Read from overflow_arg_area
+            self.state.emit("    movq 8(%rcx), %rsi"); // overflow_arg_area
+
+            // Copy struct data from [rsi] to [rdi]
+            let num_qwords = size.div_ceil(8);
+            for i in 0..num_qwords {
+                let offset = (i * 8) as i64;
+                if offset + 8 <= size as i64 {
+                    self.state.out.emit_instr_mem_reg("    movq", offset, "rsi", "rax");
+                    self.state.out.emit_instr_reg_mem("    movq", "rax", offset, "rdi");
+                } else {
+                    // Partial last qword: copy remaining bytes
+                    let remaining = size - i * 8;
+                    if remaining >= 4 {
+                        self.state.out.emit_instr_mem_reg("    movl", offset, "rsi", "eax");
+                        self.state.out.emit_instr_reg_mem("    movl", "eax", offset, "rdi");
+                        if remaining > 4 {
+                            let off4 = offset + 4;
+                            if remaining >= 6 {
+                                self.state.out.emit_instr_mem_reg("    movzwl", off4, "rsi", "eax");
+                                self.state.out.emit_instr_reg_mem("    movw", "ax", off4, "rdi");
+                                if remaining == 7 {
+                                    let off6 = offset + 6;
+                                    self.state.out.emit_instr_mem_reg("    movzbl", off6, "rsi", "eax");
+                                    self.state.out.emit_instr_reg_mem("    movb", "al", off6, "rdi");
+                                }
+                            } else {
+                                self.state.out.emit_instr_mem_reg("    movzbl", off4, "rsi", "eax");
+                                self.state.out.emit_instr_reg_mem("    movb", "al", off4, "rdi");
+                            }
+                        }
+                    } else if remaining >= 2 {
+                        self.state.out.emit_instr_mem_reg("    movzwl", offset, "rsi", "eax");
+                        self.state.out.emit_instr_reg_mem("    movw", "ax", offset, "rdi");
+                        if remaining == 3 {
+                            let off2 = offset + 2;
+                            self.state.out.emit_instr_mem_reg("    movzbl", off2, "rsi", "eax");
+                            self.state.out.emit_instr_reg_mem("    movb", "al", off2, "rdi");
+                        }
+                    } else {
+                        self.state.out.emit_instr_mem_reg("    movzbl", offset, "rsi", "eax");
+                        self.state.out.emit_instr_reg_mem("    movb", "al", offset, "rdi");
+                    }
+                }
+            }
+
+            // Advance overflow_arg_area past the struct (8-byte aligned)
+            let advance = size.div_ceil(8) * 8;
+            // Reload va_list pointer to update overflow_arg_area
+            self.load_va_list_ptr_to_rcx(va_list_ptr);
+            self.state.out.emit_instr_imm_mem("    addq", advance as i64, 8, "rcx");
+        }
+
+        // ==== End ====
+        self.state.out.emit_named_label(&label_end);
         self.state.reg_cache.invalidate_all();
     }
 
