@@ -591,7 +591,7 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                 ExtKind::MovslqEaxRax => matches!(prev_ext, ExtKind::ProducerMovslqToRax | ExtKind::MovslqEaxRax),
                 ExtKind::Cltq => matches!(prev_ext,
                     ExtKind::ProducerMovslqToRax | ExtKind::ProducerMovqConstRax |
-                    ExtKind::MovslqEaxRax),
+                    ExtKind::MovslqEaxRax | ExtKind::Cltq),
                 ExtKind::MovlEaxEax => matches!(prev_ext,
                     ExtKind::ProducerArith32 | ExtKind::ProducerMovlToEax |
                     ExtKind::ProducerMovzbToEax | ExtKind::ProducerMovzbqToRax |
@@ -606,6 +606,87 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                 changed = true;
                 i += 1;
                 continue;
+            }
+
+            // --- Extended scan: cltq past non-rax-clobbering instructions ---
+            //
+            // When the consumer is cltq but the immediately preceding instruction
+            // is not a recognized sign-extension producer, scan backward past
+            // instructions that don't write to %rax to find the actual producer.
+            //
+            // Common pattern from the accumulator-based codegen:
+            //   cltq / movslq ..., %rax     ; sign-extend %rax (producer)
+            //   movq %rax, %r8              ; save to callee-saved (doesn't modify %rax)
+            //   cltq                        ; REDUNDANT - %rax still sign-extended
+            //
+            // Safety: we only scan past instructions whose dest_reg != 0 (rax family)
+            // and that are not barriers (labels, calls, jumps, etc.). Calls clobber
+            // caller-saved registers including %rax, so they stop the scan. StoreRbp
+            // and NOPs are also safe to skip (they don't modify any register).
+            //
+            // Important: we first check that instruction[i] itself doesn't write to
+            // %rax. If it does (e.g., addl %ecx, %eax), the cltq is NOT redundant
+            // even if a sign-extension producer exists further back.
+            if next_ext == ExtKind::Cltq && !is_redundant_ext {
+                // First check: does instruction[i] itself write to %rax?
+                // If so, any earlier sign-extension is invalidated.
+                let i_writes_rax = match infos[i].kind {
+                    LineKind::Other { dest_reg } => dest_reg == 0,
+                    LineKind::LoadRbp { reg, .. } => reg == 0,
+                    LineKind::StoreRbp { .. } => false,
+                    LineKind::Nop | LineKind::Empty => false,
+                    _ => true, // conservative: barriers, calls, etc. may write rax
+                };
+
+                if !i_writes_rax && i > 0 {
+                    let mut found_producer = false;
+                    let scan_limit = if i >= 6 { i - 6 } else { 0 };
+                    let mut k = i - 1;
+                    while k >= scan_limit {
+                        if infos[k].is_nop() {
+                            if k == 0 { break; }
+                            k -= 1;
+                            continue;
+                        }
+                        if matches!(infos[k].kind, LineKind::StoreRbp { .. }) {
+                            if k == 0 { break; }
+                            k -= 1;
+                            continue;
+                        }
+                        // Stop at barriers (labels, calls, jumps, ret)
+                        if infos[k].is_barrier() {
+                            break;
+                        }
+                        // Check if this instruction is a sign-extension producer for rax
+                        let k_ext = infos[k].ext_kind;
+                        if matches!(k_ext,
+                            ExtKind::ProducerMovslqToRax | ExtKind::ProducerMovqConstRax |
+                            ExtKind::MovslqEaxRax | ExtKind::Cltq)
+                        {
+                            found_producer = true;
+                            break;
+                        }
+                        // Check if this instruction writes to %rax (family 0)
+                        // If it does, %rax may no longer be sign-extended, so stop.
+                        let writes_rax = match infos[k].kind {
+                            LineKind::Other { dest_reg } => dest_reg == 0,
+                            LineKind::LoadRbp { reg, .. } => reg == 0,
+                            _ => true, // conservative: treat unknown as writing rax
+                        };
+                        if writes_rax {
+                            break;
+                        }
+                        // This instruction doesn't write rax - safe to skip past
+                        if k == 0 { break; }
+                        k -= 1;
+                    }
+                    if found_producer {
+                        mark_nop(&mut infos[ext_idx]);
+                        changed = true;
+                        i += 1;
+                        continue;
+                    }
+                }
             }
         }
 
@@ -3390,5 +3471,73 @@ mod tests {
         // happens to be next, but jl .LBB5 should remain)
         assert!(result.contains("jl .LBB5"),
             "should keep jl when not fallthrough: {}", result);
+    }
+
+    #[test]
+    fn test_back_to_back_cltq() {
+        // cltq is idempotent; back-to-back cltq;cltq should eliminate the second
+        let asm = "    cltq\n    cltq\n".to_string();
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("cltq").count(), 1,
+            "should keep only one cltq: {}", result);
+    }
+
+    #[test]
+    fn test_cltq_backward_scan_over_non_rax_write() {
+        // Pattern: movslq ..., %rax; movq %rax, %r8; cltq
+        // The cltq is redundant because movslq already sign-extended %rax,
+        // and movq %rax, %r8 doesn't modify %rax.
+        let asm = [
+            "    movslq -8(%rbp), %rax",
+            "    movq %rax, %r8",
+            "    cltq",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(!result.contains("cltq"),
+            "cltq should be eliminated after movslq past non-rax-write: {}", result);
+    }
+
+    #[test]
+    fn test_cltq_backward_scan_blocked_by_rax_write() {
+        // Pattern: movslq ..., %rax; addl $1, %eax; cltq
+        // The cltq is NOT redundant because addl writes to %eax, invalidating
+        // the sign-extension from movslq.
+        let asm = [
+            "    movslq -8(%rbp), %rax",
+            "    addl $1, %eax",
+            "    cltq",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("cltq"),
+            "cltq should NOT be eliminated when rax is modified: {}", result);
+    }
+
+    #[test]
+    fn test_cltq_backward_scan_blocked_by_call() {
+        // Pattern: cltq; call foo; cltq
+        // The second cltq is NOT redundant because call clobbers %rax.
+        let asm = [
+            "    cltq",
+            "    call foo",
+            "    cltq",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("cltq").count(), 2,
+            "both cltq should survive when call intervenes: {}", result);
+    }
+
+    #[test]
+    fn test_cltq_backward_scan_with_store_rbp() {
+        // Pattern: cltq; movq %rax, -16(%rbp); movq %rax, %r9; cltq
+        // The second cltq is redundant: store-to-rbp and mov-to-r9 don't clobber %rax.
+        let asm = [
+            "    cltq",
+            "    movq %rax, -16(%rbp)",
+            "    movq %rax, %r9",
+            "    cltq",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("cltq").count(), 1,
+            "second cltq should be eliminated past store and mov: {}", result);
     }
 }
