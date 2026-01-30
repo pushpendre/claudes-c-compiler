@@ -1,0 +1,15 @@
+Lock: fix_unary_intrinsic_arg_widening (in_progress)
+
+Bug: __builtin_clzll/__builtin_ctzll/__builtin_popcountll produce wrong results on i686
+when the argument is narrower than 64 bits (e.g. size_t = 32-bit unsigned int).
+
+lower_unary_intrinsic() in expr_builtins_intrin.rs lowers the argument with lower_expr()
+but doesn't cast/zero-extend it to the intrinsic's operand width (I64 for "ll" suffix).
+On i686, the backend's emit_load_acc_pair reads 8 bytes from a 4-byte stack slot,
+picking up garbage in the high 32 bits (edx), causing wrong CLZ/CTZ/popcount results.
+
+Fix: Use lower_expr_with_type() instead of lower_expr() to insert an implicit cast
+from the argument's actual type to the intrinsic's expected operand type.
+
+Affects: sort.h project (FPE in merge sort from wrong rbnd() result), likely others.
+Status: in_progress
