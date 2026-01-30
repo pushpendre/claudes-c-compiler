@@ -154,6 +154,11 @@ pub struct Driver {
     /// When true, the preprocessor defines __GNUC_GNU_INLINE__ instead of __GNUC_STDC_INLINE__.
     /// This affects how projects like mpack select their inline linkage model.
     gnu89_inline: bool,
+    /// Whether to dump preprocessor defines instead of preprocessed output (-dM).
+    /// When true with -E, outputs `#define NAME VALUE` for all predefined and
+    /// user-defined macros instead of the preprocessed source. Used by build
+    /// systems like Meson to detect compiler version via __GNUC__ etc.
+    dump_defines: bool,
 }
 
 impl Driver {
@@ -200,6 +205,7 @@ impl Driver {
             function_sections: false,
             data_sections: false,
             gnu89_inline: false,
+            dump_defines: false,
         }
     }
 
@@ -288,11 +294,21 @@ impl Driver {
                     return Ok(true);
                 }
                 "-dumpversion" => {
-                    println!("6");
+                    println!("14");
                     return Ok(true);
                 }
-                "--version" | "-v" if args.len() == 2 => {
-                    println!("ccc 0.1.0 (GCC-compatible C compiler)");
+                "--version" => {
+                    // Meson detects GCC by checking for "Free Software Foundation"
+                    // in the --version output. We claim GCC 14.2.0 compatibility
+                    // (matching our __GNUC__/__GNUC_MINOR__/__GNUC_PATCHLEVEL__).
+                    println!("ccc (GCC-compatible) 14.2.0");
+                    println!("GCC is maintained by the Free Software Foundation, Inc.");
+                    println!("This program was written by Claude Opus 4.6;");
+                    println!("It is not intended for production use.");
+                    return Ok(true);
+                }
+                "-v" if args.len() == 2 => {
+                    println!("ccc (GCC-compatible) 14.2.0");
                     println!("Target: {}", self.target.triple());
                     return Ok(true);
                 }
@@ -329,6 +345,7 @@ impl Driver {
                 "-c" => self.mode = CompileMode::ObjectOnly,
                 "-E" => self.mode = CompileMode::PreprocessOnly,
                 "-P" => self.suppress_line_markers = true,
+                "-dM" => self.dump_defines = true,
 
                 // Optimization levels
                 "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" => {
@@ -588,6 +605,24 @@ impl Driver {
             i += 1;
         }
 
+        // Special case: no input files but -Wl,--version is present.
+        // Build systems like Meson run `compiler -Wl,--version` without source files
+        // to detect the linker type. Invoke our linker driver (GCC) directly.
+        if self.input_files.is_empty()
+            && self.linker_ordered_items.iter().any(|a| a.contains("--version"))
+        {
+            let config = self.target.linker_config();
+            let mut cmd = std::process::Command::new(config.command);
+            cmd.args(config.extra_args);
+            for item in &self.linker_ordered_items {
+                cmd.arg(item);
+            }
+            cmd.stdout(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
+            let _ = cmd.status();
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
@@ -768,23 +803,37 @@ impl Driver {
             let filename = if input_file == "-" { "<stdin>" } else { input_file };
             preprocessor.set_filename(filename);
             self.process_force_includes(&mut preprocessor)?;
-            let preprocessed = preprocessor.preprocess(&source);
 
-            let output = if self.suppress_line_markers {
-                Self::strip_line_markers(&preprocessed)
+            if self.dump_defines {
+                // -dM mode: preprocess the source (to process #define/#undef
+                // directives) then dump all resulting macro definitions.
+                let _ = preprocessor.preprocess(&source);
+                let output = preprocessor.dump_defines();
+                if self.output_path_set {
+                    std::fs::write(&self.output_path, format!("{}\n", output))
+                        .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
+                } else {
+                    println!("{}", output);
+                }
             } else {
-                preprocessed
-            };
+                let preprocessed = preprocessor.preprocess(&source);
 
-            if self.output_path_set {
-                std::fs::write(&self.output_path, &output)
-                    .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
-                // Write dependency file if requested (e.g., -Wp,-MMD,<depfile>).
-                // The kernel build uses this when preprocessing linker scripts
-                // (.lds.S -> .lds) and fixdep expects the .d file to exist.
-                self.write_dep_file(input_file, &self.output_path);
-            } else {
-                print!("{}", output);
+                let output = if self.suppress_line_markers {
+                    Self::strip_line_markers(&preprocessed)
+                } else {
+                    preprocessed
+                };
+
+                if self.output_path_set {
+                    std::fs::write(&self.output_path, &output)
+                        .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
+                    // Write dependency file if requested (e.g., -Wp,-MMD,<depfile>).
+                    // The kernel build uses this when preprocessing linker scripts
+                    // (.lds.S -> .lds) and fixdep expects the .d file to exist.
+                    self.write_dep_file(input_file, &self.output_path);
+                } else {
+                    print!("{}", output);
+                }
             }
         }
         Ok(())
@@ -1175,7 +1224,7 @@ impl Driver {
 
     /// Filter command-line arguments to remove flags the system GCC doesn't support.
     ///
-    /// ccc pretends to be GCC 6.5 (__GNUC__=6, __GNUC_MINOR__=5), but the system
+    /// ccc pretends to be GCC 14.2 (__GNUC__=14, __GNUC_MINOR__=2), but the system
     /// GCC is typically a different version. The kernel adds version-specific flags
     /// based on cc-option tests (which always pass with ccc since it silently accepts
     /// unknown flags). We test each potentially problematic flag against the real

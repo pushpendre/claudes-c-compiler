@@ -30,12 +30,14 @@ impl Preprocessor {
             // Default arch: x86_64 (overridden by set_target)
             ("__x86_64__", "1"), ("__x86_64", "1"),
             ("__amd64__", "1"), ("__amd64", "1"),
-            // GCC compat: claim GCC 6.5.0. This is:
+            // GCC compat: claim GCC 14.2.0. This is:
             //  - >= 5.1 (Linux kernel minimum requirement)
-            //  - < 7.0 (avoids glibc expecting native _Float32/_Float64/_Float128
-            //    types which we don't support; glibc typedefs them for GCC < 7)
-            ("__GNUC__", "6"), ("__GNUC_MINOR__", "5"), ("__GNUC_PATCHLEVEL__", "0"),
-            ("__VERSION__", "\"6.5.0\""),
+            //  - >= 7.4 (QEMU minimum requirement)
+            //  - A modern version that satisfies most project requirements.
+            // For glibc's _Float* types (expected native for GCC >= 7), we define
+            // them as macros mapping to standard C types below.
+            ("__GNUC__", "14"), ("__GNUC_MINOR__", "2"), ("__GNUC_PATCHLEVEL__", "0"),
+            ("__VERSION__", "\"14.2.0\""),
             // C99 inline semantics: tells gnulib and other libraries that
             // plain `inline` provides an inline definition only (no external symbol).
             ("__GNUC_STDC_INLINE__", "1"),
@@ -130,6 +132,17 @@ impl Preprocessor {
             // as keyword tokens in the lexer (token.rs), not as macros.
             // __float128 -> long double (glibc compat)
             ("__float128", "long double"), ("__SIZEOF_FLOAT128__", "16"),
+            // _Float* types: For GCC >= 7, glibc expects the compiler to provide these
+            // natively. We define them as macros to the corresponding standard C types.
+            // TODO: Implement _Float* as proper builtin types with correct semantics
+            // (e.g., _Float128 should be true IEEE binary128, not 80-bit long double
+            // on x86-64). The macro approach works for glibc header compatibility but
+            // loses precision for _Float128 operations on x86-64.
+            ("_Float128", "long double"),
+            ("_Float32", "float"),
+            ("_Float64", "double"),
+            ("_Float32x", "double"),
+            ("_Float64x", "long double"),
             // MSVC integer type specifiers
             ("__int8", "char"), ("__int16", "short"),
             ("__int32", "int"), ("__int64", "long long"),

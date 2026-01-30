@@ -138,6 +138,12 @@ impl MacroTable {
         name == "__COUNTER__" || name == "__LINE__" || self.macros.contains_key(name)
     }
 
+    /// Iterate over all macro definitions.
+    /// Used by -dM (dump defines) to enumerate all predefined and user-defined macros.
+    pub fn iter(&self) -> impl Iterator<Item = &MacroDef> {
+        self.macros.values()
+    }
+
     /// Get a macro definition.
     pub fn get(&self, name: &str) -> Option<&MacroDef> {
         self.macros.get(name)

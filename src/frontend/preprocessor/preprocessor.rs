@@ -475,6 +475,31 @@ impl Preprocessor {
         &self.warnings
     }
 
+    /// Dump all macro definitions in GCC `-dM` format.
+    ///
+    /// Returns a string with one `#define` per line for every currently-defined
+    /// macro, sorted alphabetically. Function-like macros include their parameter
+    /// lists. This output is used by build systems like Meson to detect compiler
+    /// features via preprocessor defines (e.g., `__GNUC__`, `__GNUC_MINOR__`).
+    pub fn dump_defines(&self) -> String {
+        let mut defs: Vec<String> = self.macros.iter().map(|def| {
+            if def.is_function_like {
+                let params = def.params.join(",");
+                if def.body.is_empty() {
+                    format!("#define {}({})", def.name, params)
+                } else {
+                    format!("#define {}({}) {}", def.name, params, def.body)
+                }
+            } else if def.body.is_empty() {
+                format!("#define {}", def.name)
+            } else {
+                format!("#define {} {}", def.name, def.body)
+            }
+        }).collect();
+        defs.sort();
+        defs.join("\n")
+    }
+
     /// Define a macro from a command-line -D flag.
     /// Takes a name and value (e.g., name="FOO", value="1").
     pub fn define_macro(&mut self, name: &str, value: &str) {

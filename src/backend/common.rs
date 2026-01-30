@@ -131,6 +131,14 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     let result = cmd.output()
         .map_err(|e| format!("Failed to run linker ({}): {}", config.command, e))?;
 
+    // Forward linker stdout to our stdout. Normally empty, but needed for build
+    // systems like Meson that detect the linker by running `-Wl,--version` and
+    // parsing the linker's version output from the compiler process's stdout.
+    if !result.stdout.is_empty() {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&result.stdout);
+    }
+
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(format!("Linking failed ({}): {}", config.command, stderr));
