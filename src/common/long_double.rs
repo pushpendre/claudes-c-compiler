@@ -4,9 +4,20 @@
 //! On AArch64/RISC-V, `long double` is IEEE 754 binary128 (quad precision, 16 bytes).
 //!
 //! This module provides:
-//! - Parsing decimal strings directly to x87 80-bit format with full 64-bit mantissa precision
-//! - Conversion between x87 and f128 formats
-//! - Conversion from raw bytes back to f64 for operations that need it
+//! - Parsing decimal/hex strings to x87 80-bit or f128 128-bit format
+//! - Conversion between x87, f128, and f64 formats
+//! - Full-precision arithmetic on x87 (via inline asm on x86-64) and f128 (software)
+//! - Conversion from floating-point bytes to integer types
+//!
+//! # Architecture
+//!
+//! Both x87 and f128 formats use 16383-biased exponents (15-bit exponent field).
+//! The key structural difference: x87 has an explicit integer bit in the mantissa
+//! (64 bits total), while f128 uses an implicit leading 1 (112-bit stored mantissa).
+//!
+//! Shared decompose helpers (`x87_decompose`, `f64_decompose`, `f128_decompose`)
+//! extract (sign, exponent, mantissa) tuples, eliminating boilerplate repetition
+//! across the many conversion and arithmetic functions.
 
 /// Result of preprocessing a long double string literal.
 enum PreparsedFloat<'a> {
@@ -475,21 +486,87 @@ fn make_x87_nan(negative: bool) -> [u8; 16] {
     bytes
 }
 
+// =============================================================================
+// Decompose helpers: extract (sign, exponent, mantissa) from raw bytes
+// =============================================================================
+
+/// Decomposed x87 80-bit extended precision value.
+/// For normal numbers: `mantissa` has bit 63 set (the explicit integer bit).
+/// Biased exponent uses the standard 16383 bias.
+struct X87Decomposed {
+    sign: bool,
+    /// Biased exponent (0 = zero/subnormal, 0x7FFF = inf/NaN).
+    biased_exp: u16,
+    /// Full 64-bit mantissa including explicit integer bit.
+    mantissa: u64,
+}
+
+impl X87Decomposed {
+    fn is_zero(&self) -> bool { self.biased_exp == 0 && self.mantissa == 0 }
+    fn is_special(&self) -> bool { self.biased_exp == 0x7FFF }
+    fn is_inf(&self) -> bool { self.is_special() && (self.mantissa & 0x3FFF_FFFF_FFFF_FFFF) == 0 }
+    fn unbiased_exp(&self) -> i32 { self.biased_exp as i32 - 16383 }
+}
+
+/// Decompose x87 80-bit extended precision bytes into sign, exponent, and mantissa.
+/// This is the single extraction point used by all x87 conversion functions.
+fn x87_decompose(bytes: &[u8; 16]) -> X87Decomposed {
+    let mantissa = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
+    X87Decomposed {
+        sign: (exp_sign >> 15) & 1 == 1,
+        biased_exp: exp_sign & 0x7FFF,
+        mantissa,
+    }
+}
+
+/// Decomposed f64 value.
+struct F64Decomposed {
+    sign: bool,
+    /// Biased exponent (0 = zero/subnormal, 0x7FF = inf/NaN).
+    biased_exp: u16,
+    /// 52-bit stored mantissa (no implicit leading 1).
+    mantissa: u64,
+}
+
+impl F64Decomposed {
+    fn is_zero(&self) -> bool { self.biased_exp == 0 && self.mantissa == 0 }
+    fn is_special(&self) -> bool { self.biased_exp == 0x7FF }
+    fn is_inf(&self) -> bool { self.is_special() && self.mantissa == 0 }
+}
+
+/// Decompose an f64 into sign, exponent, and mantissa.
+fn f64_decompose(val: f64) -> F64Decomposed {
+    let bits = val.to_bits();
+    F64Decomposed {
+        sign: (bits >> 63) & 1 == 1,
+        biased_exp: ((bits >> 52) & 0x7FF) as u16,
+        mantissa: bits & 0x000F_FFFF_FFFF_FFFF,
+    }
+}
+
+/// Encode x87 80-bit extended precision bytes from sign, biased exponent, and mantissa.
+fn x87_encode(sign: bool, biased_exp: u16, mantissa64: u64) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&mantissa64.to_le_bytes());
+    let exp_sign = biased_exp | (if sign { 0x8000 } else { 0 });
+    bytes[8] = (exp_sign & 0xFF) as u8;
+    bytes[9] = (exp_sign >> 8) as u8;
+    bytes
+}
+
 /// Convert x87 80-bit bytes back to f64 (lossy - for computations that need f64).
 /// `bytes[0..10]` contain the x87 extended value in little-endian.
 pub fn x87_bytes_to_f64(bytes: &[u8; 16]) -> f64 {
-    let mantissa64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
-    let sign = (exp_sign >> 15) & 1;
-    let exp15 = exp_sign & 0x7FFF;
+    let d = x87_decompose(bytes);
+    let sign_u64 = if d.sign { 1u64 } else { 0u64 };
 
-    if exp15 == 0 && mantissa64 == 0 {
-        return if sign == 1 { -0.0 } else { 0.0 };
+    if d.is_zero() {
+        return if d.sign { -0.0 } else { 0.0 };
     }
-
-    if exp15 == 0x7FFF {
-        if mantissa64 & 0x3FFF_FFFF_FFFF_FFFF == 0 {
-            return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
+    if d.is_special() {
+        if d.is_inf() {
+            return if d.sign { f64::NEG_INFINITY } else { f64::INFINITY };
         }
         return f64::NAN;
     }
@@ -497,26 +574,25 @@ pub fn x87_bytes_to_f64(bytes: &[u8; 16]) -> f64 {
     // Normal number
     // x87: value = mantissa64 * 2^(exp15 - 16383 - 63)
     // f64: value = (1 + mantissa52/2^52) * 2^(exp11 - 1023)
-    let unbiased = exp15 as i32 - 16383;
+    let unbiased = d.unbiased_exp();
 
     // f64 exponent range: -1022 to 1023
     if unbiased > 1023 {
-        return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
+        return if d.sign { f64::NEG_INFINITY } else { f64::INFINITY };
     }
     if unbiased < -1074 {
-        return if sign == 1 { -0.0 } else { 0.0 };
+        return if d.sign { -0.0 } else { 0.0 };
     }
 
     // Extract top 52 mantissa bits (below the integer bit)
     // mantissa64 bit 63 = integer bit (=1 for normals)
     // We want bits 62..11 (52 bits) for the f64 mantissa
-    let mantissa52 = (mantissa64 >> 11) & 0x000F_FFFF_FFFF_FFFF;
+    let mantissa52 = (d.mantissa >> 11) & 0x000F_FFFF_FFFF_FFFF;
 
     // Round to nearest: check bit 10 (the first dropped bit)
-    let round_bit = (mantissa64 >> 10) & 1;
-    let sticky = mantissa64 & 0x3FF; // bits 9..0
+    let round_bit = (d.mantissa >> 10) & 1;
+    let sticky = d.mantissa & 0x3FF; // bits 9..0
     let mantissa52 = if round_bit == 1 && (sticky != 0 || mantissa52 & 1 != 0) {
-        // Round up
         mantissa52 + 1
     } else {
         mantissa52
@@ -524,49 +600,35 @@ pub fn x87_bytes_to_f64(bytes: &[u8; 16]) -> f64 {
 
     // Handle mantissa overflow from rounding
     if mantissa52 > 0x000F_FFFF_FFFF_FFFF {
-        // Mantissa overflowed - this means rounding bumped us to next exponent
-        let f64_biased_exp = (unbiased + 1024) as u64; // +1 to exponent
+        let f64_biased_exp = (unbiased + 1024) as u64;
         if f64_biased_exp >= 0x7FF {
-            return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
+            return if d.sign { f64::NEG_INFINITY } else { f64::INFINITY };
         }
-        let f64_bits = ((sign as u64) << 63) | (f64_biased_exp << 52); // mantissa = 0 (implicit 1.0)
+        let f64_bits = (sign_u64 << 63) | (f64_biased_exp << 52);
         return f64::from_bits(f64_bits);
     }
 
     if unbiased >= -1022 {
         let f64_biased_exp = (unbiased + 1023) as u64;
-        let f64_bits = ((sign as u64) << 63) | (f64_biased_exp << 52) | mantissa52;
+        let f64_bits = (sign_u64 << 63) | (f64_biased_exp << 52) | mantissa52;
         f64::from_bits(f64_bits)
     } else {
         // Subnormal in f64 - not common for constants, just convert approximately
-        let val = mantissa64 as f64 * 2.0_f64.powi(unbiased - 63);
-        if sign == 1 { -val } else { val }
+        let val = d.mantissa as f64 * 2.0_f64.powi(unbiased - 63);
+        if d.sign { -val } else { val }
     }
 }
 
 /// Convert x87 80-bit bytes `[u8; 16]` to IEEE 754 binary128 bytes (16 bytes, little-endian).
 /// Used for ARM64/RISC-V long double emission.
 pub fn x87_bytes_to_f128_bytes(x87: &[u8; 16]) -> [u8; 16] {
-    let mantissa64 = u64::from_le_bytes(x87[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([x87[8], x87[9]]);
-    let sign = ((exp_sign >> 15) & 1) as u128;
-    let exp15 = exp_sign & 0x7FFF;
+    let d = x87_decompose(x87);
 
-    if exp15 == 0 && mantissa64 == 0 {
-        // Zero
-        let val: u128 = sign << 127;
-        return val.to_le_bytes();
+    if d.is_zero() {
+        return make_f128_zero(d.sign);
     }
-
-    if exp15 == 0x7FFF {
-        if mantissa64 & 0x7FFF_FFFF_FFFF_FFFF == 0 {
-            // Infinity
-            let val: u128 = (sign << 127) | (0x7FFF_u128 << 112);
-            return val.to_le_bytes();
-        }
-        // NaN
-        let val: u128 = (sign << 127) | (0x7FFF_u128 << 112) | (1u128 << 111);
-        return val.to_le_bytes();
+    if d.is_special() {
+        return if d.is_inf() { make_f128_infinity(d.sign) } else { make_f128_nan(d.sign) };
     }
 
     // Normal number
@@ -574,11 +636,10 @@ pub fn x87_bytes_to_f128_bytes(x87: &[u8; 16]) -> [u8; 16] {
     // x87 mantissa: 64 bits with explicit integer bit at position 63
     // f128 mantissa: 112 bits, implicit leading 1 (no integer bit stored)
     // Take lower 63 bits of x87 mantissa and shift left by (112-63) = 49
-
-    let mantissa_no_int = mantissa64 & 0x7FFF_FFFF_FFFF_FFFF;
+    let mantissa_no_int = d.mantissa & 0x7FFF_FFFF_FFFF_FFFF;
     let mantissa112: u128 = (mantissa_no_int as u128) << 49;
-    let exp_sign_bits: u128 = ((exp15 as u128) << 112) | (sign << 127);
-    let val: u128 = mantissa112 | exp_sign_bits;
+    let sign_bit: u128 = if d.sign { 1u128 << 127 } else { 0 };
+    let val: u128 = mantissa112 | ((d.biased_exp as u128) << 112) | sign_bit;
     val.to_le_bytes()
 }
 
@@ -742,92 +803,80 @@ fn parse_hex_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
     }
 }
 
-fn make_f128_zero(negative: bool) -> [u8; 16] {
-    let val: u128 = if negative { 1u128 << 127 } else { 0 };
+/// Construct raw f128 bytes from sign, biased exponent, and stored mantissa (no implicit bit).
+fn make_f128_raw(negative: bool, biased_exp: u16, stored_mantissa: u128) -> [u8; 16] {
+    let sign_bit: u128 = if negative { 1u128 << 127 } else { 0 };
+    let val: u128 = sign_bit | ((biased_exp as u128) << 112) | stored_mantissa;
     val.to_le_bytes()
+}
+
+fn make_f128_zero(negative: bool) -> [u8; 16] {
+    make_f128_raw(negative, 0, 0)
 }
 
 fn make_f128_infinity(negative: bool) -> [u8; 16] {
-    let val: u128 = (if negative { 1u128 } else { 0 } << 127) | (0x7FFF_u128 << 112);
-    val.to_le_bytes()
+    make_f128_raw(negative, 0x7FFF, 0)
 }
 
 fn make_f128_nan(negative: bool) -> [u8; 16] {
-    let val: u128 = (if negative { 1u128 } else { 0 } << 127) | (0x7FFF_u128 << 112) | (1u128 << 111);
-    val.to_le_bytes()
+    make_f128_raw(negative, 0x7FFF, 1u128 << 111)
 }
 
 /// Convert f128 bytes to x87 80-bit bytes. This is a lossy narrowing conversion
 /// (112-bit mantissa → 64-bit mantissa) used when x87 format is needed (x86 backend,
 /// x87 FPU constant folding).
-pub fn f128_bytes_to_x87_bytes(f128: &[u8; 16]) -> [u8; 16] {
-    let val = u128::from_le_bytes(*f128);
-    let sign = ((val >> 127) & 1) as u16;
-    let exp15 = ((val >> 112) & 0x7FFF) as u16;
-    let mantissa112 = val & ((1u128 << 112) - 1);
+pub fn f128_bytes_to_x87_bytes(f128_bytes: &[u8; 16]) -> [u8; 16] {
+    let (sign, biased_exp, mantissa) = f128_decompose(f128_bytes);
 
-    if exp15 == 0 && mantissa112 == 0 {
-        // Zero
-        return make_x87_zero(sign == 1);
+    if biased_exp == 0 && mantissa == 0 {
+        return make_x87_zero(sign);
     }
-
-    if exp15 == 0x7FFF {
-        if mantissa112 == 0 {
-            return make_x87_infinity(sign == 1);
-        }
-        return make_x87_nan(sign == 1);
+    if biased_exp == 0x7FFF {
+        return if mantissa == 0 { make_x87_infinity(sign) } else { make_x87_nan(sign) };
     }
 
     // Normal number
-    // f128 mantissa: 112 bits, implicit leading 1
+    // f128 mantissa: 112 bits, implicit leading 1 (bit 112 set by f128_decompose)
     // x87 mantissa: 64 bits, explicit leading 1
-    // Take top 63 bits of f128 mantissa and prepend the explicit 1
-    // mantissa112 >> (112 - 63) = mantissa112 >> 49
-    let mantissa64 = (1u64 << 63) | ((mantissa112 >> 49) as u64);
-
+    // Take top 64 bits of the 113-bit mantissa (mantissa >> 49)
     // Exponent bias is the same for both formats (16383)
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&mantissa64.to_le_bytes());
-    let exp_sign = exp15 | (sign << 15);
-    bytes[8] = (exp_sign & 0xFF) as u8;
-    bytes[9] = (exp_sign >> 8) as u8;
-    bytes
+    let mantissa64 = (mantissa >> 49) as u64;
+    x87_encode(sign, biased_exp as u16, mantissa64)
 }
 
 /// Convert f128 bytes to f64 (lossy narrowing).
-pub fn f128_bytes_to_f64(f128: &[u8; 16]) -> f64 {
-    let val = u128::from_le_bytes(*f128);
-    let sign = ((val >> 127) & 1) as u64;
-    let exp15 = ((val >> 112) & 0x7FFF) as i64;
-    let mantissa112 = val & ((1u128 << 112) - 1);
+pub fn f128_bytes_to_f64(f128_bytes: &[u8; 16]) -> f64 {
+    let (sign, biased_exp, mantissa) = f128_decompose(f128_bytes);
+    let sign_u64 = if sign { 1u64 } else { 0u64 };
 
-    if exp15 == 0 && mantissa112 == 0 {
-        return if sign == 1 { -0.0 } else { 0.0 };
+    if biased_exp == 0 && mantissa == 0 {
+        return if sign { -0.0 } else { 0.0 };
+    }
+    if biased_exp == 0x7FFF {
+        return if mantissa == 0 {
+            if sign { f64::NEG_INFINITY } else { f64::INFINITY }
+        } else {
+            f64::NAN
+        };
     }
 
-    if exp15 == 0x7FFF {
-        if mantissa112 == 0 {
-            return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
-        }
-        return f64::NAN;
-    }
-
-    // Normal f128: value = (-1)^sign * 2^(exp15-16383) * (1 + mantissa112/2^112)
-    let unbiased = exp15 - 16383;
+    // Normal f128: value = (-1)^sign * 2^(biased_exp - 16383) * (1 + stored_mantissa/2^112)
+    // Note: f128_decompose already adds the implicit bit, so mantissa has bit 112 set.
+    let unbiased = (biased_exp - 16383) as i64;
 
     if (-1022..=1023).contains(&unbiased) {
         let f64_biased_exp = (unbiased + 1023) as u64;
-        // Take top 52 bits of 112-bit mantissa
-        let mantissa52 = (mantissa112 >> 60) as u64;
-        let f64_bits = (sign << 63) | (f64_biased_exp << 52) | mantissa52;
+        // Take top 52 bits of the 112-bit stored mantissa (strip implicit bit first)
+        let stored = mantissa & ((1u128 << 112) - 1);
+        let mantissa52 = (stored >> 60) as u64;
+        let f64_bits = (sign_u64 << 63) | (f64_biased_exp << 52) | mantissa52;
         f64::from_bits(f64_bits)
     } else if unbiased > 1023 {
-        if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY }
+        if sign { f64::NEG_INFINITY } else { f64::INFINITY }
     } else {
         // Subnormal in f64
-        let mantissa_with_implicit = mantissa112 | (1u128 << 112);
-        let val = mantissa_with_implicit as f64 * 2.0_f64.powi(unbiased as i32 - 112);
-        if sign == 1 { -val } else { val }
+        let val = mantissa as f64 * 2.0_f64.powi(unbiased as i32 - 112);
+        if sign { -val } else { val }
     }
 }
 
@@ -919,279 +968,232 @@ pub fn i128_to_f128_bytes(val: i128) -> [u8; 16] {
 
 /// Convert f64 to f128 bytes (widening, zero-fills extra mantissa bits).
 pub fn f64_to_f128_bytes_lossless(val: f64) -> [u8; 16] {
-    let bits = val.to_bits();
-    let sign = ((bits >> 63) & 1) as u128;
-    let exp11 = ((bits >> 52) & 0x7FF) as i64;
-    let mantissa52 = bits & 0x000F_FFFF_FFFF_FFFF;
+    let d = f64_decompose(val);
 
-    if exp11 == 0 && mantissa52 == 0 {
-        return make_f128_zero(sign == 1);
+    if d.is_zero() {
+        return make_f128_zero(d.sign);
+    }
+    if d.is_special() {
+        return if d.is_inf() { make_f128_infinity(d.sign) } else { make_f128_nan(d.sign) };
     }
 
-    if exp11 == 0x7FF {
-        if mantissa52 == 0 {
-            return make_f128_infinity(sign == 1);
-        }
-        return make_f128_nan(sign == 1);
-    }
-
-    // Normal f64: exp = exp11 - 1023, mantissa = 1.mantissa52
-    // f128: exp = exp11 - 1023 + 16383, mantissa112 = mantissa52 << (112 - 52)
-    let exp15 = (exp11 - 1023 + 16383) as u128;
-    let mantissa112: u128 = (mantissa52 as u128) << 60; // 112 - 52 = 60
-
-    let val128: u128 = (sign << 127) | (exp15 << 112) | mantissa112;
+    // Normal f64: exp = biased_exp - 1023, mantissa = 1.mantissa52
+    // f128: exp = biased_exp - 1023 + 16383, mantissa112 = mantissa52 << (112 - 52)
+    let exp15 = (d.biased_exp as u128 - 1023 + 16383) as u128;
+    let mantissa112: u128 = (d.mantissa as u128) << 60; // 112 - 52 = 60
+    let sign_bit: u128 = if d.sign { 1u128 << 127 } else { 0 };
+    let val128: u128 = sign_bit | (exp15 << 112) | mantissa112;
     val128.to_le_bytes()
 }
 
-/// Convert f128 bytes to i64 (for constant folding).
+// =============================================================================
+// f128 to integer conversion: direct extraction without lossy x87 intermediate
+// =============================================================================
+
+/// Core f128-to-unsigned-integer conversion. Extracts the absolute value of an f128
+/// float as u128, with truncation toward zero. `max_bits` limits the output width.
+/// Returns None for inf/NaN/overflow.
+fn f128_to_abs_uint(bytes: &[u8; 16], max_bits: u32) -> Option<(bool, u128)> {
+    let (sign, biased_exp, mantissa) = f128_decompose(bytes);
+
+    if biased_exp == 0 && mantissa == 0 {
+        return Some((sign, 0));
+    }
+    if biased_exp == 0x7FFF {
+        return None; // inf or NaN
+    }
+
+    // For normals, f128_decompose returns mantissa with bit 112 set (the implicit bit).
+    // value = mantissa * 2^(biased_exp - 16383 - 112)
+    let unbiased = biased_exp - 16383;
+    let shift = unbiased - 112;
+
+    if shift >= 0 {
+        let shift = shift as u32;
+        if shift >= max_bits {
+            return None; // overflow
+        }
+        let abs_val = mantissa << shift;
+        if max_bits < 128 && abs_val >> max_bits != 0 {
+            return None;
+        }
+        Some((sign, abs_val))
+    } else {
+        let rshift = (-shift) as u32;
+        if rshift >= 128 {
+            return Some((sign, 0));
+        }
+        Some((sign, mantissa >> rshift))
+    }
+}
+
+/// Convert f128 bytes to i64 (for constant folding). Direct extraction with full
+/// 112-bit mantissa precision (no lossy x87 intermediate).
 pub fn f128_bytes_to_i64(bytes: &[u8; 16]) -> Option<i64> {
-    // Convert through x87 for now since the existing code handles edge cases
-    let x87 = f128_bytes_to_x87_bytes(bytes);
-    x87_bytes_to_i64(&x87)
+    let (sign, abs_val) = f128_to_abs_uint(bytes, 64)?;
+    if sign {
+        if abs_val > i64::MAX as u128 + 1 {
+            return None;
+        }
+        Some(-(abs_val as i64))
+    } else {
+        if abs_val > i64::MAX as u128 {
+            return None;
+        }
+        Some(abs_val as i64)
+    }
 }
 
 /// Convert f128 bytes to u64 (for constant folding).
 pub fn f128_bytes_to_u64(bytes: &[u8; 16]) -> Option<u64> {
-    let x87 = f128_bytes_to_x87_bytes(bytes);
-    x87_bytes_to_u64(&x87)
+    let (sign, abs_val) = f128_to_abs_uint(bytes, 64)?;
+    if sign {
+        let signed_val = f128_bytes_to_i64(bytes)?;
+        return Some(signed_val as u64);
+    }
+    Some(abs_val as u64)
 }
 
 /// Convert f128 bytes to i128 (for constant folding).
 pub fn f128_bytes_to_i128(bytes: &[u8; 16]) -> Option<i128> {
-    let x87 = f128_bytes_to_x87_bytes(bytes);
-    x87_bytes_to_i128(&x87)
+    let (sign, abs_val) = f128_to_abs_uint(bytes, 128)?;
+    if sign {
+        if abs_val > i128::MAX as u128 + 1 {
+            return None;
+        }
+        Some(-(abs_val as i128))
+    } else {
+        if abs_val > i128::MAX as u128 {
+            return None;
+        }
+        Some(abs_val as i128)
+    }
 }
 
 /// Convert f128 bytes to u128 (for constant folding).
 pub fn f128_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
-    let x87 = f128_bytes_to_x87_bytes(bytes);
-    x87_bytes_to_u128(&x87)
+    let (sign, abs_val) = f128_to_abs_uint(bytes, 128)?;
+    if sign {
+        let signed_val = f128_bytes_to_i128(bytes)?;
+        return Some(signed_val as u128);
+    }
+    Some(abs_val)
 }
 
 /// Create x87 bytes from an f64 value (for when we don't have the original text).
 /// This is a widening conversion that zero-fills the extra mantissa bits.
 pub fn f64_to_x87_bytes_simple(val: f64) -> [u8; 16] {
-    let bits = val.to_bits();
-    let sign = (bits >> 63) & 1;
-    let exp11 = ((bits >> 52) & 0x7FF) as i64;
-    let mantissa52 = bits & 0x000F_FFFF_FFFF_FFFF;
+    let d = f64_decompose(val);
 
-    if exp11 == 0 && mantissa52 == 0 {
-        return make_x87_zero(sign == 1);
+    if d.is_zero() {
+        return make_x87_zero(d.sign);
+    }
+    if d.is_special() {
+        return if d.is_inf() { make_x87_infinity(d.sign) } else { make_x87_nan(d.sign) };
     }
 
-    if exp11 == 0x7FF {
-        if mantissa52 == 0 {
-            return make_x87_infinity(sign == 1);
-        } else {
-            return make_x87_nan(sign == 1);
+    // Normal f64: x87 mantissa has explicit integer bit at 63, then 52 bits at 62..11
+    let exp15 = (d.biased_exp as i32 - 1023 + 16383) as u16;
+    let mantissa64 = (1u64 << 63) | (d.mantissa << 11);
+    x87_encode(d.sign, exp15, mantissa64)
+}
+
+// =============================================================================
+// x87 to integer conversion: shared core with type-specific wrappers
+// =============================================================================
+
+/// Core x87-to-unsigned-integer conversion. Extracts the absolute value of an x87
+/// float as a u128, with truncation toward zero. `max_bits` limits the output width
+/// (64 for u64, 128 for u128). Returns None for inf/NaN/overflow.
+fn x87_to_abs_uint(d: &X87Decomposed, max_bits: u32) -> Option<u128> {
+    if d.is_zero() {
+        return Some(0);
+    }
+    if d.is_special() {
+        return None;
+    }
+
+    let shift = d.unbiased_exp() - 63;
+
+    if shift >= 0 {
+        let shift = shift as u32;
+        if shift >= max_bits {
+            return None; // overflow
         }
+        let abs_val = (d.mantissa as u128) << shift;
+        // Check that we didn't overflow: the top bits above max_bits must be zero
+        if max_bits < 128 && abs_val >> max_bits != 0 {
+            return None;
+        }
+        Some(abs_val)
+    } else {
+        let rshift = (-shift) as u32;
+        if rshift >= 64 {
+            return Some(0); // too small, truncates to 0
+        }
+        Some((d.mantissa >> rshift) as u128)
     }
-
-    // Normal f64 number
-    let exp15 = (exp11 - 1023 + 16383) as u16;
-    // x87 mantissa: explicit integer bit at 63, then 52 bits of fraction at bits 62..11
-    let mantissa64 = (1u64 << 63) | (mantissa52 << 11);
-
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&mantissa64.to_le_bytes());
-    bytes[8] = (exp15 & 0xFF) as u8;
-    bytes[9] = ((exp15 >> 8) as u8) | (if sign == 1 { 0x80 } else { 0 });
-    bytes
 }
 
 /// Convert x87 80-bit bytes to i64 with truncation toward zero.
 /// This preserves the full 64-bit mantissa precision, unlike going through f64 first.
 /// Returns None for infinity, NaN, or values out of i64 range.
 pub fn x87_bytes_to_i64(bytes: &[u8; 16]) -> Option<i64> {
-    let mantissa64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
-    let sign = (exp_sign >> 15) & 1;
-    let exp15 = exp_sign & 0x7FFF;
-
-    // Zero
-    if exp15 == 0 && mantissa64 == 0 {
-        return Some(0);
-    }
-    // Infinity/NaN
-    if exp15 == 0x7FFF {
-        return None;
-    }
-
-    // Normal number: value = (-1)^sign * mantissa64 * 2^(exp15 - 16383 - 63)
-    let unbiased = exp15 as i32 - 16383;
-
-    // The mantissa has bit 63 as the integer bit.
-    // So the effective integer value is mantissa64 * 2^(unbiased - 63)
-    let shift = unbiased - 63;
-
-    if shift >= 0 {
-        // Value is mantissa64 << shift
-        if shift >= 64 {
-            return None; // overflow
+    let d = x87_decompose(bytes);
+    let abs_val = x87_to_abs_uint(&d, 64)?;
+    if d.sign {
+        // Special case: abs_val == 2^63 is valid as i64::MIN
+        if abs_val > i64::MAX as u128 + 1 {
+            return None;
         }
-        // Check for overflow: mantissa64 << shift must fit in i64
-        let shift = shift as u32;
-        if shift > 0 && mantissa64 >> (64 - shift) != 0 {
-            return None; // overflow
-        }
-        let abs_val = mantissa64 << shift;
-        if sign == 1 {
-            // For negative: -(abs_val) as i64
-            // Special case: abs_val == 2^63 is valid as i64::MIN
-            if abs_val > i64::MAX as u64 + 1 {
-                return None;
-            }
-            Some(-(abs_val as i64))
-        } else {
-            if abs_val > i64::MAX as u64 {
-                return None;
-            }
-            Some(abs_val as i64)
-        }
+        Some(-(abs_val as i64))
     } else {
-        // Value is mantissa64 >> (-shift) (truncation toward zero)
-        let rshift = (-shift) as u32;
-        if rshift >= 64 {
-            return Some(0); // too small, truncates to 0
+        if abs_val > i64::MAX as u128 {
+            return None;
         }
-        let abs_val = mantissa64 >> rshift;
-        if sign == 1 {
-            Some(-(abs_val as i64))
-        } else {
-            Some(abs_val as i64)
-        }
+        Some(abs_val as i64)
     }
 }
 
 /// Convert x87 80-bit bytes to u64 with truncation toward zero.
-/// This preserves the full 64-bit mantissa precision, unlike going through f64 first.
-/// Returns None for negative values, infinity, NaN, or values out of u64 range.
+/// Returns None for infinity, NaN, or values out of u64 range.
+/// Negative values: truncate to signed then reinterpret as unsigned (GCC behavior).
 pub fn x87_bytes_to_u64(bytes: &[u8; 16]) -> Option<u64> {
-    let mantissa64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
-    let sign = (exp_sign >> 15) & 1;
-    let exp15 = exp_sign & 0x7FFF;
-
-    // Zero
-    if exp15 == 0 && mantissa64 == 0 {
-        return Some(0);
-    }
-    // Infinity/NaN
-    if exp15 == 0x7FFF {
-        return None;
-    }
-    // Negative values: C standard says casting negative float to unsigned is UB,
-    // but GCC/Clang typically truncate the absolute value then negate (wrapping).
-    // For now, match the behavior of `(unsigned long long)(f64_val)`.
-    if sign == 1 {
+    let d = x87_decompose(bytes);
+    if d.sign {
         // GCC truncates to signed then reinterprets as unsigned
         let signed_val = x87_bytes_to_i64(bytes)?;
         return Some(signed_val as u64);
     }
-
-    let unbiased = exp15 as i32 - 16383;
-    let shift = unbiased - 63;
-
-    if shift >= 0 {
-        if shift >= 64 {
-            return None; // overflow
-        }
-        let shift = shift as u32;
-        if shift > 0 && mantissa64 >> (64 - shift) != 0 {
-            return None; // overflow
-        }
-        Some(mantissa64 << shift)
-    } else {
-        let rshift = (-shift) as u32;
-        if rshift >= 64 {
-            return Some(0);
-        }
-        Some(mantissa64 >> rshift)
-    }
+    let abs_val = x87_to_abs_uint(&d, 64)?;
+    Some(abs_val as u64)
 }
 
 /// Convert x87 80-bit bytes to i128 with truncation toward zero.
 pub fn x87_bytes_to_i128(bytes: &[u8; 16]) -> Option<i128> {
-    let mantissa64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
-    let sign = (exp_sign >> 15) & 1;
-    let exp15 = exp_sign & 0x7FFF;
-
-    if exp15 == 0 && mantissa64 == 0 {
-        return Some(0);
-    }
-    if exp15 == 0x7FFF {
-        return None;
-    }
-
-    let unbiased = exp15 as i32 - 16383;
-    let shift = unbiased - 63;
-
-    if shift >= 0 {
-        if shift >= 128 {
+    let d = x87_decompose(bytes);
+    let abs_val = x87_to_abs_uint(&d, 128)?;
+    if d.sign {
+        if abs_val > i128::MAX as u128 + 1 {
             return None;
         }
-        let abs_val = (mantissa64 as u128) << (shift as u32);
-        if sign == 1 {
-            if abs_val > i128::MAX as u128 + 1 {
-                return None;
-            }
-            Some(-(abs_val as i128))
-        } else {
-            if abs_val > i128::MAX as u128 {
-                return None;
-            }
-            Some(abs_val as i128)
-        }
+        Some(-(abs_val as i128))
     } else {
-        let rshift = (-shift) as u32;
-        if rshift >= 64 {
-            return Some(0);
+        if abs_val > i128::MAX as u128 {
+            return None;
         }
-        let abs_val = (mantissa64 >> rshift) as i128;
-        if sign == 1 {
-            Some(-abs_val)
-        } else {
-            Some(abs_val)
-        }
+        Some(abs_val as i128)
     }
 }
 
 /// Convert x87 80-bit bytes to u128 with truncation toward zero.
 pub fn x87_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
-    let mantissa64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let exp_sign = u16::from_le_bytes([bytes[8], bytes[9]]);
-    let sign = (exp_sign >> 15) & 1;
-    let exp15 = exp_sign & 0x7FFF;
-
-    if exp15 == 0 && mantissa64 == 0 {
-        return Some(0);
-    }
-    if exp15 == 0x7FFF {
-        return None;
-    }
-    if sign == 1 {
+    let d = x87_decompose(bytes);
+    if d.sign {
         let signed_val = x87_bytes_to_i128(bytes)?;
         return Some(signed_val as u128);
     }
-
-    let unbiased = exp15 as i32 - 16383;
-    let shift = unbiased - 63;
-
-    if shift >= 0 {
-        if shift >= 128 {
-            return None;
-        }
-        Some((mantissa64 as u128) << (shift as u32))
-    } else {
-        let rshift = (-shift) as u32;
-        if rshift >= 64 {
-            return Some(0);
-        }
-        Some((mantissa64 >> rshift) as u128)
-    }
+    x87_to_abs_uint(&d, 128)
 }
 
 // ============================================================================
@@ -1204,90 +1206,47 @@ pub fn x87_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
 // actual x87 FPU instructions, giving us correct 80-bit precision results
 // that match what the generated code will produce at runtime.
 
+/// Emit an x87 binary operation via inline assembly.
+/// All four ops (faddp/fsubp/fmulp/fdivp) share the same load/store structure,
+/// differing only in the single arithmetic instruction.
+macro_rules! x87_asm_binop {
+    ($a:expr, $b:expr, $result:expr, $insn:literal) => {
+        // SAFETY: Loads two 80-bit x87 values via `fld tbyte ptr`, performs one
+        // arithmetic op, stores result via `fstp tbyte ptr`. Stack is balanced
+        // (2 loads, 1 fXXXp pop, 1 fstp). No memory aliasing. The `nostack` option
+        // is correct since x87 FPU operations don't touch the CPU stack.
+        // For sub/div: load a first → ST(0), then b → ST(0) pushes a to ST(1).
+        // fsubp: ST(1) - ST(0) = a - b. fdivp: ST(1) / ST(0) = a / b.
+        unsafe {
+            std::arch::asm!(
+                "fld tbyte ptr [{a}]",
+                "fld tbyte ptr [{b}]",
+                $insn,
+                "fstp tbyte ptr [{res}]",
+                a = in(reg) $a.as_ptr(),
+                b = in(reg) $b.as_ptr(),
+                res = in(reg) $result.as_mut_ptr(),
+                options(nostack),
+            );
+        }
+    };
+}
+
 /// Perform an x87 binary operation on two 80-bit extended precision values.
 /// `op` selects the operation: 0=add, 1=sub, 2=mul, 3=div.
 #[cfg(target_arch = "x86_64")]
 fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
     debug_assert!(op <= 3, "x87_binop: invalid op code {op}, expected 0..=3");
-    debug_assert!(
-        a[10..16] == [0; 6],
-        "x87_binop: padding bytes of operand `a` are non-zero (possible corruption)"
-    );
-    debug_assert!(
-        b[10..16] == [0; 6],
-        "x87_binop: padding bytes of operand `b` are non-zero (possible corruption)"
-    );
+    debug_assert!(a[10..16] == [0; 6], "x87_binop: padding bytes of `a` non-zero");
+    debug_assert!(b[10..16] == [0; 6], "x87_binop: padding bytes of `b` non-zero");
+
     let mut result = [0u8; 16];
-    // SAFETY: The inline assembly loads two 80-bit x87 values from valid [u8; 16] arrays
-    // via `fld tbyte ptr`, performs a single x87 arithmetic operation, and stores the
-    // result via `fstp tbyte ptr`. The x87 stack is balanced (2 loads, 1 fXXXp pop, 1 fstp).
-    // The input arrays are borrowed immutably and the result array is exclusively owned.
-    // No memory aliasing issues. The `nostack` option is correct since x87 FPU operations
-    // do not touch the CPU stack.
-    unsafe {
-        // x87 stack operations:
-        // faddp/fmulp: ST(1) op ST(0), pop => commutative, order doesn't matter
-        // fsubp: ST(1) - ST(0), pop => need ST(1)=a, ST(0)=b => load a first, then b
-        // fdivp: ST(1) / ST(0), pop => need ST(1)=a, ST(0)=b => load a first, then b
-        match op {
-            0 => {
-                // add: result = a + b (commutative)
-                std::arch::asm!(
-                    "fld tbyte ptr [{a}]",
-                    "fld tbyte ptr [{b}]",
-                    "faddp",
-                    "fstp tbyte ptr [{res}]",
-                    a = in(reg) a.as_ptr(),
-                    b = in(reg) b.as_ptr(),
-                    res = in(reg) result.as_mut_ptr(),
-                    options(nostack),
-                );
-            }
-            1 => {
-                // sub: result = a - b
-                // Load a first (goes to ST(0)), then load b (pushes a to ST(1))
-                // fsubp: ST(1) - ST(0) = a - b
-                std::arch::asm!(
-                    "fld tbyte ptr [{a}]",
-                    "fld tbyte ptr [{b}]",
-                    "fsubp",
-                    "fstp tbyte ptr [{res}]",
-                    a = in(reg) a.as_ptr(),
-                    b = in(reg) b.as_ptr(),
-                    res = in(reg) result.as_mut_ptr(),
-                    options(nostack),
-                );
-            }
-            2 => {
-                // mul: result = a * b (commutative)
-                std::arch::asm!(
-                    "fld tbyte ptr [{a}]",
-                    "fld tbyte ptr [{b}]",
-                    "fmulp",
-                    "fstp tbyte ptr [{res}]",
-                    a = in(reg) a.as_ptr(),
-                    b = in(reg) b.as_ptr(),
-                    res = in(reg) result.as_mut_ptr(),
-                    options(nostack),
-                );
-            }
-            3 => {
-                // div: result = a / b
-                // Load a first (goes to ST(0)), then load b (pushes a to ST(1))
-                // fdivp: ST(1) / ST(0) = a / b
-                std::arch::asm!(
-                    "fld tbyte ptr [{a}]",
-                    "fld tbyte ptr [{b}]",
-                    "fdivp",
-                    "fstp tbyte ptr [{res}]",
-                    a = in(reg) a.as_ptr(),
-                    b = in(reg) b.as_ptr(),
-                    res = in(reg) result.as_mut_ptr(),
-                    options(nostack),
-                );
-            }
-            _ => unreachable!("invalid x87 binop code"),
-        }
+    match op {
+        0 => x87_asm_binop!(a, b, result, "faddp"),
+        1 => x87_asm_binop!(a, b, result, "fsubp"),
+        2 => x87_asm_binop!(a, b, result, "fmulp"),
+        3 => x87_asm_binop!(a, b, result, "fdivp"),
+        _ => unreachable!("invalid x87 binop code"),
     }
     result
 }
@@ -1341,14 +1300,8 @@ pub fn x87_neg(a: &[u8; 16]) -> [u8; 16] {
 /// Compute the remainder of two x87 80-bit extended precision values.
 #[cfg(target_arch = "x86_64")]
 pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    debug_assert!(
-        a[10..16] == [0; 6],
-        "x87_rem: padding bytes of operand `a` are non-zero (possible corruption)"
-    );
-    debug_assert!(
-        b[10..16] == [0; 6],
-        "x87_rem: padding bytes of operand `b` are non-zero (possible corruption)"
-    );
+    debug_assert!(a[10..16] == [0; 6], "x87_rem: padding bytes of `a` non-zero");
+    debug_assert!(b[10..16] == [0; 6], "x87_rem: padding bytes of `b` non-zero");
     let mut result = [0u8; 16];
     // SAFETY: Same safety rationale as x87_binop. Additionally, fprem may require
     // multiple iterations (checked via C2 status bit), but the loop always terminates
@@ -1389,14 +1342,8 @@ pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
 /// Returns: -1 if a < b, 0 if a == b, 1 if a > b, i32::MIN if unordered (NaN).
 #[cfg(target_arch = "x86_64")]
 pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
-    debug_assert!(
-        a[10..16] == [0; 6],
-        "x87_cmp: padding bytes of operand `a` are non-zero (possible corruption)"
-    );
-    debug_assert!(
-        b[10..16] == [0; 6],
-        "x87_cmp: padding bytes of operand `b` are non-zero (possible corruption)"
-    );
+    debug_assert!(a[10..16] == [0; 6], "x87_cmp: padding bytes of `a` non-zero");
+    debug_assert!(b[10..16] == [0; 6], "x87_cmp: padding bytes of `b` non-zero");
     let status: u16;
     // SAFETY: Loads two 80-bit values, fucompp compares and pops both (stack balanced).
     // fnstsw ax stores the FPU status word into the ax register for condition code inspection.
