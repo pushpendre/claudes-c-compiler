@@ -815,6 +815,7 @@ impl Lowerer {
         arg_types: &mut Vec<IrType>,
         struct_arg_sizes: &mut Vec<Option<usize>>,
         struct_arg_aligns: &mut Vec<Option<usize>>,
+        struct_arg_classes: &mut Vec<Vec<crate::common::types::EightbyteClass>>,
         param_ctypes: &Option<Vec<CType>>,
         args: &[Expr],
         is_variadic_call: bool,
@@ -834,6 +835,7 @@ impl Lowerer {
         let mut new_types = Vec::with_capacity(arg_types.len() * 2);
         let mut new_struct_sizes = Vec::with_capacity(struct_arg_sizes.len() * 2);
         let mut new_struct_aligns = Vec::with_capacity(struct_arg_aligns.len() * 2);
+        let mut new_struct_classes: Vec<Vec<crate::common::types::EightbyteClass>> = Vec::with_capacity(struct_arg_classes.len() * 2);
 
         for (i, (val, ty)) in arg_vals.iter().zip(arg_types.iter()).enumerate() {
             let ctype = pctypes.get(i);
@@ -869,62 +871,77 @@ impl Lowerer {
                 }
                 new_struct_sizes.push(None); // packed scalar, not a struct
                 new_struct_aligns.push(None);
+                new_struct_classes.push(Vec::new());
                 continue;
             }
 
             // On 64-bit targets, complex types are decomposed into (real, imag) scalar pairs:
             // - ComplexFloat: decomposed on ARM/RISC-V (not x86-64 where it's packed)
-            // - ComplexDouble: decomposed on all 64-bit targets
+            // - ComplexDouble: decomposed on ARM/RISC-V (not x86-64, see below)
             // - ComplexLongDouble: only decomposed on ARM64 (HFA in Q regs)
             // On i686, no complex types are decomposed (all passed as structs on the stack).
+            //
+            // On x86-64, _Complex double is NOT decomposed into two F64 args because the
+            // SysV ABI treats it as a [Sse, Sse] two-eightbyte argument that must be passed
+            // entirely in registers or entirely on the stack. Decomposing would break the
+            // atomic register allocation check. Instead, it's passed as a 16-byte struct-like
+            // argument, which classify_sysv_struct handles correctly.
             let decomposes_cld = self.decomposes_complex_long_double();
             let decomposes_cd = self.decomposes_complex_double();
             let decomposes_cf = self.decomposes_complex_float();
-            let should_decompose = match ctype {
-                Some(CType::ComplexFloat) => decomposes_cf && !uses_packed_cf,
-                Some(CType::ComplexDouble) => decomposes_cd,
-                Some(CType::ComplexLongDouble) => decomposes_cld,
-                Some(_) => false,
-                None => {
-                    if *ty == IrType::Ptr && i < args.len() {
-                        let arg_ct = self.expr_ctype(&args[i]);
-                        match arg_ct {
-                            CType::ComplexFloat => decomposes_cf && !uses_packed_cf,
-                            CType::ComplexDouble => decomposes_cd,
-                            CType::ComplexLongDouble => decomposes_cld,
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
+            let is_x86_64 = self.target == crate::backend::Target::X86_64;
+
+            let resolved_ctype = ctype.cloned().unwrap_or_else(|| {
+                if *ty == IrType::Ptr && i < args.len() { self.expr_ctype(&args[i]) } else { CType::Int }
+            });
+
+            // On x86-64, don't decompose _Complex double - pass as 16-byte struct [Sse, Sse]
+            let is_complex_double = matches!(resolved_ctype, CType::ComplexDouble);
+            if is_x86_64 && is_complex_double {
+                // Pass as a struct-like 16-byte [Sse, Sse] argument
+                new_vals.push(*val);
+                new_types.push(*ty);
+                new_struct_sizes.push(Some(16));
+                new_struct_aligns.push(Some(8));
+                new_struct_classes.push(vec![
+                    crate::common::types::EightbyteClass::Sse,
+                    crate::common::types::EightbyteClass::Sse,
+                ]);
+                continue;
+            }
+
+            let should_decompose = match &resolved_ctype {
+                CType::ComplexFloat => decomposes_cf && !uses_packed_cf,
+                CType::ComplexDouble => decomposes_cd,
+                CType::ComplexLongDouble => decomposes_cld,
+                _ => false,
             };
 
             if should_decompose {
-                let complex_ct = ctype.cloned().unwrap_or_else(|| {
-                    if i < args.len() { self.expr_ctype(&args[i]) } else { CType::ComplexDouble }
-                });
-                let comp_ty = Self::complex_component_ir_type(&complex_ct);
+                let comp_ty = Self::complex_component_ir_type(&resolved_ctype);
                 let ptr = self.operand_to_value(*val);
 
                 // Load real part
-                let real = self.load_complex_real(ptr, &complex_ct);
+                let real = self.load_complex_real(ptr, &resolved_ctype);
                 // Load imag part
-                let imag = self.load_complex_imag(ptr, &complex_ct);
+                let imag = self.load_complex_imag(ptr, &resolved_ctype);
 
                 new_vals.push(real);
                 new_types.push(comp_ty);
                 new_struct_sizes.push(None); // decomposed scalar
                 new_struct_aligns.push(None);
+                new_struct_classes.push(Vec::new());
                 new_vals.push(imag);
                 new_types.push(comp_ty);
                 new_struct_sizes.push(None); // decomposed scalar
                 new_struct_aligns.push(None);
+                new_struct_classes.push(Vec::new());
             } else {
                 new_vals.push(*val);
                 new_types.push(*ty);
                 new_struct_sizes.push(struct_arg_sizes.get(i).copied().flatten());
                 new_struct_aligns.push(struct_arg_aligns.get(i).copied().flatten());
+                new_struct_classes.push(struct_arg_classes.get(i).cloned().unwrap_or_default());
             }
         }
 
@@ -932,5 +949,6 @@ impl Lowerer {
         *arg_types = new_types;
         *struct_arg_sizes = new_struct_sizes;
         *struct_arg_aligns = new_struct_aligns;
+        *struct_arg_classes = new_struct_classes;
     }
 }

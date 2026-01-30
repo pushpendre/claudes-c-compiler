@@ -1,0 +1,15 @@
+Task: Fix i686 long double constant copy in emit_copy_value
+
+Bug: When a function returning long double (e.g., `long double foo() { return 1.0L; }`)
+is inlined, the return value becomes 0 on i686. This is because emit_copy_value in the
+i686 backend does not handle Operand::Const(IrConst::LongDouble(..)) - the LongDouble
+constant falls through to the default 32-bit accumulator path, which only copies the
+first 4 bytes (all zeros for 1.0L in f128 representation).
+
+Fix:
+1. Add LongDouble constant handling to emit_copy_value: use emit_f128_load_to_x87 + fstpt
+2. Add LongDouble constant detection to stack_layout classify_value: ensure Copy
+   instructions with LongDouble sources get 16-byte slots (not 8-byte)
+
+Status: in_progress
+Started: 2026-01-30

@@ -1346,6 +1346,25 @@ impl Lowerer {
         // read two separate values from the va_list
         let comp_ir_ty = Self::complex_component_ir_type(ctype);
 
+        // On x86-64, _Complex double is classified as [Sse, Sse] - two SSE eightbytes.
+        // Use VaArgStruct to atomically check that both FP slots are available,
+        // preventing the complex value from being split across register and overflow areas.
+        // _Complex long double (F128) is >16 bytes so it's MEMORY class and handled
+        // via the overflow-only path (empty eightbyte_classes).
+        if self.target == Target::X86_64 && comp_ir_ty == IrType::F64 {
+            let alloca = self.alloca_complex(ctype);
+            self.emit(Instruction::VaArgStruct {
+                dest_ptr: alloca,
+                va_list_ptr,
+                size: 16, // 2 x 8 bytes
+                eightbyte_classes: vec![
+                    crate::common::types::EightbyteClass::Sse,
+                    crate::common::types::EightbyteClass::Sse,
+                ],
+            });
+            return Operand::Value(alloca);
+        }
+
         // Retrieve real part via va_arg
         let real_dest = self.fresh_value();
         self.emit(Instruction::VaArg {
