@@ -25,15 +25,19 @@ use super::lowering::Lowerer;
 impl Lowerer {
     /// Returns true if a function definition can be skipped when unreferenced.
     /// This mirrors the skip logic in `lower()` — static, static inline,
-    /// and extern inline with gnu_inline attribute can all be skipped.
-    fn is_skippable_function(func: &FunctionDef) -> bool {
+    /// extern inline with gnu_inline attribute, and C99 inline-only definitions
+    /// can all be skipped.
+    fn is_skippable_function(func: &FunctionDef, has_non_inline_decl: &FxHashSet<String>) -> bool {
         let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
             && func.attrs.is_extern();
-        // C99 plain `inline` (without `extern`) is NOT skippable because
-        // other translation units may reference the symbol and we don't
-        // perform cross-function inlining. Only static and gnu_inline
-        // extern functions are skippable.
-        func.attrs.is_static() || is_gnu_inline_no_extern_def
+        // C99 plain `inline` (without `extern` or `static`) does not provide
+        // an external definition, so it is always skippable (and in fact
+        // always skipped in lower() regardless of references).
+        // Per C99 6.7.4p7: unless there's a non-inline declaration of this function.
+        let is_c99_inline_only = func.attrs.is_inline() && !func.attrs.is_extern()
+            && !func.attrs.is_static() && !func.attrs.is_gnu_inline()
+            && !has_non_inline_decl.contains(&func.name);
+        func.attrs.is_static() || is_gnu_inline_no_extern_def || is_c99_inline_only
     }
 
     /// Collect all function names that are transitively referenced from root
@@ -52,7 +56,7 @@ impl Lowerer {
         for decl in &tu.decls {
             match decl {
                 ExternalDecl::FunctionDef(func) => {
-                    if Self::is_skippable_function(func) {
+                    if Self::is_skippable_function(func, &self.has_non_inline_decl) {
                         // For skippable functions, collect their refs into a separate map
                         // so we can do transitive closure later
                         let mut func_refs = FxHashSet::default();

@@ -24,3 +24,4 @@ exim - ARM: untested, x86: untested, riscv: untested, i686: pass. Notes: require
 MicroPython - ARM: pass, x86: pass, riscv: pass, i686: n/a. Notes: required C99 inline linkage (weak), -ffunction-sections, __attribute__((naked))/optimize("omit-frame-pointer"), volatile pointer qualifier fix, FAM pointer init fix
 lemon - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - func ptr deref with pointer return type was incorrectly classified as pointer-to-function-pointer
 Gravity - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - ternary struct address normalization: `ptr ? *ptr : (struct){...}` both branches produce addresses (not just compound literals), use expr_produces_packed_struct_data() with struct-type guard
+mpack - ARM: untested, x86: fail, riscv: untested, i686: untested. Notes: C99 inline no-emit fix resolved fn_mpack_tag_nil address comparison; remaining failure in test_write_generic_kv (likely separate codegen bug)

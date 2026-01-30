@@ -642,11 +642,15 @@ impl Lowerer {
                     let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
                         && func.attrs.is_extern();
                     // C99 6.7.4p7: A plain `inline` definition (without `extern`)
-                    // does not provide an external definition per the standard.
-                    // However, since we don't perform cross-function inlining,
-                    // we always emit it (with weak linkage, set in func_lowering)
-                    // so other TUs can link against it. Only static and gnu_inline
-                    // extern functions can be safely skipped.
+                    // does not provide an external definition. The TU must not emit
+                    // a standalone function body; call sites reference the external
+                    // symbol provided by the TU that uses `extern inline`.
+                    let is_c99_inline_only = func.attrs.is_inline() && !func.attrs.is_extern()
+                        && !func.attrs.is_static() && !func.attrs.is_gnu_inline()
+                        && !self.has_non_inline_decl.contains(&func.name);
+                    if is_c99_inline_only {
+                        continue;
+                    }
                     let can_skip = if func.attrs.is_static() {
                         // static or static inline: internal linkage, safe to skip if unreferenced
                         true
