@@ -1,20 +1,23 @@
-Split all 4 backend codegen.rs files into logical submodules
+Status: in_progress
+
+Split all 4 backend codegen.rs files into logical submodules.
 
 The 4 codegen files are the largest in the codebase:
-- x86/codegen/codegen.rs: 4047 lines
-- i686/codegen/codegen.rs: 4310 lines
+- x86/codegen/codegen.rs: 4371 lines
+- i686/codegen/codegen.rs: 4488 lines
 - arm/codegen/codegen.rs: 4107 lines
 - riscv/codegen/codegen.rs: 3356 lines
 
-Plan: Split each into ~8-10 focused submodules:
-- core struct + constructor + trait boilerplate
-- prologue/epilogue + stack frame
-- memory operations (load/store/typed/indirect/slot)
-- integer ALU + comparison
-- i128 operations
-- call ABI + function calls
-- cast/conversion
-- variadic (va_arg/va_start/va_copy)
-- float operations
-- atomics
-- control flow + globals
+Plan: Split each into focused submodules (extracting from the monolithic codegen.rs):
+- stack_frame.rs: calculate_stack_space, prologue, epilogue, store_params, param_ref
+- memory.rs: load/store, GEP, memcpy, typed store/load, alloca helpers, copy_value
+- integer.rs: int binop, comparison, unary ops, fused cmp branch, select
+- i128_ops.rs: i128 arithmetic, shifts, comparison, divrem, float conversion
+- calls.rs: call ABI config, stack/reg args, call instruction, cleanup, store result
+- casts.rs: emit_cast, emit_cast_instrs (where not already split)
+- variadic.rs: va_arg, va_start, va_copy, va_arg_struct
+- float.rs: float neg, cmp, binop, second-return-value helpers
+- atomics.rs: atomic RMW, CAS, load, store, fence (where not already split)
+- control_flow.rs: branch, switch, jump table, global addr, label addr, TLS
+
+Core struct, constructor, and register helpers stay in codegen.rs.
