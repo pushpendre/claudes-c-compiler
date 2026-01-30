@@ -1,0 +1,18 @@
+Fix GNU89 extern inline emission semantics
+
+In GNU89 mode (-std=c89, -fgnu89-inline), `extern inline` functions should
+NOT emit a standalone global symbol. This matches GCC behavior and is required
+by glibc headers (e.g., getchar, putchar, atoi from bits/stdio.h) which use
+__extern_inline (= extern __inline without gnu_inline attribute in GNU89 mode).
+
+Bug: The gnu89_inline flag was passed from the driver to the preprocessor to
+define __GNUC_GNU_INLINE__ vs __GNUC_STDC_INLINE__, but was NOT passed to the
+IR lowering stage. As a result, `extern inline` functions in C89 mode were
+emitted as global symbols (C99 semantics) instead of being treated as inline-only.
+
+Fix: Pass gnu89_inline flag through to the Lowerer and use it in three places:
+1. lowering.rs: Main emission loop skip/emit decision
+2. func_lowering.rs: Linkage (static vs global) determination
+3. ref_collection.rs: Dead function elimination skippability check
+
+Status: in_progress
