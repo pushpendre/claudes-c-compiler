@@ -1,0 +1,15 @@
+Task: Fix RISC-V U32 sign-extension and compound literal size for designated initializers
+Status: in_progress
+
+Two bugs being fixed:
+
+1. RISC-V backend: IntNarrow and SignedToUnsigned cast for U32 used zero-extension
+   (slli/srli) instead of sign-extension (sext.w). On RISC-V, all 32-bit values
+   must be sign-extended in 64-bit registers per the ABI. This caused incorrect
+   qsort comparison results when uint subtraction produced negative values.
+
+2. Compound literal size calculation: (int[]){[1]=10, [8]=80} used items.len() (2)
+   instead of compute_init_list_array_size() (9) for array size, causing stack
+   corruption when accessing designated indices beyond items.len().
+
+Both fixes are needed for QBE to pass on RISC-V.
