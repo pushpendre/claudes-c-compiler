@@ -1,0 +1,20 @@
+Split all 4 backend codegen.rs files into logical submodules
+
+The 4 codegen files are the largest in the codebase:
+- x86/codegen/codegen.rs: 4047 lines
+- i686/codegen/codegen.rs: 4310 lines
+- arm/codegen/codegen.rs: 4107 lines
+- riscv/codegen/codegen.rs: 3356 lines
+
+Plan: Split each into ~8-10 focused submodules:
+- core struct + constructor + trait boilerplate
+- prologue/epilogue + stack frame
+- memory operations (load/store/typed/indirect/slot)
+- integer ALU + comparison
+- i128 operations
+- call ABI + function calls
+- cast/conversion
+- variadic (va_arg/va_start/va_copy)
+- float operations
+- atomics
+- control flow + globals
