@@ -198,7 +198,8 @@ impl Target {
                 cg.apply_options(opts);
                 cg.state.function_sections = opts.function_sections;
                 cg.state.data_sections = opts.data_sections;
-                generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
+                let raw = generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr);
+                arm::codegen::peephole::peephole_optimize(raw)
             }
             Target::Riscv64 => {
                 let mut cg = riscv::RiscvCodegen::new();
