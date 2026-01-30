@@ -1049,6 +1049,78 @@ fn classify_instructions(
         }
     }
 
+    // Pre-scan: find param allocas whose memory is modified after the initial
+    // emit_store_params Store. The ParamRef optimization (reusing the alloca
+    // slot for the initial parameter value) is only safe when the alloca's
+    // content is never overwritten. If any additional store targets the param
+    // alloca (directly, through a GEP, or via an escaped pointer to a callee),
+    // the alloca may hold a different value than the ParamRef expects.
+    let modified_param_allocas: FxHashSet<u32> = {
+        let param_alloca_set: FxHashSet<u32> =
+            func.param_alloca_values.iter().map(|v| v.0).collect();
+
+        // Map GEP dest -> param alloca root (for chained GEPs)
+        let mut gep_to_param: FxHashMap<u32, u32> = FxHashMap::default();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Instruction::GetElementPtr { dest, base, .. } = inst {
+                    if param_alloca_set.contains(&base.0) {
+                        gep_to_param.insert(dest.0, base.0);
+                    } else if let Some(&root) = gep_to_param.get(&base.0) {
+                        gep_to_param.insert(dest.0, root);
+                    }
+                }
+            }
+        }
+
+        // Count stores to each param alloca. The initial emit_store_params
+        // generates exactly one store per param. Any additional store means
+        // the param alloca is modified.
+        let mut store_count: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut escaped = FxHashSet::default();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    Instruction::Store { ptr, .. } => {
+                        // Direct store to param alloca
+                        if param_alloca_set.contains(&ptr.0) {
+                            *store_count.entry(ptr.0).or_insert(0) += 1;
+                        }
+                        // Store through GEP of param alloca
+                        if let Some(&root) = gep_to_param.get(&ptr.0) {
+                            *store_count.entry(root).or_insert(0) += 1;
+                        }
+                    }
+                    Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => {
+                        // If param alloca address (or GEP of it) is passed to
+                        // a call, the callee may modify it.
+                        for arg in &info.args {
+                            if let Operand::Value(v) = arg {
+                                if let Some(&root) = gep_to_param.get(&v.0) {
+                                    escaped.insert(root);
+                                }
+                                if param_alloca_set.contains(&v.0) {
+                                    escaped.insert(v.0);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // A param alloca is "modified" if it has more than 1 store (the
+        // initial emit_store_params store) or its address escapes to a call.
+        let mut modified = escaped;
+        for (&alloca_id, &count) in &store_count {
+            if count > 1 {
+                modified.insert(alloca_id);
+            }
+        }
+        modified
+    };
+
     for block in &func.blocks {
         for inst in &block.instructions {
             if let Instruction::Alloca { dest, size, ty, align, .. } = inst {
@@ -1108,8 +1180,15 @@ fn classify_instructions(
                 // emit_param_ref loads from the alloca with sign/zero extension,
                 // then stores back to the same slot, which is a valid self-update
                 // that sets the upper bytes to the correct extension.
+                //
+                // Exception: when the param alloca is modified after the initial
+                // store (e.g., by an inlined callee writing to it directly, or
+                // its address escaping to a call), the ParamRef must have its
+                // own separate slot. Otherwise the ParamRef would read back the
+                // modified value instead of the original parameter value.
                 if *param_idx < func.param_alloca_values.len() {
                     let alloca_val = func.param_alloca_values[*param_idx];
+                    if !modified_param_allocas.contains(&alloca_val.0) {
                     if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
                         state.value_locations.insert(dest.0, slot);
                         // Propagate type tracking even when reusing the alloca
@@ -1124,6 +1203,7 @@ fn classify_instructions(
                             }
                         }
                         continue;
+                    }
                     }
                 }
                 // Fallthrough: if no alloca slot found, classify normally.
