@@ -9,4 +9,4 @@ These are needed by projects like dr_libs, minimp3, stb_image, and many others t
 
 The macros should NOT be defined when -mno-sse is passed.
 
-Status: in_progress
+Status: completed
