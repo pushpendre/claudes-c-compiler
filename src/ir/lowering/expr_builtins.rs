@@ -42,9 +42,23 @@ impl Lowerer {
         // We check sema's is_defined flag (not known_functions, which includes mere
         // declarations) so that `void *__builtin_alloca(size_t);` alone still uses
         // the builtin, while a user-provided function body overrides it.
+        //
+        // EXCEPTION: SSE/SIMD intrinsic wrappers (_mm_*, _mm256_*) from our own
+        // emmintrin.h headers are defined as static inline functions whose bodies
+        // reference __builtin_ia32_vec_init_* (Nop stubs). The builtin intercept
+        // MUST take priority for these, otherwise the Nop stubs return 0 and the
+        // __CCC_M128I_FROM_BUILTIN macro dereferences NULL.
         if let Some(func_info) = self.sema_functions.get(name) {
             if func_info.is_defined {
-                return None;
+                // Don't let is_defined bypass intrinsics registered in our builtin
+                // table as SSE/SIMD intrinsics -- those wrapper bodies exist only as
+                // fallback for compilers that don't intercept them.
+                let is_intrinsic_builtin = builtins::resolve_builtin(name)
+                    .map(|info| matches!(info.kind, BuiltinKind::Intrinsic(_)))
+                    .unwrap_or(false);
+                if !is_intrinsic_builtin {
+                    return None;
+                }
             }
         }
 
