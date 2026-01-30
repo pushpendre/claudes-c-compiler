@@ -1,0 +1,21 @@
+Task: Enhance LICM to hoist loads from global variables out of loops
+Status: in_progress
+
+Description:
+The LICM pass currently only hoists loads from non-address-taken allocas.
+Loads from GlobalAddr pointers (global variables) are never hoisted because
+is_load_hoistable returns false for non-alloca pointers.
+
+This is a significant performance bottleneck in tight rendering loops like
+DOOM's R_DrawColumn, where loop-invariant globals like dc_source and
+dc_colormap are re-read from memory every iteration.
+
+The fix adds support for hoisting loads from GlobalAddr-defined pointers
+when the loop body contains no function calls and no stores to the same
+global address. This is safe because:
+1. GlobalAddr pointers are always loop-invariant (they're compile-time constants)
+2. If no store in the loop writes to that global and no call could modify it,
+   the value cannot change during loop execution.
+
+Expected impact: ~30% code size reduction in tight inner loops,
+measurable DOOM rendering performance improvement.
