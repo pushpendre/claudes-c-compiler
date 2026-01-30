@@ -1,0 +1,15 @@
+Task: Fix enum sizing for unsigned 32-bit values (e.g. 1U << 31)
+
+Problem: Enums containing values like `1U << 31` (0x80000000) are incorrectly
+sized as 8 bytes (64-bit) instead of 4 bytes (32-bit unsigned int).
+
+This causes ABI mismatches in function calls on i686 where the caller pushes
+the enum as 64-bit but the callee expects 32-bit, corrupting subsequent
+arguments on the stack.
+
+Affected project: capstone (fails on i686 due to cs_mode enum having 1U << 31)
+
+Fix: Update packed_size() in types.rs to check u32 range for non-packed enums,
+and update IrType::from_ctype to handle unsigned 4-byte enums correctly.
+
+Status: in_progress
