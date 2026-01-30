@@ -1,5 +1,5 @@
 use crate::backend::Target;
-use crate::common::error::{DiagnosticEngine, WarningConfig};
+use crate::common::error::{ColorMode, DiagnosticEngine, WarningConfig};
 use crate::common::source::SourceManager;
 use crate::frontend::preprocessor::Preprocessor;
 use crate::frontend::lexer::Lexer;
@@ -159,6 +159,9 @@ pub struct Driver {
     /// user-defined macros instead of the preprocessed source. Used by build
     /// systems like Meson to detect compiler version via __GNUC__ etc.
     dump_defines: bool,
+    /// Color mode for diagnostic output, controlled by -fdiagnostics-color={auto,always,never}.
+    /// Defaults to Auto (colorize when stderr is a terminal).
+    color_mode: ColorMode,
 }
 
 impl Driver {
@@ -206,6 +209,7 @@ impl Driver {
             data_sections: false,
             gnu89_inline: false,
             dump_defines: false,
+            color_mode: ColorMode::Auto,
         }
     }
 
@@ -518,6 +522,20 @@ impl Driver {
                 "-fno-data-sections" => self.data_sections = false,
                 "-fgnu89-inline" => self.gnu89_inline = true,
                 "-fno-gnu89-inline" => self.gnu89_inline = false,
+                // Diagnostic color: -fdiagnostics-color, -fdiagnostics-color={auto,always,never}
+                "-fdiagnostics-color" | "-fcolor-diagnostics" => {
+                    self.color_mode = ColorMode::Always;
+                }
+                "-fno-diagnostics-color" | "-fno-color-diagnostics" => {
+                    self.color_mode = ColorMode::Never;
+                }
+                arg if arg.starts_with("-fdiagnostics-color=") => {
+                    let value = &arg["-fdiagnostics-color=".len()..];
+                    if let Some(mode) = ColorMode::from_flag(value) {
+                        self.color_mode = mode;
+                    }
+                    // Unknown values silently ignored (matching GCC)
+                }
                 arg if arg.starts_with("-f") => {}
 
                 // Linker flags
@@ -1293,6 +1311,7 @@ impl Driver {
         // Create diagnostic engine for structured error/warning reporting
         let mut diagnostics = DiagnosticEngine::new();
         diagnostics.set_warning_config(self.warning_config.clone());
+        diagnostics.set_color_mode(self.color_mode);
 
         // Emit preprocessor warnings through diagnostic engine with Cpp kind
         // so they can be controlled via -Wcpp / -Wno-cpp / -Werror=cpp

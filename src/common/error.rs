@@ -2,7 +2,7 @@
 //!
 //! Provides a `DiagnosticEngine` that collects errors, warnings, and notes
 //! with source locations and renders them in GCC-compatible format with
-//! optional source snippet display.
+//! optional source snippet display and ANSI color output.
 //!
 //! # Warning control
 //! The engine supports GCC-compatible warning flags:
@@ -17,6 +17,20 @@
 //! Flags are processed left-to-right, so `-Wall -Wno-unused-variable` enables
 //! all warnings except unused-variable.
 //!
+//! # Color output
+//! Controlled by `-fdiagnostics-color={auto,always,never}`:
+//! - `auto` (default): colorize when stderr is a terminal
+//! - `always`: always emit ANSI color codes
+//! - `never`: plain text output
+//!
+//! Color scheme (matching GCC):
+//! - Location (file:line:col): **bold white**
+//! - `error:` label: **bold red**
+//! - `warning:` label: **bold magenta**
+//! - `note:` label: **bold cyan**
+//! - Caret/underline (`^~~~`): **bold green**
+//! - Fix-it hints: **bold green**
+//!
 //! # Output format
 //! ```text
 //! file.c:10:5: error: expected ';', got '}'
@@ -25,6 +39,51 @@
 //! ```
 
 use crate::common::source::{SourceManager, Span};
+
+/// Controls whether diagnostic output uses ANSI color escape codes.
+///
+/// Matches GCC's `-fdiagnostics-color` flag with the same three modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Colorize output only when stderr is a terminal (default).
+    Auto,
+    /// Always emit ANSI color codes.
+    Always,
+    /// Never emit color codes; plain text output.
+    Never,
+}
+
+impl ColorMode {
+    /// Parse a `-fdiagnostics-color` flag value.
+    /// Returns `None` for unrecognized values.
+    pub fn from_flag(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(ColorMode::Auto),
+            "always" => Some(ColorMode::Always),
+            "never" => Some(ColorMode::Never),
+            _ => None,
+        }
+    }
+
+    /// Resolve whether colors should actually be used, considering
+    /// the mode and whether stderr is a terminal.
+    fn use_color(self) -> bool {
+        match self {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => {
+                use std::io::IsTerminal;
+                std::io::stderr().is_terminal()
+            }
+        }
+    }
+}
+
+impl Default for ColorMode {
+    fn default() -> Self {
+        ColorMode::Auto
+    }
+}
 
 /// Categories of warnings, matching GCC's -W<name> flag names.
 ///
@@ -371,16 +430,21 @@ pub struct DiagnosticEngine {
     /// Reference to the source manager for span resolution and snippet display.
     /// Set after the preprocessing/lexing phase creates the SourceManager.
     source_manager: Option<SourceManager>,
+    /// Whether to use ANSI color codes in diagnostic output.
+    /// Resolved once at creation from the ColorMode setting.
+    use_color: bool,
 }
 
 impl DiagnosticEngine {
     /// Create a new diagnostic engine with no source manager and default warning config.
+    /// Color mode defaults to `Auto` (colorize when stderr is a terminal).
     pub fn new() -> Self {
         Self {
             error_count: 0,
             warning_count: 0,
             warning_config: WarningConfig::new(),
             source_manager: None,
+            use_color: ColorMode::Auto.use_color(),
         }
     }
 
@@ -407,6 +471,12 @@ impl DiagnosticEngine {
     /// Get a reference to the source manager (if set).
     pub fn source_manager(&self) -> Option<&SourceManager> {
         self.source_manager.as_ref()
+    }
+
+    /// Set the color mode for diagnostic output.
+    /// Resolves the mode immediately (e.g., checking isatty for Auto).
+    pub fn set_color_mode(&mut self, mode: ColorMode) {
+        self.use_color = mode.use_color();
     }
 
     /// Emit a diagnostic: apply warning filtering/promotion, print to stderr,
@@ -535,18 +605,48 @@ impl DiagnosticEngine {
 
     /// Render a single diagnostic to stderr, including location, severity,
     /// message, source snippet with caret, fix-it hints, and any follow-up notes.
+    ///
+    /// When color is enabled, output matches GCC's color scheme:
+    /// - Location prefix: bold white
+    /// - "error:": bold red
+    /// - "warning:": bold magenta
+    /// - "note:": bold cyan
+    /// - Message text: bold white
+    /// - Source snippet: no special color
+    /// - Caret/underline: bold green
+    /// - Fix-it hints: bold green
     fn render_diagnostic(&self, diag: &Diagnostic) {
         use std::fmt::Write;
         let mut msg = String::new();
 
-        // Format: "file:line:col: severity: message"
-        if let Some(span) = diag.span {
-            if let Some(ref sm) = self.source_manager {
-                let loc = sm.resolve_span(span);
-                let _ = write!(msg, "{}:{}:{}: ", loc.file, loc.line, loc.column);
+        if self.use_color {
+            // Colored output matching GCC
+            // Location prefix in bold white
+            if let Some(span) = diag.span {
+                if let Some(ref sm) = self.source_manager {
+                    let loc = sm.resolve_span(span);
+                    let _ = write!(msg, "\x1b[1m{}:{}:{}: \x1b[0m",
+                        loc.file, loc.line, loc.column);
+                }
             }
+            // Severity label in its color, message in bold white
+            let (sev_color, sev_text) = match diag.severity {
+                Severity::Error => ("\x1b[1;31m", "error"),     // bold red
+                Severity::Warning => ("\x1b[1;35m", "warning"), // bold magenta
+                Severity::Note => ("\x1b[1;36m", "note"),       // bold cyan
+            };
+            let _ = write!(msg, "{}{}\x1b[0m: \x1b[1m{}\x1b[0m",
+                sev_color, sev_text, diag.message);
+        } else {
+            // Plain text output
+            if let Some(span) = diag.span {
+                if let Some(ref sm) = self.source_manager {
+                    let loc = sm.resolve_span(span);
+                    let _ = write!(msg, "{}:{}:{}: ", loc.file, loc.line, loc.column);
+                }
+            }
+            let _ = write!(msg, "{}: {}", diag.severity, diag.message);
         }
-        let _ = write!(msg, "{}: {}", diag.severity, diag.message);
         eprintln!("{}", msg);
 
         // Source snippet with caret underline
@@ -556,7 +656,11 @@ impl DiagnosticEngine {
 
         // Render fix-it hint if present
         if let Some(ref hint) = diag.fix_hint {
-            eprintln!("  fix-it hint: {}", hint);
+            if self.use_color {
+                eprintln!("  \x1b[1;32mfix-it hint:\x1b[0m {}", hint);
+            } else {
+                eprintln!("  fix-it hint: {}", hint);
+            }
         }
 
         // Render any follow-up notes
@@ -572,6 +676,9 @@ impl DiagnosticEngine {
     ///     int x = 42
     ///             ^~
     /// ```
+    ///
+    /// When color is enabled, the caret and underline are rendered in bold green
+    /// (matching GCC's behavior).
     fn render_snippet(&self, span: Span) {
         let sm = match &self.source_manager {
             Some(sm) => sm,
@@ -604,7 +711,11 @@ impl DiagnosticEngine {
             } else {
                 "^".to_string()
             };
-            eprintln!("{}{}", padding, underline);
+            if self.use_color {
+                eprintln!("{}\x1b[1;32m{}\x1b[0m", padding, underline);
+            } else {
+                eprintln!("{}{}", padding, underline);
+            }
         }
     }
 }

@@ -40,6 +40,7 @@ ccc -g -o output input.c    # Debug info
 ccc -DFOO=1 -Iinclude/ input.c
 ccc -Werror -Wall input.c    # Warning control
 ccc -Werror=implicit-function-declaration input.c
+ccc -fdiagnostics-color=always input.c  # Force colored diagnostics
 ccc -x c -E -                # Read from stdin
 
 # Build system integration (reports as GCC 6.5 for compatibility)
