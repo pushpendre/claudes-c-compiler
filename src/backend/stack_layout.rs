@@ -1223,9 +1223,21 @@ fn classify_value(
     multi_block_values: &mut Vec<MultiBlockValue>,
     block_local_values: &mut Vec<BlockLocalValue>,
 ) {
-    let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
+    let mut is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
     let is_f128 = matches!(inst.result_type(), Some(IrType::F128))
         || matches!(inst, Instruction::Copy { src: Operand::Const(IrConst::LongDouble(..)), .. });
+
+    // Copy instructions have result_type() = None, so we must check whether
+    // the source operand is an I128 value. If it is, the Copy dest also needs
+    // a 16-byte slot; otherwise the codegen's emit_copy_i128 will overflow an
+    // 8-byte slot into the adjacent stack slot, corrupting other values.
+    if !is_i128 {
+        if let Instruction::Copy { src: Operand::Value(src_val), .. } = inst {
+            if state.i128_values.contains(&src_val.0) {
+                is_i128 = true;
+            }
+        }
+    }
 
     // Detect small values (types that fit in 4 bytes on 64-bit targets).
     // Currently used to populate small_slot_values for future store/load
