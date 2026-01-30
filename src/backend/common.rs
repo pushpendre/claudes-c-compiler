@@ -832,7 +832,7 @@ fn emit_init_data(out: &mut AsmOutput, init: &GlobalInit, fallback_ty: IrType, t
         }
         GlobalInit::String(s) => {
             out.emit_fmt(format_args!("    .asciz \"{}\"", escape_string(s)));
-            let string_bytes = s.len() + 1; // string + null terminator
+            let string_bytes = s.chars().count() + 1; // string chars + null terminator (use chars().count() not len() since non-ASCII chars take 2+ UTF-8 bytes in Rust but emit 1 byte each via .asciz)
             if total_size > string_bytes {
                 out.emit_fmt(format_args!("    .zero {}", total_size - string_bytes));
             }
