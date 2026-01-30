@@ -1,0 +1,17 @@
+Task: Add x86 peephole pass for memory operand folding
+Status: in_progress
+Started: 2026-01-30
+
+Description:
+Add a peephole optimization pass that folds stack load + ALU instruction patterns
+into single instructions with memory source operands. This is a key x86 optimization
+that reduces instruction count and register pressure.
+
+Patterns to fold:
+1. movq -N(%rbp), %rax; addq %rax, %reg -> addq -N(%rbp), %reg
+2. movq -N(%rbp), %rcx; addq %rcx, %rax -> addq -N(%rbp), %rax
+3. Same for subq, andq, orq, xorq, cmpq (commutative and non-commutative ops)
+4. Similar patterns with 32-bit variants (movl, addl, etc.)
+
+Expected impact: Significant reduction in instruction count for spill-heavy code.
+On Doom binary, this targets thousands of load+use patterns.
