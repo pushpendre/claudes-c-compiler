@@ -1,0 +1,24 @@
+Fix LICM: stores through pointers loaded from globals not tracked
+
+Bug: LICM's `has_global_derived_stores` flag only tracks stores through
+GlobalAddr-derived pointers (direct GlobalAddr or GEP from GlobalAddr),
+but NOT stores through pointers that were loaded from global variables.
+
+Example:
+  struct S { char arr[8]; int j; } s;
+  struct S *p = &s;
+  for (int i = 0; i < 2; i++) {
+      p->j = p->j + p->arr[i];  // store through loaded pointer
+  }
+
+The store to p->j goes through: GlobalAddr @s -> Load -> GEP -> Store.
+The `global_addr_values` set follows GlobalAddr -> GEP chains but stops
+at Load instructions. So the store target is not in global_addr_values,
+and has_global_derived_stores stays false. This causes LICM to incorrectly
+determine that loads from globals can be hoisted past stores in the loop.
+
+Fix: extend global_addr_values to also include GEPs whose base is a Load
+from a global_addr_value, OR conservatively set has_global_derived_stores
+when any store goes through a non-alloca, non-param pointer.
+
+Status: in_progress
