@@ -1,0 +1,25 @@
+Task: Fix i686 __divdi3/__udivdi3/__moddi3/__umoddi3 section placement
+
+Status: in_progress
+
+Problem:
+The i686 backend emits 64-bit division runtime helper stubs (__udivdi3,
+__umoddi3, __divdi3, __moddi3) as weak symbols. However, these stubs are
+emitted without an explicit .text section directive, so they inherit
+whatever section was last active during code generation.
+
+If the last function in a translation unit has a custom section attribute
+(e.g., __attribute__((section(".init.text")))), the division helpers end
+up in that section instead of .text.
+
+This causes Linux kernel build failures: modpost detects section mismatches
+because functions in .text call __udivdi3 in .init.text, which violates
+the kernel's section rules (init code is discarded after boot).
+
+Fix:
+Add an explicit ".text" section directive in emit_runtime_stubs() before
+emitting the division helper functions, ensuring they always go into .text
+regardless of what section the last function was in.
+
+Files to modify:
+- src/backend/i686/codegen/codegen.rs (emit_runtime_stubs method)
