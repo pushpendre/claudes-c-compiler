@@ -50,6 +50,12 @@ pub struct Driver {
     debug_info: bool,
     defines: Vec<CliDefine>,
     include_paths: Vec<String>,
+    /// Quote-only include paths (from -iquote flags)
+    quote_include_paths: Vec<String>,
+    /// System include paths (from -isystem flags)
+    isystem_include_paths: Vec<String>,
+    /// After include paths (from -idirafter flags)
+    after_include_paths: Vec<String>,
     /// Library search paths (from -L flags)
     linker_paths: Vec<String>,
     /// Ordered list of linker items preserving command-line order.
@@ -192,6 +198,9 @@ impl Driver {
             debug_info: false,
             defines: Vec::new(),
             include_paths: Vec::new(),
+            quote_include_paths: Vec::new(),
+            isystem_include_paths: Vec::new(),
+            after_include_paths: Vec::new(),
             linker_paths: Vec::new(),
             linker_ordered_items: Vec::new(),
             static_link: false,
@@ -461,6 +470,36 @@ impl Driver {
                     }
                 }
                 arg if arg.starts_with("-I") => self.add_include_path(&arg[2..]),
+
+                // Quote-only include paths (-iquote)
+                "-iquote" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.quote_include_paths.push(args[i].clone());
+                    } else {
+                        return Err("-iquote requires an argument".to_string());
+                    }
+                }
+
+                // System include paths (-isystem)
+                "-isystem" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.isystem_include_paths.push(args[i].clone());
+                    } else {
+                        return Err("-isystem requires an argument".to_string());
+                    }
+                }
+
+                // After include paths (-idirafter)
+                "-idirafter" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.after_include_paths.push(args[i].clone());
+                    } else {
+                        return Err("-idirafter requires an argument".to_string());
+                    }
+                }
 
                 // Library search paths
                 "-L" => {
@@ -735,6 +774,15 @@ impl Driver {
         for path in &self.include_paths {
             preprocessor.add_include_path(path);
         }
+        for path in &self.quote_include_paths {
+            preprocessor.add_quote_include_path(path);
+        }
+        for path in &self.isystem_include_paths {
+            preprocessor.add_system_include_path(path);
+        }
+        for path in &self.after_include_paths {
+            preprocessor.add_after_include_path(path);
+        }
     }
 
     /// Run the compiler pipeline.
@@ -799,6 +847,15 @@ impl Driver {
                 cmd.args(config.extra_args);
                 for path in &self.include_paths {
                     cmd.arg("-I").arg(path);
+                }
+                for path in &self.quote_include_paths {
+                    cmd.arg("-iquote").arg(path);
+                }
+                for path in &self.isystem_include_paths {
+                    cmd.arg("-isystem").arg(path);
+                }
+                for path in &self.after_include_paths {
+                    cmd.arg("-idirafter").arg(path);
                 }
                 for def in &self.defines {
                     if def.value == "1" {
@@ -1101,6 +1158,15 @@ impl Driver {
         // Pass through include paths and defines for .S preprocessing
         for path in &self.include_paths {
             cmd.arg("-I").arg(path);
+        }
+        for path in &self.quote_include_paths {
+            cmd.arg("-iquote").arg(path);
+        }
+        for path in &self.isystem_include_paths {
+            cmd.arg("-isystem").arg(path);
+        }
+        for path in &self.after_include_paths {
+            cmd.arg("-idirafter").arg(path);
         }
         for def in &self.defines {
             if def.value == "1" {

@@ -484,9 +484,13 @@ impl Preprocessor {
     /// next include path after the one containing the current file.
     /// `current_file` is the full path to the file containing the #include_next.
     pub(super) fn resolve_include_next_path(&self, include_path: &str, current_file: Option<&PathBuf>) -> Option<PathBuf> {
-        // Collect all search paths in order
-        let all_paths: Vec<&Path> = self.include_paths.iter()
+        // Collect all search paths in order:
+        // -iquote -> -I -> -isystem -> default system -> -idirafter
+        let all_paths: Vec<&Path> = self.quote_include_paths.iter()
+            .chain(self.include_paths.iter())
+            .chain(self.isystem_include_paths.iter())
             .chain(self.system_include_paths.iter())
+            .chain(self.after_include_paths.iter())
             .map(|p| p.as_path())
             .collect();
 
@@ -571,10 +575,23 @@ impl Preprocessor {
 
     /// Uncached include path resolution. Called by `resolve_include_path` on cache miss.
     fn resolve_include_path_uncached(&self, include_path: &str, is_system: bool) -> Option<PathBuf> {
-        // For quoted includes, first search relative to the current file's directory
+        // For quoted includes (#include "..."), search in this order:
+        //   1. Current file's directory
+        //   2. -iquote paths
+        //   3. -I paths
+        //   4. -isystem paths
+        //   5. Default system paths
+        //   6. -idirafter paths
+        //
+        // For system includes (#include <...>), search in this order:
+        //   1. -I paths
+        //   2. -isystem paths
+        //   3. Default system paths
+        //   4. -idirafter paths
+
         if !is_system {
+            // Step 1: Search relative to the current file's directory
             if let Some(current_file) = self.include_stack.last() {
-                // Use the parent directory of the current file being processed
                 if let Some(current_dir) = current_file.parent() {
                     let candidate = current_dir.join(include_path);
                     if candidate.is_file() {
@@ -591,9 +608,17 @@ impl Preprocessor {
                     }
                 }
             }
+
+            // Step 2: Search -iquote paths (quoted includes only)
+            for dir in &self.quote_include_paths {
+                let candidate = dir.join(include_path);
+                if candidate.is_file() {
+                    return Some(make_absolute(&candidate));
+                }
+            }
         }
 
-        // Search -I paths
+        // Step 3: Search -I paths
         for dir in &self.include_paths {
             let candidate = dir.join(include_path);
             if candidate.is_file() {
@@ -601,8 +626,24 @@ impl Preprocessor {
             }
         }
 
-        // Search system include paths
+        // Step 4: Search -isystem paths
+        for dir in &self.isystem_include_paths {
+            let candidate = dir.join(include_path);
+            if candidate.is_file() {
+                return Some(make_absolute(&candidate));
+            }
+        }
+
+        // Step 5: Search default system include paths
         for dir in &self.system_include_paths {
+            let candidate = dir.join(include_path);
+            if candidate.is_file() {
+                return Some(make_absolute(&candidate));
+            }
+        }
+
+        // Step 6: Search -idirafter paths
+        for dir in &self.after_include_paths {
             let candidate = dir.join(include_path);
             if candidate.is_file() {
                 return Some(make_absolute(&candidate));

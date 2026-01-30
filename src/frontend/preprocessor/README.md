@@ -20,7 +20,9 @@ preprocessing into the lexer but means macro source locations are lost.
 - **conditionals.rs** - `ConditionalStack`: tracks `#if`/`#ifdef`/`#elif`/`#else`/
   `#endif` nesting. Includes a simple constant expression evaluator for `#if`.
 - **expr_eval.rs** - Expression evaluator for `#if` directive constant expressions.
-- **includes.rs** - Include file resolution: searches `-I` paths then system paths.
+- **includes.rs** - Include file resolution with GCC-compatible search order.
+  For `#include "file"`: current dir, `-iquote`, `-I`, `-isystem`, default system, `-idirafter`.
+  For `#include <file>`: `-I`, `-isystem`, default system, `-idirafter`.
 - **builtin_macros.rs** - Defines GCC-compatible builtin function-like macros
   (e.g., `__builtin_va_start`, `__builtin_types_compatible_p`).
 - **predefined_macros.rs** - Target-specific and standard predefined macros
@@ -37,8 +39,9 @@ preprocessing into the lexer but means macro source locations are lost.
 - **Multi-line macro invocations**: When a line has unbalanced parentheses, the
   preprocessor accumulates subsequent lines before expanding (up to 20 lines).
   This handles macros like `FOO(\n  arg1,\n  arg2)`.
-- **Include resolution**: Searches `-I` paths then system paths. Each included
-  file gets its own conditional stack (saved/restored around inclusion).
+- **Include resolution**: Supports GCC-compatible search order with `-iquote`,
+  `-I`, `-isystem`, and `-idirafter` path lists. Each included file gets its
+  own conditional stack (saved/restored around inclusion).
 - **`#pragma once`**: Tracked by canonical file path to prevent re-inclusion.
 - **Predefined macros**: `__LINE__` uses a `Cell<usize>` cache in `MacroTable`
   (set via `set_line()`) to avoid per-line `MacroDef` allocation. `__FILE__`

@@ -42,6 +42,12 @@ pub struct Preprocessor {
     pub(super) warnings: Vec<String>,
     /// Include search paths (from -I flags)
     pub(super) include_paths: Vec<PathBuf>,
+    /// Quote include paths (from -iquote flags), searched only for #include "..."
+    pub(super) quote_include_paths: Vec<PathBuf>,
+    /// System include paths explicitly added (from -isystem flags)
+    pub(super) isystem_include_paths: Vec<PathBuf>,
+    /// After include paths (from -idirafter flags), searched last
+    pub(super) after_include_paths: Vec<PathBuf>,
     /// System include paths (default search paths)
     pub(super) system_include_paths: Vec<PathBuf>,
     /// Files currently being processed (for recursion detection)
@@ -106,6 +112,9 @@ impl Preprocessor {
             errors: Vec::new(),
             warnings: Vec::new(),
             include_paths: Vec::new(),
+            quote_include_paths: Vec::new(),
+            isystem_include_paths: Vec::new(),
+            after_include_paths: Vec::new(),
             system_include_paths: Self::default_system_include_paths(),
             include_stack: Vec::new(),
             pragma_once_files: FxHashSet::default(),
@@ -617,6 +626,25 @@ impl Preprocessor {
     /// Adds regardless of whether the directory currently exists.
     pub fn add_include_path(&mut self, path: &str) {
         self.include_paths.push(PathBuf::from(path));
+    }
+
+    /// Add a quote-only include search path (-iquote flag).
+    /// These paths are searched only for `#include "file"`, not `#include <file>`.
+    /// Searched after current directory, before -I paths.
+    pub fn add_quote_include_path(&mut self, path: &str) {
+        self.quote_include_paths.push(PathBuf::from(path));
+    }
+
+    /// Add a system include path (-isystem flag).
+    /// These paths are searched after -I paths, before default system paths.
+    pub fn add_system_include_path(&mut self, path: &str) {
+        self.isystem_include_paths.push(PathBuf::from(path));
+    }
+
+    /// Add an after include path (-idirafter flag).
+    /// These paths are searched last, after all other include paths.
+    pub fn add_after_include_path(&mut self, path: &str) {
+        self.after_include_paths.push(PathBuf::from(path));
     }
 
     /// Process a force-included file (-include flag). This preprocesses the file content
