@@ -84,6 +84,22 @@ COMPLETED (2026-01-30):
   - Matches GCC output format: "In file included from X:Y," / "from X:Y:"
   - Chain is only shown once per file (consecutive errors skip repeat traces)
 
+COMPLETED (2026-01-30):
+- Added expect_context() parser method for contextual error messages with fix-it hints
+  (e.g., "expected '(' after 'if'" instead of "expected '(' before 'x'")
+- Added fix-it hints to expect_closing() (e.g., "fix-it hint: insert ')'")
+- Converted 30+ bare expect() calls across parser to contextual versions:
+  - statements.rs: if/while/for/switch/do-while/case/default/asm with context strings
+  - expressions.rs: _Alignof/__alignof__/__builtin_va_arg/__builtin_types_compatible_p/
+    _Generic/ternary operator with context strings
+  - types.rs: _Atomic/typeof/struct/enum bodies with context strings
+  - declarations.rs: _Static_assert/designator brackets with context
+  - declarators.rs: parameter lists/array brackets with context
+- Fixed 3 silent error sites where error_count++ had no diagnostic message:
+  - __int128 on 32-bit: now emits "__int128 is not supported on this target"
+  - __uint128_t on 32-bit: now emits "__uint128_t is not supported on this target"
+  - TI mode on 32-bit: now emits "TI mode is not supported on 32-bit targets"
+
 REMAINING FOLLOW-UPS:
 1. Add spans to preprocessor errors (#error directives)
 2. Add more WarningKind categories as compiler implements more warnings
@@ -96,7 +112,7 @@ REMAINING FOLLOW-UPS:
 Key files:
 - src/common/error.rs (DiagnosticEngine, Diagnostic, Severity, with_note, with_fix_hint)
 - src/common/source.rs (SourceManager with line map, get_source_line for snippets)
-- src/frontend/parser/parser.rs (uses emit_error/emit_warning, expect_after, expect_closing)
+- src/frontend/parser/parser.rs (uses emit_error/emit_warning, expect_after, expect_closing, expect_context)
 - src/frontend/sema/sema.rs (uses diagnostics.error/warning_with_kind with spans)
 - src/ir/lowering/lowering.rs (uses RefCell<DiagnosticEngine> for &self methods)
 - src/frontend/preprocessor/preprocessor.rs (collects errors and warnings Vecs)

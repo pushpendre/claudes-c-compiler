@@ -131,6 +131,7 @@ impl Parser {
                 TokenKind::Atomic => {
                     self.advance();
                     if matches!(self.peek(), TokenKind::LParen) {
+                        let open = self.peek_span();
                         self.advance(); // consume '('
                         // Save and restore const qualifier across inner type parse
                         // to prevent leakage (e.g., _Atomic(const int) should not
@@ -141,7 +142,7 @@ impl Parser {
                         self.attrs.set_const(saved_const);
                         if let Some(inner_type) = inner {
                             let result = self.parse_abstract_declarator_suffix(inner_type);
-                            self.expect(&TokenKind::RParen);
+                            self.expect_closing(&TokenKind::RParen, open);
                             return Some(result);
                         }
                         // Fallback: if we can't parse a type, emit error and skip
@@ -202,10 +203,11 @@ impl Parser {
                 }
                 // __int128 can combine with signed/unsigned
                 TokenKind::Int128 => {
+                    let span = self.peek_span();
                     self.advance();
                     // GCC rejects __int128 on 32-bit targets
                     if crate::common::types::target_is_32bit() {
-                        self.error_count += 1;
+                        self.emit_error("__int128 is not supported on this target", span);
                         // Fall through with Int (to avoid cascading errors)
                         return Some(TypeSpecifier::Int);
                     }
@@ -218,10 +220,11 @@ impl Parser {
                 }
                 // __uint128_t is always unsigned
                 TokenKind::UInt128 => {
+                    let span = self.peek_span();
                     self.advance();
-                    // GCC rejects __int128 on 32-bit targets
+                    // GCC rejects __uint128_t on 32-bit targets
                     if crate::common::types::target_is_32bit() {
-                        self.error_count += 1;
+                        self.emit_error("__uint128_t is not supported on this target", span);
                         return Some(TypeSpecifier::UnsignedInt);
                     }
                     return Some(TypeSpecifier::UnsignedInt128);
@@ -498,7 +501,8 @@ impl Parser {
 
     /// Parse typeof(expr) or typeof(type-name).
     fn parse_typeof_specifier(&mut self) -> TypeSpecifier {
-        self.expect(&TokenKind::LParen);
+        let open = self.peek_span();
+        self.expect_context(&TokenKind::LParen, "after 'typeof'");
         let save = self.pos;
         // Try parsing as a type first
         if self.is_type_specifier() {
@@ -511,11 +515,11 @@ impl Parser {
             }
             // Didn't work as type, backtrack
             self.pos = save;
-            self.expect(&TokenKind::LParen);
+            self.expect_context(&TokenKind::LParen, "after 'typeof'");
         }
         // Parse as expression
         let expr = self.parse_expr();
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
         TypeSpecifier::Typeof(Box::new(expr))
     }
 
@@ -580,7 +584,7 @@ impl Parser {
     pub(super) fn parse_struct_fields(&mut self) -> Vec<StructFieldDecl> {
         let mut fields = Vec::new();
         let open = self.peek_span();
-        self.expect(&TokenKind::LBrace);
+        self.expect_context(&TokenKind::LBrace, "for struct/union body");
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             self.skip_gcc_extensions();
             if matches!(self.peek(), TokenKind::Semicolon) {
@@ -754,7 +758,7 @@ impl Parser {
     pub(super) fn parse_enum_variants(&mut self) -> Vec<EnumVariant> {
         let mut variants = Vec::new();
         let open = self.peek_span();
-        self.expect(&TokenKind::LBrace);
+        self.expect_context(&TokenKind::LBrace, "for enum body");
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             if let TokenKind::Identifier(name) = self.peek() {
                 let name = name.clone();
@@ -823,13 +827,14 @@ impl Parser {
             }
             // Parse array dimensions
             while matches!(self.peek(), TokenKind::LBracket) {
+                let open = self.peek_span();
                 self.advance();
                 let size = if matches!(self.peek(), TokenKind::RBracket) {
                     None
                 } else {
                     Some(Box::new(self.parse_expr()))
                 };
-                self.expect(&TokenKind::RBracket);
+                self.expect_closing(&TokenKind::RBracket, open);
                 result_type = TypeSpecifier::Array(Box::new(result_type), size);
             }
             result_type
@@ -881,13 +886,14 @@ impl Parser {
                             // Pointer to array: (*)[N] or (*[3][4])[2]
                             let mut outer_dims: Vec<Option<Box<Expr>>> = Vec::new();
                             while matches!(self.peek(), TokenKind::LBracket) {
+                                let open_bracket = self.peek_span();
                                 self.advance();
                                 let size = if matches!(self.peek(), TokenKind::RBracket) {
                                     None
                                 } else {
                                     Some(Box::new(self.parse_expr()))
                                 };
-                                self.expect(&TokenKind::RBracket);
+                                self.expect_closing(&TokenKind::RBracket, open_bracket);
                                 outer_dims.push(size);
                             }
                             for dim in outer_dims.into_iter().rev() {
@@ -951,13 +957,14 @@ impl Parser {
         // so the rightmost dimension wraps first (innermost).
         let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
         while matches!(self.peek(), TokenKind::LBracket) {
+            let open = self.peek_span();
             self.advance();
             let size = if matches!(self.peek(), TokenKind::RBracket) {
                 None
             } else {
                 Some(Box::new(self.parse_expr()))
             };
-            self.expect(&TokenKind::RBracket);
+            self.expect_closing(&TokenKind::RBracket, open);
             array_dims.push(size);
         }
         // Apply in reverse: innermost (rightmost) dimension wraps first

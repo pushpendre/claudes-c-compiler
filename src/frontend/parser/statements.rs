@@ -34,7 +34,7 @@ impl Parser {
                     break;
                 }
             }
-            self.expect(&TokenKind::Semicolon);
+            self.expect_after(&TokenKind::Semicolon, "after __label__ declaration");
         }
 
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
@@ -62,7 +62,7 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after __label__ declaration");
                 continue;
             }
             if matches!(self.peek(), TokenKind::StaticAssert) {
@@ -112,7 +112,7 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after 'if'");
                 let cond = self.parse_expr();
                 self.expect_closing(&TokenKind::RParen, open);
                 let then_stmt = self.parse_stmt();
@@ -127,7 +127,7 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after 'while'");
                 let cond = self.parse_expr();
                 self.expect_closing(&TokenKind::RParen, open);
                 let body = self.parse_stmt();
@@ -139,7 +139,7 @@ impl Parser {
                 let body = self.parse_stmt();
                 self.expect_after(&TokenKind::While, "at end of do-while statement");
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after 'while'");
                 let cond = self.parse_expr();
                 self.expect_closing(&TokenKind::RParen, open);
                 self.expect_after(&TokenKind::Semicolon, "after do-while statement");
@@ -168,7 +168,7 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after 'switch'");
                 let expr = self.parse_expr();
                 self.expect_closing(&TokenKind::RParen, open);
                 let body = self.parse_stmt();
@@ -181,11 +181,11 @@ impl Parser {
                 if self.consume_if(&TokenKind::Ellipsis) {
                     // GNU case range extension: case low ... high:
                     let high = self.parse_expr();
-                    self.expect(&TokenKind::Colon);
+                    self.expect_context(&TokenKind::Colon, "after 'case' expression");
                     let stmt = self.parse_stmt();
                     Stmt::CaseRange(expr, high, Box::new(stmt), span)
                 } else {
-                    self.expect(&TokenKind::Colon);
+                    self.expect_context(&TokenKind::Colon, "after 'case' expression");
                     let stmt = self.parse_stmt();
                     Stmt::Case(expr, Box::new(stmt), span)
                 }
@@ -193,7 +193,7 @@ impl Parser {
             TokenKind::Default => {
                 let span = self.peek_span();
                 self.advance();
-                self.expect(&TokenKind::Colon);
+                self.expect_context(&TokenKind::Colon, "after 'default'");
                 let stmt = self.parse_stmt();
                 Stmt::Default(Box::new(stmt), span)
             }
@@ -257,7 +257,7 @@ impl Parser {
         let span = self.peek_span();
         self.advance();
         let open = self.peek_span();
-        self.expect(&TokenKind::LParen);
+        self.expect_context(&TokenKind::LParen, "after 'for'");
 
         let init = if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
@@ -300,7 +300,8 @@ impl Parser {
         {
             self.advance();
         }
-        self.expect(&TokenKind::LParen);
+        let open = self.peek_span();
+        self.expect_context(&TokenKind::LParen, "after 'asm'");
 
         let template = self.parse_asm_string();
 
@@ -333,7 +334,7 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
         self.consume_if(&TokenKind::Semicolon);
 
         Stmt::InlineAsm { template, outputs, inputs, clobbers, goto_labels }
@@ -366,6 +367,7 @@ impl Parser {
     fn parse_one_asm_operand(&mut self) -> AsmOperand {
         // Optional [name]
         let name = if matches!(self.peek(), TokenKind::LBracket) {
+            let open = self.peek_span();
             self.advance();
             let n = if let TokenKind::Identifier(ref id) = self.peek() {
                 let id = id.clone();
@@ -374,7 +376,7 @@ impl Parser {
             } else {
                 None
             };
-            self.expect(&TokenKind::RBracket);
+            self.expect_closing(&TokenKind::RBracket, open);
             n
         } else {
             None
@@ -394,9 +396,10 @@ impl Parser {
         };
 
         // (expr)
-        self.expect(&TokenKind::LParen);
+        let open = self.peek_span();
+        self.expect_context(&TokenKind::LParen, "in asm operand");
         let expr = self.parse_expr();
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
 
         AsmOperand { name, constraint, expr }
     }

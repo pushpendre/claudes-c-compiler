@@ -767,15 +767,17 @@ impl Parser {
                 let mut designators = Vec::new();
                 // Parse designators: [idx] and .field
                 loop {
-                    if self.consume_if(&TokenKind::LBracket) {
+                    if matches!(self.peek(), TokenKind::LBracket) {
+                        let open = self.peek_span();
+                        self.advance();
                         let lo = self.parse_expr();
                         if self.consume_if(&TokenKind::Ellipsis) {
                             // GCC range designator: [lo ... hi]
                             let hi = self.parse_expr();
-                            self.expect(&TokenKind::RBracket);
+                            self.expect_closing(&TokenKind::RBracket, open);
                             designators.push(Designator::Range(lo, hi));
                         } else {
-                            self.expect(&TokenKind::RBracket);
+                            self.expect_closing(&TokenKind::RBracket, open);
                             designators.push(Designator::Index(lo));
                         }
                     } else if self.consume_if(&TokenKind::Dot) {
@@ -1111,7 +1113,7 @@ impl Parser {
         let assert_span = self.peek_span();
         self.advance(); // consume _Static_assert
         let open = self.peek_span();
-        self.expect(&TokenKind::LParen);
+        self.expect_context(&TokenKind::LParen, "after '_Static_assert'");
 
         // Parse the constant expression
         let expr = self.parse_assignment_expr();

@@ -75,12 +75,12 @@ impl Parser {
             // GNU extension: `cond ? : else_expr` (omitted middle operand)
             // Condition is evaluated once and used as the then-value if truthy.
             if self.peek() == &TokenKind::Colon {
-                self.expect(&TokenKind::Colon);
+                self.expect_context(&TokenKind::Colon, "in conditional expression");
                 let else_expr = self.parse_conditional_expr();
                 Expr::GnuConditional(Box::new(cond), Box::new(else_expr), span)
             } else {
                 let then_expr = self.parse_expr();
-                self.expect(&TokenKind::Colon);
+                self.expect_context(&TokenKind::Colon, "in conditional expression");
                 let else_expr = self.parse_conditional_expr();
                 Expr::Conditional(Box::new(cond), Box::new(then_expr), Box::new(else_expr), span)
             }
@@ -260,7 +260,7 @@ impl Parser {
                 self.advance();
                 // _Alignof(type) - C11 standard, returns minimum ABI alignment
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after '_Alignof'");
                 if let Some(ts) = self.parse_type_specifier() {
                     let result_type = self.parse_abstract_declarator_suffix(ts);
                     self.expect_closing(&TokenKind::RParen, open);
@@ -277,7 +277,7 @@ impl Parser {
                 self.advance();
                 // __alignof / __alignof__ - GCC extension, returns preferred alignment
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after '__alignof__'");
                 if let Some(ts) = self.parse_type_specifier() {
                     let result_type = self.parse_abstract_declarator_suffix(ts);
                     self.expect_closing(&TokenKind::RParen, open);
@@ -583,9 +583,9 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after '__builtin_va_arg'");
                 let ap_expr = self.parse_assignment_expr();
-                self.expect(&TokenKind::Comma);
+                self.expect_context(&TokenKind::Comma, "between '__builtin_va_arg' arguments");
                 let type_spec = self.parse_va_arg_type();
                 self.expect_closing(&TokenKind::RParen, open);
                 Expr::VaArg(Box::new(ap_expr), type_spec, span)
@@ -596,9 +596,9 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let open = self.peek_span();
-                self.expect(&TokenKind::LParen);
+                self.expect_context(&TokenKind::LParen, "after '__builtin_types_compatible_p'");
                 let type1 = self.parse_va_arg_type();
-                self.expect(&TokenKind::Comma);
+                self.expect_context(&TokenKind::Comma, "between '__builtin_types_compatible_p' arguments");
                 let type2 = self.parse_va_arg_type();
                 self.expect_closing(&TokenKind::RParen, open);
                 Expr::BuiltinTypesCompatibleP(type1, type2, span)
@@ -634,9 +634,9 @@ impl Parser {
         let span = self.peek_span();
         self.advance(); // consume _Generic
         let open = self.peek_span();
-        self.expect(&TokenKind::LParen);
+        self.expect_context(&TokenKind::LParen, "after '_Generic'");
         let controlling = self.parse_assignment_expr();
-        self.expect(&TokenKind::Comma);
+        self.expect_context(&TokenKind::Comma, "after '_Generic' controlling expression");
         let mut associations = Vec::new();
         loop {
             if matches!(self.peek(), TokenKind::RParen) {
@@ -661,7 +661,7 @@ impl Parser {
                 (None, false)
             };
             self.attrs.set_const(saved_const);
-            self.expect(&TokenKind::Colon);
+            self.expect_context(&TokenKind::Colon, "in '_Generic' association");
             let expr = self.parse_assignment_expr();
             associations.push(GenericAssociation { type_spec, expr, is_const });
             if !self.consume_if(&TokenKind::Comma) {

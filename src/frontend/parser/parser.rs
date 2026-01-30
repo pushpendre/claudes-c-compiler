@@ -460,10 +460,12 @@ impl Parser {
     }
 
     /// Expect a closing delimiter (paren, brace, bracket) and if missing,
-    /// attach a note pointing back to where the opening delimiter was.
+    /// attach a note pointing back to where the opening delimiter was,
+    /// plus a fix-it hint suggesting the insertion.
     /// Produces messages like:
     ///   error: expected ')' before ';'
     ///   note: to match this '(' (at file.c:10:5)
+    ///   fix-it hint: insert ')'
     pub(super) fn expect_closing(&mut self, expected: &TokenKind, open_span: Span) -> Span {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
             let span = self.peek_span();
@@ -481,11 +483,33 @@ impl Parser {
                 format!("expected {} before {}", expected, self.peek())
             )
             .with_span(span)
+            .with_fix_hint(format!("insert {}", expected))
             .with_note(
                 crate::common::error::Diagnostic::note(
                     format!("to match this {}", open_tok)
                 ).with_span(open_span)
             );
+            self.error_count += 1;
+            self.diagnostics.emit(&diag);
+            span
+        }
+    }
+
+    /// Expect a token with a contextual description of the construct being parsed.
+    /// Unlike `expect()`, produces messages like "expected '(' after 'if'" instead of
+    /// the generic "expected '(' before 'x'", and includes a fix-it hint.
+    pub(super) fn expect_context(&mut self, expected: &TokenKind, context: &str) -> Span {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
+            let span = self.peek_span();
+            self.advance();
+            span
+        } else {
+            let span = self.peek_span();
+            let diag = crate::common::error::Diagnostic::error(
+                format!("expected {} {} before {}", expected, context, self.peek())
+            )
+            .with_span(span)
+            .with_fix_hint(format!("insert {}", expected));
             self.error_count += 1;
             self.diagnostics.emit(&diag);
             span
@@ -801,7 +825,11 @@ impl Parser {
                 "SI" | "__SI__" => Some(ModeKind::SI),
                 "DI" | "__DI__" => Some(ModeKind::DI),
                 "TI" | "__TI__" => {
-                    if is_32bit { self.error_count += 1; *mode_kind }
+                    if is_32bit {
+                        let span = self.peek_span();
+                        self.emit_error("TI mode is not supported on 32-bit targets", span);
+                        *mode_kind
+                    }
                     else { Some(ModeKind::TI) }
                 }
                 "word" | "__word__" | "pointer" | "__pointer__" => {

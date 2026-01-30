@@ -80,6 +80,7 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::LBracket => {
+                    let open_bracket = self.peek_span();
                     self.advance();
                     // C99 array parameter declarators can have qualifiers and 'static':
                     // [static restrict const 10], [restrict n], [const], etc.
@@ -96,7 +97,7 @@ impl Parser {
                     } else {
                         Some(Box::new(self.parse_expr()))
                     };
-                    self.expect(&TokenKind::RBracket);
+                    self.expect_closing(&TokenKind::RBracket, open_bracket);
                     outer_suffixes.push(DerivedDeclarator::Array(size));
                 }
                 TokenKind::LParen => {
@@ -306,7 +307,8 @@ impl Parser {
 
     /// Parse a function parameter list: (params...) or (void) or ()
     pub(super) fn parse_param_list(&mut self) -> (Vec<ParamDecl>, bool) {
-        self.expect(&TokenKind::LParen);
+        let open = self.peek_span();
+        self.expect_context(&TokenKind::LParen, "for parameter list");
         let mut params = Vec::new();
         let mut variadic = false;
 
@@ -396,7 +398,7 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
         (params, variadic)
     }
 

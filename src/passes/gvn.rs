@@ -404,7 +404,7 @@ fn clobbers_memory(inst: &Instruction) -> bool {
             | Instruction::VaStart { .. }
             | Instruction::VaEnd { .. }
             | Instruction::VaCopy { .. }
-    )
+    ) || matches!(inst, Instruction::Intrinsic { dest_ptr: Some(_), .. })
 }
 
 /// Check if a Store instruction is eligible for store-to-load forwarding.
