@@ -361,6 +361,80 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
             continue;
         }
 
+        // --- Pattern: reverse-move elimination ---
+        // Detects `movq %regA, %regB` followed by `movq %regB, %regA` and
+        // eliminates the second mov (since %regA still holds the original value).
+        //
+        // This pattern arises from the accumulator-centric codegen: a value in
+        // %rax is saved to a callee-saved register, then immediately loaded back
+        // to %rax for the next operation. Example:
+        //   movq %rax, %rbx    ; save to callee-saved reg
+        //   movq %rbx, %rax    ; load back (REDUNDANT)
+        //
+        // Safety: We only skip NOPs and StoreRbp between the two instructions.
+        // StoreRbp reads registers but never modifies any GP register value.
+        // Any other instruction type (call, label, jmp, arithmetic, etc.) causes
+        // the search to stop via `break`, so we never incorrectly eliminate a
+        // reverse move when an intervening instruction could have modified %regA.
+        if let LineKind::Other { dest_reg: dest_a } = infos[i].kind {
+            if is_valid_gp_reg(dest_a) {
+                let line_i = infos[i].trimmed(store.get(i));
+                // Parse "movq %srcReg, %dstReg" pattern
+                if let Some(rest) = line_i.strip_prefix("movq ") {
+                    if let Some((src_str, dst_str)) = rest.split_once(',') {
+                        let src = src_str.trim();
+                        let dst = dst_str.trim();
+                        let src_fam = register_family_fast(src);
+                        let dst_fam = register_family_fast(dst);
+                        // Both must be GP registers, different families, both register operands
+                        // (same-reg case is handled by SelfMove above)
+                        if is_valid_gp_reg(src_fam) && is_valid_gp_reg(dst_fam)
+                            && src_fam != dst_fam
+                            && src.starts_with('%') && dst.starts_with('%')
+                        {
+                            // Find the next non-NOP, non-StoreRbp instruction.
+                            // Limit search to 8 lines to avoid pathological scanning.
+                            let mut j = i + 1;
+                            let search_limit = (i + 8).min(len);
+                            while j < search_limit {
+                                if infos[j].is_nop() {
+                                    j += 1;
+                                    continue;
+                                }
+                                if matches!(infos[j].kind, LineKind::StoreRbp { .. }) {
+                                    j += 1;
+                                    continue;
+                                }
+                                break;
+                            }
+                            if j < search_limit {
+                                // Check if line j is the reverse: movq %dstReg, %srcReg
+                                if let LineKind::Other { dest_reg: dest_b } = infos[j].kind {
+                                    if dest_b == src_fam {
+                                        let line_j = infos[j].trimmed(store.get(j));
+                                        if let Some(rest_j) = line_j.strip_prefix("movq ") {
+                                            if let Some((src_j, dst_j)) = rest_j.split_once(',') {
+                                                let src_j = src_j.trim();
+                                                let dst_j = dst_j.trim();
+                                                let src_j_fam = register_family_fast(src_j);
+                                                let dst_j_fam = register_family_fast(dst_j);
+                                                if src_j_fam == dst_fam && dst_j_fam == src_fam {
+                                                    mark_nop(&mut infos[j]);
+                                                    changed = true;
+                                                    i += 1;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- Pattern: redundant jump to next label ---
         if infos[i].kind == LineKind::Jmp {
             let jmp_line = infos[i].trimmed(store.get(i));
@@ -2299,15 +2373,10 @@ fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [LineInfo]) -> 
 fn rewrite_instruction_register(inst: &str, old_fam: RegId, new_fam: RegId) -> Option<String> {
     // Replace all occurrences of registers in the old family with the new family.
     // We need to handle all sizes: 64-bit (%rXX), 32-bit (%eXX/%rXXd), 16-bit, 8-bit.
-    let mut result = inst.to_string();
-    for size_idx in 0..4 {
-        let old_name = REG_NAMES[size_idx][old_fam as usize];
-        let new_name = REG_NAMES[size_idx][new_fam as usize];
-        // Only replace if the old register actually appears
-        if result.contains(old_name) {
-            result = result.replace(old_name, new_name);
-        }
-    }
+    // Use replace_reg_name_exact (with word-boundary checking) to avoid corrupting
+    // longer register names. For example, naive replacement of %r11 -> %rbx in
+    // "%r11d" would produce "%rbxd" instead of the correct "%ebx".
+    let result = replace_reg_family(inst, old_fam, new_fam);
     // Verify we actually changed something
     if result == inst {
         None
