@@ -1,0 +1,17 @@
+Task: Fix global char array size when initialized with shorter string literal
+
+Bug: When a char array has an explicit size larger than its string initializer
+(e.g., `char arr[448] = "short"`), the compiler/linker only allocates space for
+the string content in the data section instead of the full declared array size.
+This causes the next global variable to overlap with the uninitialized trailing
+bytes of the array.
+
+Example:
+  char arr[448] = "hello";  // should allocate 448 bytes, only allocates ~6
+  char next = 'X';          // overlaps with arr's uninitialized portion
+
+Root cause: Global variable size in the data section is computed from the
+initializer data length rather than the declared type size.
+
+Impact: Fixes dosfstools (all architectures), and potentially other projects
+that use char arrays initialized with shorter string literals.
