@@ -13,7 +13,8 @@
 //!
 //! 2. **Global passes** (once): global store forwarding (across fallthrough
 //!    labels), register copy propagation, dead register move elimination,
-//!    dead store elimination, and compare-and-branch fusion.
+//!    dead store elimination, compare-and-branch fusion, and memory operand
+//!    folding.
 //!
 //! 3. **Local cleanup** (up to 4 rounds): re-run local passes to clean up
 //!    opportunities exposed by global passes.
