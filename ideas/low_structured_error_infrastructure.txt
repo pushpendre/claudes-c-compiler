@@ -74,6 +74,16 @@ COMPLETED (2026-01-30):
 - Added -fcolor-diagnostics/-fno-color-diagnostics (Clang-compatible aliases)
 - Default mode is Auto: colors when stderr is a terminal, plain when piped
 
+COMPLETED (2026-01-30):
+- Added GCC-style "In file included from" include chain traces in diagnostics:
+  - Preprocessor now emits GCC-style flags in line markers (flag 1 = enter include,
+    flag 2 = return from include)
+  - SourceManager.build_line_map() parses flags to build include origin map
+  - SourceManager.get_include_chain() walks parent links to build full chain
+  - DiagnosticEngine.render_include_trace() emits chain before errors in headers
+  - Matches GCC output format: "In file included from X:Y," / "from X:Y:"
+  - Chain is only shown once per file (consecutive errors skip repeat traces)
+
 REMAINING FOLLOW-UPS:
 1. Add spans to preprocessor errors (#error directives)
 2. Add more WarningKind categories as compiler implements more warnings
@@ -81,8 +91,7 @@ REMAINING FOLLOW-UPS:
 3. Add more "note:" follow-ups: "previous declaration was here", "did you mean to include <header>?"
 4. Add more lowering diagnostics: unresolved lvalue in assignments, unresolved typedefs,
    vector type mismatches in compound assignment
-5. Add include stack tracing ("In file included from header.h:5:")
-6. Add macro expansion tracing ("in expansion of macro 'X'")
+5. Add macro expansion tracing ("in expansion of macro 'X'")
 
 Key files:
 - src/common/error.rs (DiagnosticEngine, Diagnostic, Severity, with_note, with_fix_hint)

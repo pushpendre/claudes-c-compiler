@@ -357,7 +357,8 @@ impl Preprocessor {
                     });
 
                     // Emit line marker for entering the included file
-                    let mut result = format!("# 1 \"{}\"\n", resolved_path.display());
+                    // Flag 1 indicates entering a new include file (GCC convention)
+                    let mut result = format!("# 1 \"{}\" 1\n", resolved_path.display());
 
                     // Preprocess the included content
                     result.push_str(&self.preprocess_included(&content));
@@ -478,7 +479,8 @@ impl Preprocessor {
                     });
 
                     // Emit line marker for entering the included file
-                    let mut result = format!("# 1 \"{}\"\n", resolved_path.display());
+                    // Flag 1 indicates entering a new include file (GCC convention)
+                    let mut result = format!("# 1 \"{}\" 1\n", resolved_path.display());
 
                     result.push_str(&self.preprocess_included(&content));
 

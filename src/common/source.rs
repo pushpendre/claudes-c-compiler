@@ -51,6 +51,17 @@ struct LineMapEntry {
     orig_line: u32,
 }
 
+/// Records where a file was included from: the parent file and the line number
+/// of the `#include` directive. Used to render GCC-style "In file included from"
+/// traces in error diagnostics.
+#[derive(Debug, Clone)]
+pub struct IncludeOrigin {
+    /// The filename that contained the #include directive.
+    pub file: String,
+    /// The line number of the #include directive (1-based).
+    pub line: u32,
+}
+
 /// Manages source files and provides span-to-location resolution.
 ///
 /// Supports two modes:
@@ -59,6 +70,11 @@ struct LineMapEntry {
 /// 2. Line-map mode: preprocessed output with embedded `# linenum "filename"`
 ///    markers. The line map is built by `build_line_map()` and used to resolve
 ///    spans back to original source files and line numbers.
+///
+/// Also tracks include chains: when flag 1 appears in a line marker
+/// (`# 1 "file.h" 1`), it records that file.h was included from the
+/// previously active file at the line of the preceding marker. This enables
+/// "In file included from X:Y:" diagnostic traces.
 #[derive(Debug, Default)]
 pub struct SourceManager {
     files: Vec<SourceFile>,
@@ -68,6 +84,10 @@ pub struct SourceManager {
     /// Deduplicated filename strings referenced by LineMapEntry::filename_idx.
     /// Avoids allocating the same filename string for every line marker.
     line_map_filenames: Vec<String>,
+    /// Include chain map: filename_idx -> IncludeOrigin.
+    /// Records where each included file was included from.
+    /// Only populated for files that have flag 1 (enter-include) markers.
+    include_origins: Vec<Option<IncludeOrigin>>,
 }
 
 #[derive(Debug)]
@@ -83,6 +103,7 @@ impl SourceManager {
             files: Vec::new(),
             line_map: Vec::new(),
             line_map_filenames: Vec::new(),
+            include_origins: Vec::new(),
         }
     }
 
@@ -104,9 +125,16 @@ impl SourceManager {
     /// Build a line map from GCC-style line markers in preprocessed output.
     ///
     /// Scans the stored file content (files[0]) for lines matching
-    /// `# <number> "<filename>"`. These markers are emitted by the preprocessor
-    /// at `#include` boundaries and indicate that subsequent lines originate
-    /// from the named file starting at the given line number.
+    /// `# <number> "<filename>" [flags]`. These markers are emitted by the
+    /// preprocessor at `#include` boundaries and indicate that subsequent lines
+    /// originate from the named file starting at the given line number.
+    ///
+    /// GCC-style flags after the filename:
+    /// - Flag `1`: entering a new include file
+    /// - Flag `2`: returning to a file after an include
+    ///
+    /// When flag 1 is seen, this records the include origin (which file and line
+    /// included the new file) for later use in "In file included from" traces.
     ///
     /// Reuses the line offsets already computed by `add_file()` for column
     /// calculation, avoiding a redundant scan of the preprocessed output.
@@ -131,6 +159,15 @@ impl SourceManager {
         let mut last_fname_idx: u16 = 0;
         use crate::common::fx_hash::FxHashMap;
         let mut fname_map: FxHashMap<&[u8], u16> = FxHashMap::default();
+
+        // Track the current file and line for include chain building.
+        // When we see a flag-1 marker (entering include), the current file/line
+        // is the origin of the #include directive.
+        let mut current_filename_idx: u16 = 0;
+        let mut current_line: u32 = 1;
+        // Byte offset of the line after the most recent line marker.
+        // Used to count newlines between markers for accurate line tracking.
+        let mut last_marker_next_offset: usize = 0;
 
         let mut i = 0;
         while i < len {
@@ -200,6 +237,65 @@ impl SourceManager {
                             last_fname_end = j;
                             last_fname_idx = filename_idx;
 
+                            // Parse optional GCC-style flags after the closing quote
+                            let mut has_flag_1 = false;
+                            let mut k = j + 1; // skip closing quote
+                            while k < line_end {
+                                // Skip whitespace
+                                while k < line_end && bytes[k] == b' ' {
+                                    k += 1;
+                                }
+                                if k < line_end && bytes[k].is_ascii_digit() {
+                                    let flag_start = k;
+                                    while k < line_end && bytes[k].is_ascii_digit() {
+                                        k += 1;
+                                    }
+                                    if let Some(flag) = parse_u32_from_digits(&bytes[flag_start..k]) {
+                                        if flag == 1 {
+                                            has_flag_1 = true;
+                                        }
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            // If flag 1 (entering include), record the include origin.
+                            // The current file/line before this marker is where the
+                            // #include directive appeared.
+                            if has_flag_1 {
+                                // Ensure include_origins vec is large enough
+                                while self.include_origins.len() <= filename_idx as usize {
+                                    self.include_origins.push(None);
+                                }
+                                // Only record the first include origin for each file
+                                // (a header may be included multiple times but only the
+                                // first inclusion chain matters for diagnostics).
+                                if self.include_origins[filename_idx as usize].is_none() {
+                                    let parent_file = self.line_map_filenames
+                                        [current_filename_idx as usize]
+                                        .clone();
+                                    // Count newlines between the last marker and the
+                                    // current line to get the actual line number of the
+                                    // #include directive in the parent file.
+                                    let newlines_since_marker = bytes
+                                        [last_marker_next_offset..i]
+                                        .iter()
+                                        .filter(|&&b| b == b'\n')
+                                        .count() as u32;
+                                    let include_line = current_line + newlines_since_marker;
+                                    self.include_origins[filename_idx as usize] =
+                                        Some(IncludeOrigin {
+                                            file: parent_file,
+                                            line: include_line,
+                                        });
+                                }
+                            }
+
+                            // Update current file/line tracking
+                            current_filename_idx = filename_idx;
+                            current_line = line_num;
+
                             // The next line (after this marker) maps to filename:line_num.
                             // Record the byte offset of the line after the marker.
                             let next_line_offset = if line_end < len {
@@ -207,6 +303,9 @@ impl SourceManager {
                             } else {
                                 line_end
                             };
+
+                            // Update last marker position for newline counting
+                            last_marker_next_offset = next_line_offset;
 
                             self.line_map.push(LineMapEntry {
                                 pp_offset: next_line_offset as u32,
@@ -348,6 +447,46 @@ impl SourceManager {
         }
 
         std::str::from_utf8(line_bytes).ok().map(|s| s.to_string())
+    }
+
+    /// Get the include chain for a file, from innermost to outermost.
+    ///
+    /// For a file included as: main.c -> header1.h -> header2.h,
+    /// calling this with "header2.h" returns:
+    ///   [IncludeOrigin("header1.h", line), IncludeOrigin("main.c", line)]
+    ///
+    /// Returns an empty vec for the main source file or files without
+    /// include tracking information.
+    pub fn get_include_chain(&self, filename: &str) -> Vec<IncludeOrigin> {
+        let mut chain = Vec::new();
+
+        // Find the filename index for the given filename
+        let mut current_file = filename.to_string();
+
+        // Walk up the include chain, following parent links
+        // Limit depth to avoid infinite loops from malformed data
+        for _ in 0..200 {
+            // Find the filename index for current_file
+            let idx = self.line_map_filenames.iter().position(|f| f == &current_file);
+            let idx = match idx {
+                Some(i) => i,
+                None => break,
+            };
+
+            // Check if this file has an include origin
+            if idx >= self.include_origins.len() {
+                break;
+            }
+            match &self.include_origins[idx] {
+                Some(origin) => {
+                    chain.push(origin.clone());
+                    current_file = origin.file.clone();
+                }
+                None => break,
+            }
+        }
+
+        chain
     }
 }
 

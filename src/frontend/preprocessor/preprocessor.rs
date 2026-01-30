@@ -260,7 +260,8 @@ impl Preprocessor {
                     let parent_file = self.include_stack.last()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| self.filename.clone());
-                    let _ = write!(output, "# {} \"{}\"\n", source_line_num + 2, parent_file);
+                    // Flag 2 indicates returning from an include file (GCC convention)
+                    let _ = write!(output, "# {} \"{}\" 2\n", source_line_num + 2, parent_file);
                 } else if is_include {
                     // Included files always emit a newline for non-include directives
                     output.push('\n');

@@ -433,6 +433,10 @@ pub struct DiagnosticEngine {
     /// Whether to use ANSI color codes in diagnostic output.
     /// Resolved once at creation from the ColorMode setting.
     use_color: bool,
+    /// The file for which we last emitted an "In file included from" chain.
+    /// Used to avoid repeating the same chain for consecutive errors in the
+    /// same included file (matching GCC behavior).
+    last_include_trace_file: Option<String>,
 }
 
 impl DiagnosticEngine {
@@ -445,6 +449,7 @@ impl DiagnosticEngine {
             warning_config: WarningConfig::new(),
             source_manager: None,
             use_color: ColorMode::Auto.use_color(),
+            last_include_trace_file: None,
         }
     }
 
@@ -603,6 +608,84 @@ impl DiagnosticEngine {
         self.warning_count
     }
 
+    /// Render "In file included from X:Y:" traces for errors in included files.
+    ///
+    /// GCC emits these traces before the first diagnostic in an included file,
+    /// showing the chain of #include directives that led to the current file.
+    /// Example output:
+    /// ```text
+    /// In file included from main.c:4:
+    /// In file included from header1.h:2:
+    /// header2.h:10:5: error: unknown type name 'foo'
+    /// ```
+    ///
+    /// The trace is only emitted once per file -- consecutive errors in the
+    /// same included file do not repeat the chain.
+    fn render_include_trace(&mut self, diag: &Diagnostic) {
+        // Only emit traces for diagnostics that have a span and are errors/warnings
+        // (not for notes, which are sub-diagnostics)
+        if diag.severity == Severity::Note {
+            return;
+        }
+
+        let span = match diag.span {
+            Some(s) => s,
+            None => return,
+        };
+
+        let sm = match &self.source_manager {
+            Some(sm) => sm,
+            None => return,
+        };
+
+        let loc = sm.resolve_span(span);
+
+        // Check if we already emitted a trace for this file
+        if let Some(ref last_file) = self.last_include_trace_file {
+            if *last_file == loc.file {
+                return; // Same file as last diagnostic, skip trace
+            }
+        }
+
+        // Get the include chain for this file
+        let chain = sm.get_include_chain(&loc.file);
+        if chain.is_empty() {
+            // Main file or no include info -- no trace needed
+            self.last_include_trace_file = Some(loc.file.clone());
+            return;
+        }
+
+        // Emit the include trace matching GCC format:
+        //   In file included from header1.h:3,
+        //                    from main.c:1:
+        // The first entry uses "In file included from", subsequent entries use
+        // "from" with indentation to align with the first entry.
+        for (i, origin) in chain.iter().enumerate() {
+            let is_last = i == chain.len() - 1;
+            let suffix = if is_last { ":" } else { "," };
+            if i == 0 {
+                if self.use_color {
+                    eprintln!("\x1b[1mIn file included from {}:{}{}\x1b[0m",
+                        origin.file, origin.line, suffix);
+                } else {
+                    eprintln!("In file included from {}:{}{}",
+                        origin.file, origin.line, suffix);
+                }
+            } else {
+                // "                 from " aligns with "In file included from "
+                if self.use_color {
+                    eprintln!("\x1b[1m                 from {}:{}{}\x1b[0m",
+                        origin.file, origin.line, suffix);
+                } else {
+                    eprintln!("                 from {}:{}{}",
+                        origin.file, origin.line, suffix);
+                }
+            }
+        }
+
+        self.last_include_trace_file = Some(loc.file.clone());
+    }
+
     /// Render a single diagnostic to stderr, including location, severity,
     /// message, source snippet with caret, fix-it hints, and any follow-up notes.
     ///
@@ -615,7 +698,10 @@ impl DiagnosticEngine {
     /// - Source snippet: no special color
     /// - Caret/underline: bold green
     /// - Fix-it hints: bold green
-    fn render_diagnostic(&self, diag: &Diagnostic) {
+    fn render_diagnostic(&mut self, diag: &Diagnostic) {
+        // Emit "In file included from" traces for errors in included files
+        self.render_include_trace(diag);
+
         use std::fmt::Write;
         let mut msg = String::new();
 
