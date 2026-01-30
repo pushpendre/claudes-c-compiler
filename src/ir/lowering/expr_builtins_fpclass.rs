@@ -62,6 +62,14 @@ impl Lowerer {
         )
     }
 
+    /// Zero-extend a narrow value (I8 from Cmp, or I32 from BinOp) to I64.
+    /// On 32-bit targets (i686), I64 values occupy two 32-bit stack slots;
+    /// without this cast, loading a narrow value as I64 reads uninitialized
+    /// bytes from the upper slot, causing incorrect results in I64 arithmetic.
+    fn widen_to_i64(&mut self, val: Value) -> Value {
+        self.emit_cast_val(Operand::Value(val), IrType::I32, IrType::I64)
+    }
+
     /// Bitcast a float/double to its integer bit representation via memory.
     /// F32 -> I32, F64 -> I64. Uses alloca+store+load for a true bitcast.
     /// Note: F128 classification builtins use libc calls instead of this path.
@@ -135,13 +143,17 @@ impl Lowerer {
             // So: libc_0->class_vals[0], libc_1->class_vals[1], libc_2->class_vals[4],
             //     libc_3->class_vals[3], libc_4->class_vals[2]
             let libc_to_user = [0usize, 1, 4, 3, 2]; // libc class index -> user class_vals index
+            // Comparison results (I8) must be widened to I64 before I64 multiply,
+            // because on 32-bit targets I64 occupies two stack slots and loading
+            // a narrow value as I64 reads uninitialized upper bytes.
             let is_class: Vec<Value> = (0..5).map(|libc_cls| {
-                self.emit_cmp_val(
+                let cmp = self.emit_cmp_val(
                     IrCmpOp::Eq,
                     Operand::Value(cls),
                     Operand::Const(IrConst::I32(libc_cls)),
                     IrType::I32,
-                )
+                );
+                self.widen_to_i64(cmp)
             }).collect();
 
             let mut result = self.emit_binop_val(
@@ -192,9 +204,10 @@ impl Lowerer {
         let is_normal = self.emit_binop_val(IrBinOp::Xor, Operand::Value(special), Operand::Const(IrConst::I64(1)), IrType::I32);
 
         // Order: nan=0, inf=1, normal=2, subnormal=3, zero=4
+        // Widen I32 flags to I64 before multiply on 32-bit targets.
         let class_flags = [is_nan, is_inf, is_normal, is_subnorm, is_zero];
         let contribs: Vec<_> = class_vals.iter().zip(class_flags.iter())
-            .map(|(val, &flag)| (*val, flag))
+            .map(|(val, &flag)| (*val, self.widen_to_i64(flag)))
             .collect();
         let mut result = self.emit_binop_val(IrBinOp::Mul, contribs[0].0, Operand::Value(contribs[0].1), IrType::I64);
         for &(ref val, flag) in &contribs[1..] {
@@ -307,10 +320,15 @@ impl Lowerer {
         if arg_ty == IrType::F128 {
             // __isinfl returns nonzero if inf
             let isinf_result = self.emit_f128_classify_libcall("__isinfl", arg_val);
-            let is_inf = self.classify_result_to_bool(isinf_result);
+            let is_inf_narrow = self.classify_result_to_bool(isinf_result);
             // __signbitl returns nonzero if negative
             let signbit_result = self.emit_f128_classify_libcall("__signbitl", arg_val);
-            let is_neg = self.classify_result_to_bool(signbit_result);
+            let is_neg_narrow = self.classify_result_to_bool(signbit_result);
+            // Widen comparison results (I8) to I64 before I64 arithmetic.
+            // On i686, I64 occupies two 32-bit stack slots; without widening,
+            // loading a narrow value as I64 reads garbage in the upper slot.
+            let is_inf = self.widen_to_i64(is_inf_narrow);
+            let is_neg = self.widen_to_i64(is_neg_narrow);
             // direction = 1 - 2*is_neg -> +1 if positive, -1 if negative
             let neg_x2 = self.emit_binop_val(IrBinOp::Mul, Operand::Value(is_neg), Operand::Const(IrConst::I64(2)), IrType::I64);
             let direction = self.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(neg_x2), IrType::I64);
@@ -321,7 +339,14 @@ impl Lowerer {
         let masks = Self::fp_masks(arg_ty);
         let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
         let abs_val = self.fp_abs_bits(&bits, int_ty, masks.0);
-        let is_inf = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(masks.1)), int_ty);
+        let is_inf_narrow = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(masks.1)), int_ty);
+        // Widen is_inf from I8 (Cmp result) to I64 before I64 multiply.
+        // On i686, I64 values use two 32-bit stack slots (eax:edx pair);
+        // a narrow Cmp result only writes the low slot, leaving the upper
+        // slot uninitialized. The I64 multiply then reads garbage from
+        // the upper slot, producing wrong results (e.g. isinf appearing
+        // to return non-zero for finite values like 1.23).
+        let is_inf = self.widen_to_i64(is_inf_narrow);
         let sign_shifted = self.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
         let sign_bit = self.emit_binop_val(IrBinOp::And, Operand::Value(sign_shifted), Operand::Const(IrConst::I64(1)), int_ty);
         let sign_x2 = self.emit_binop_val(IrBinOp::Mul, Operand::Value(sign_bit), Operand::Const(IrConst::I64(2)), IrType::I64);
