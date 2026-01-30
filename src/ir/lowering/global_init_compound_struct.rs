@@ -96,9 +96,14 @@ impl Lowerer {
                 let is_char_array = matches!(elem_ty.as_ref(), CType::Char | CType::UChar);
                 let skip_flat = is_string_literal && is_char_array;
                 if matches!(&item.init, Initializer::Expr(_)) && !skip_flat {
-                    // Flat init: consume up to arr_size items for this array field
+                    // Flat init: consume the right number of items for this array field.
+                    // For arrays of scalars/pointers, each element is 1 item.
+                    // For arrays of structs, each element needs multiple items
+                    // (one per scalar leaf field in the struct).
+                    let scalars_per_elem = h::count_flat_init_scalars(elem_ty, &*self.types.borrow_struct_layouts());
+                    let total_scalars = *arr_size * scalars_per_elem;
                     let mut consumed = 0;
-                    while consumed < *arr_size && (item_idx + consumed) < items.len() {
+                    while consumed < total_scalars && (item_idx + consumed) < items.len() {
                         let cur_item = &items[item_idx + consumed];
                         // Stop if we hit a designator targeting a different field
                         if !cur_item.designators.is_empty() && consumed > 0 {

@@ -155,13 +155,19 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
 /// Maps values produced by `GlobalAddr { name }` to `"name"`, and values
 /// produced by `GEP(GlobalAddr { name }, const_offset)` to `"name+offset"`.
 /// Used to emit direct symbol(%rip) references for segment-overridden loads/stores.
-fn build_global_addr_map(func: &IrFunction) -> FxHashMap<u32, String> {
+/// TLS symbols are excluded because they require special access patterns
+/// (%fs:/@TPOFF on x86-64, %gs:/@NTPOFF on i686, etc.) and must not be
+/// folded into plain RIP-relative accesses.
+fn build_global_addr_map(func: &IrFunction, tls_symbols: &FxHashSet<String>) -> FxHashMap<u32, String> {
     let mut map: FxHashMap<u32, String> = FxHashMap::default();
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
                 Instruction::GlobalAddr { dest, name } => {
-                    map.insert(dest.0, name.clone());
+                    // Skip TLS symbols - they must go through emit_tls_global_addr
+                    if !tls_symbols.contains(name.as_str()) {
+                        map.insert(dest.0, name.clone());
+                    }
                 }
                 Instruction::GetElementPtr { dest, base, offset: Operand::Const(c), .. } => {
                     if let Some(base_name) = map.get(&base.0) {
@@ -891,7 +897,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
 
     // Pre-scan: map Value IDs to global symbol names (with offsets from GEP).
     // Used to emit direct symbol(%rip) references for segment-overridden loads/stores.
-    let global_addr_map = build_global_addr_map(func);
+    let global_addr_map = build_global_addr_map(func, &cg.state_ref().tls_symbols);
 
     // Pre-scan: identify GlobalAddr values used as Load/Store pointers.
     // In kernel code model, non-pointer GlobalAddr values use absolute addressing

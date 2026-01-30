@@ -148,6 +148,43 @@ pub(super) fn type_has_pointer_elements(ty: &CType, ctx: &dyn StructLayoutProvid
     }
 }
 
+/// Count the number of flat scalar initializer values needed to fully initialize
+/// one instance of the given type. For scalars and pointers, this is 1. For arrays,
+/// it's the array size times the count per element. For structs/unions, it's the
+/// sum of counts across all fields (union: max of any field, but for flat init we
+/// use the first/largest).
+///
+/// This is used to determine how many flat init items to consume when filling an
+/// array-of-structs field without braces.
+pub(super) fn count_flat_init_scalars(ty: &CType, ctx: &dyn StructLayoutProvider) -> usize {
+    match ty {
+        CType::Array(inner, Some(size)) => {
+            size * count_flat_init_scalars(inner, ctx)
+        }
+        CType::Struct(key) | CType::Union(key) => {
+            if let Some(layout) = ctx.get_struct_layout(key) {
+                if layout.is_union {
+                    // For unions, flat init fills the first field
+                    if let Some(first) = layout.fields.first() {
+                        count_flat_init_scalars(&first.ty, ctx)
+                    } else {
+                        1
+                    }
+                } else {
+                    layout.fields.iter()
+                        .filter(|f| f.bit_width != Some(0)) // skip zero-width bitfields
+                        .map(|f| count_flat_init_scalars(&f.ty, ctx))
+                        .sum::<usize>()
+                        .max(1) // at least 1 for empty structs
+                }
+            } else {
+                1
+            }
+        }
+        _ => 1, // scalar, pointer, enum, etc.
+    }
+}
+
 /// Append `count` zero bytes as `GlobalInit::Scalar(IrConst::I8(0))` to `elements`.
 /// Used throughout global initialization for padding and zero-fill.
 pub(super) fn push_zero_bytes(elements: &mut Vec<crate::ir::ir::GlobalInit>, count: usize) {

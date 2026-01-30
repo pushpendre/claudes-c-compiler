@@ -193,6 +193,8 @@ impl Lowerer {
 
     /// Emit a flat array init for a field that has multiple items (flat init style).
     /// E.g., struct { char *s[2]; } x = { "abc", "def" };
+    /// Also handles arrays of structs with pointer fields, where each struct element
+    /// consumes multiple flat init items.
     pub(super) fn emit_compound_flat_array_init(
         &mut self,
         elements: &mut Vec<GlobalInit>,
@@ -214,8 +216,38 @@ impl Lowerer {
             }
         };
 
-        let elem_is_pointer = h::type_has_pointer_elements(elem_ty, &*self.types.borrow_struct_layouts());
         let elem_size = self.resolve_ctype_size(elem_ty);
+
+        // Check if the element type is a struct/union - if so, each element
+        // consumes multiple flat init items (one per scalar leaf field).
+        let elem_is_struct = matches!(elem_ty, CType::Struct(_) | CType::Union(_));
+        if elem_is_struct {
+            if let Some(elem_layout) = self.get_struct_layout_for_ctype(elem_ty) {
+                let scalars_per_elem = h::count_flat_init_scalars(elem_ty, &*self.types.borrow_struct_layouts());
+                let mut item_pos = 0usize;
+                let mut ai = 0usize;
+                while ai < arr_size {
+                    if item_pos >= inits.len() {
+                        // Remaining elements are zero-initialized
+                        push_zero_bytes(elements, elem_size * (arr_size - ai));
+                        break;
+                    }
+                    // Collect scalars_per_elem items for this struct element,
+                    // converting them to a flat InitializerItem list for the sub-struct.
+                    let chunk_end = (item_pos + scalars_per_elem).min(inits.len());
+                    let chunk: Vec<InitializerItem> = inits[item_pos..chunk_end]
+                        .iter()
+                        .map(|item| (*item).clone())
+                        .collect();
+                    self.emit_sub_struct_to_compound(elements, &chunk, &elem_layout, elem_size);
+                    item_pos += scalars_per_elem;
+                    ai += 1;
+                }
+                return;
+            }
+        }
+
+        let elem_is_pointer = h::type_has_pointer_elements(elem_ty, &*self.types.borrow_struct_layouts());
         let ptr_size = crate::common::types::target_ptr_size();
 
         let mut ai = 0usize;

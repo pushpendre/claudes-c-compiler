@@ -1,0 +1,21 @@
+Task: Fix i686 sub-int type stack slot loads (movl vs movsbl/movzbl)
+Status: in_progress
+Started: 2026-01-30
+
+Problem:
+When the i686 codegen stores a sub-int type variable (signed char, unsigned char, short, etc.)
+to a stack slot using movb/movw and then loads it back, it uses movl (4-byte load) instead of
+movsbl/movzbl/movswl/movzwl. This reads garbage bytes from adjacent stack slots.
+
+Example: `float g(signed char x) { float k = 0; for(l=0;l<1;l++) k=k+x; return k; }`
+generates:
+  movb %al, -12(%ebp)     ; stores 1 byte
+  movl -12(%ebp), %eax    ; loads 4 bytes - BUG! reads 3 garbage bytes
+  cvtsi2ssl %eax, %xmm0   ; converts corrupted value to float
+
+Should be:
+  movb %al, -12(%ebp)
+  movsbl -12(%ebp), %eax   ; sign-extending byte load
+  cvtsi2ssl %eax, %xmm0
+
+This affects many tests involving sub-int types with loops/floats on i686.
