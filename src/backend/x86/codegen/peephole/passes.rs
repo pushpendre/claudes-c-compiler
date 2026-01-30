@@ -1019,239 +1019,331 @@ fn replace_reg_family_in_source(line: &str, old_id: RegId, new_id: RegId) -> Str
 
 // ── Register copy propagation ─────────────────────────────────────────────────
 //
-// Propagates register-to-register copies into subsequent instructions to
-// eliminate intermediate moves. The accumulator-based codegen often produces
-// patterns like:
+// Propagates register-to-register copies across entire basic blocks to
+// eliminate intermediate moves. The accumulator-based codegen routes many
+// operations through %rax as an intermediary, producing chains like:
 //
 //   movq %rax, %rcx             # copy rax -> rcx
-//   addq %rcx, %rdx             # uses rcx as source
+//   movq %rcx, %rdx             # copy rcx -> rdx (really rax -> rdx)
+//   addq %rcx, %r8              # uses rcx (really rax)
 //
 // After propagation, this becomes:
 //
-//   movq %rax, %rcx             # now potentially dead
-//   addq %rax, %rdx             # uses rax directly
+//   movq %rax, %rcx             # potentially dead
+//   movq %rax, %rdx             # uses rax directly
+//   addq %rax, %r8              # uses rax directly
 //
-// The dead movq is then cleaned up by dead store elimination or subsequent
-// passes. Works for both memory base replacements (e.g., `(%rcx)` → `(%rax)`)
-// and direct register operand replacements (e.g., `%rcx` → `%rax`).
+// The dead movq instructions are cleaned up by subsequent passes.
+//
+// Algorithm: Scan each basic block maintaining a map of active copies
+// (copy_src[dst] = src). For each instruction:
+//   1. If it's a movq %src, %dst: add copy_src[dst] = src to the map
+//   2. For any instruction, replace read-uses of copied registers
+//   3. Invalidate copies when src or dst registers are overwritten
+//   4. Clear all copies at basic block boundaries
 //
 // Safety:
 //   - Only handles 64-bit GP reg-to-reg moves (movq %src, %dst)
-//   - Only propagates into the very next non-NOP instruction
-//   - Skips rsp/rbp registers
-//   - Skips if source register is the destination of the next instruction AND
-//     source appears as a read operand (would change value read)
-//   - Skips instructions with complex addressing modes using dst
+//   - Skips rsp/rbp registers (families 4/5)
+//   - Skips instructions with implicit register usage (div, mul, shifts with %cl)
+//   - Follows transitive chains: if copy_src[A]=B and copy_src[B]=C, resolves A->C
+
+/// Check if an instruction has implicit register usage that makes register
+/// substitution unsafe (div/idiv/mul use rax/rdx, shifts use cl, etc.).
+fn has_implicit_reg_usage(trimmed: &str) -> bool {
+    let nb = trimmed.as_bytes();
+    if nb.len() < 3 {
+        return false;
+    }
+    (nb[0] == b'd' && nb[1] == b'i' && nb[2] == b'v') || // div, divl, divq
+    (nb[0] == b'i' && nb[1] == b'd' && nb[2] == b'i') || // idiv
+    (nb[0] == b'm' && nb[1] == b'u' && nb[2] == b'l') || // mul, mulq
+    trimmed.starts_with("cqto") || trimmed.starts_with("cdq") ||
+    trimmed.starts_with("cqo") || trimmed.starts_with("cwd") ||
+    trimmed.starts_with("rep ") || trimmed.starts_with("repne ") ||
+    trimmed.starts_with("cpuid") || trimmed.starts_with("syscall") ||
+    trimmed.starts_with("rdtsc") || trimmed.starts_with("rdmsr") ||
+    trimmed.starts_with("wrmsr") ||
+    trimmed.starts_with("xchg") || trimmed.starts_with("cmpxchg") ||
+    trimmed.starts_with("lock ")
+}
+
+/// Check if an instruction is a shift/rotate that implicitly uses %cl.
+fn is_shift_or_rotate(trimmed: &str) -> bool {
+    let nb = trimmed.as_bytes();
+    nb.len() >= 3 && (
+        (nb[0] == b's' && (nb[1] == b'h' || nb[1] == b'a')) || // shl, shr, sal, sar
+        (nb[0] == b'r' && (nb[1] == b'o' || nb[1] == b'c'))    // rol, ror, rcl, rcr
+    )
+}
+
+/// Parse a movq %src, %dst instruction. Returns (src_family, dst_family) if valid.
+fn parse_reg_to_reg_movq(info: &LineInfo, trimmed: &str) -> Option<(RegId, RegId)> {
+    if let LineKind::Other { dest_reg } = info.kind {
+        if dest_reg == REG_NONE || dest_reg > REG_GP_MAX {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix("movq ") {
+            if let Some((src_part, dst_part)) = rest.split_once(',') {
+                let src = src_part.trim();
+                let dst = dst_part.trim();
+                if !src.starts_with("%r") || !dst.starts_with("%r") {
+                    return None;
+                }
+                let sfam = register_family_fast(src);
+                let dfam = register_family_fast(dst);
+                if sfam == REG_NONE || sfam > REG_GP_MAX || sfam == 4 || sfam == 5
+                    || dfam == REG_NONE || dfam > REG_GP_MAX || dfam == 4 || dfam == 5
+                    || sfam == dfam
+                {
+                    return None;
+                }
+                return Some((sfam, dfam));
+            }
+        }
+    }
+    None
+}
+
+/// Get the destination register of an instruction (the register it writes to).
+fn get_dest_reg(info: &LineInfo) -> RegId {
+    match info.kind {
+        LineKind::Other { dest_reg } => dest_reg,
+        LineKind::StoreRbp { .. } => REG_NONE, // stores don't write to a register
+        LineKind::LoadRbp { reg, .. } => reg,
+        LineKind::SetCC { reg } => reg,
+        LineKind::Pop { reg } => reg,
+        LineKind::Cmp => REG_NONE,
+        LineKind::Push { .. } => REG_NONE,
+        _ => REG_NONE,
+    }
+}
+
+/// Try to replace uses of `dst_id` with `src_id` in instruction at index `j`.
+/// Returns true if a replacement was made.
+fn try_propagate_into(
+    store: &mut LineStore,
+    infos: &mut [LineInfo],
+    j: usize,
+    src_id: RegId,
+    dst_id: RegId,
+) -> bool {
+    let trimmed = infos[j].trimmed(store.get(j));
+
+    // The instruction must reference the destination register
+    if infos[j].reg_refs & (1u16 << dst_id) == 0 {
+        return false;
+    }
+
+    // Skip instructions with implicit register usage
+    if has_implicit_reg_usage(trimmed) {
+        return false;
+    }
+
+    // Skip shift/rotate when propagating into %rcx (they need %cl)
+    if dst_id == 1 && is_shift_or_rotate(trimmed) {
+        return false;
+    }
+
+    let next_dest = get_dest_reg(&infos[j]);
+
+    let src_name = REG_NAMES[0][src_id as usize];
+    let dst_name = REG_NAMES[0][dst_id as usize];
+
+    // Case 1: next instruction writes to src_id
+    if next_dest == src_id {
+        // Source register is being written by this instruction.
+        // Only safe if dst appears ONLY in a memory base position like (%dst),
+        // which is read before the destination write.
+        let dst_paren = format!("({})", dst_name);
+        if !trimmed.contains(dst_paren.as_str()) {
+            return false;
+        }
+        // Also check src doesn't appear directly as a source operand in addition
+        // to being the destination.
+        let src_paren = format!("({})", src_name);
+        let src_direct_count = trimmed.matches(src_name).count();
+        let src_paren_count = trimmed.matches(src_paren.as_str()).count();
+        let is_dest_only = if let Some((_before, after_comma)) = trimmed.rsplit_once(',') {
+            after_comma.trim() == src_name
+        } else {
+            false
+        };
+        let src_as_source = src_direct_count - src_paren_count - if is_dest_only { 1 } else { 0 };
+        if src_as_source > 0 {
+            return false;
+        }
+        let new_text = format!("    {}", replace_reg_family(trimmed, dst_id, src_id));
+        replace_line(store, &mut infos[j], j, new_text);
+        return true;
+    }
+
+    // Case 2: dst is not the destination - replace all occurrences
+    if next_dest != dst_id {
+        let new_content = replace_reg_family(trimmed, dst_id, src_id);
+        if new_content != trimmed {
+            let new_text = format!("    {}", new_content);
+            replace_line(store, &mut infos[j], j, new_text);
+            return true;
+        }
+        return false;
+    }
+
+    // Case 3: dst is the destination AND a source (e.g., addq %rcx, %rcx)
+    // For single-operand read-modify-write instructions (negq, notq, incq, decq),
+    // the single operand is both source and destination. Don't replace.
+    if !trimmed.contains(',') {
+        return false;
+    }
+    // Only replace the source-position occurrences.
+    let new_content = replace_reg_family_in_source(trimmed, dst_id, src_id);
+    if new_content != trimmed {
+        let new_text = format!("    {}", new_content);
+        replace_line(store, &mut infos[j], j, new_text);
+        return true;
+    }
+    false
+}
 
 fn propagate_register_copies(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
     let len = store.len();
 
+    // copy_src[dst] = src means "dst currently holds the same value as src"
+    // REG_NONE means no active copy for this register.
+    // We use a fixed-size array indexed by register family (0..=15).
+    let mut copy_src: [RegId; 16] = [REG_NONE; 16];
+
     let mut i = 0;
-    while i + 1 < len {
-        if infos[i].is_nop() || infos[i].is_barrier() {
+    while i < len {
+        // At basic block boundaries, clear all copies
+        if infos[i].is_barrier() {
+            copy_src = [REG_NONE; 16];
             i += 1;
             continue;
         }
 
-        // Parse register-to-register movq %src, %dst
-        let src_id;
-        let dst_id;
+        if infos[i].is_nop() {
+            i += 1;
+            continue;
+        }
 
-        if let LineKind::Other { dest_reg } = infos[i].kind {
-            if dest_reg == REG_NONE || dest_reg > REG_GP_MAX {
-                i += 1;
-                continue;
-            }
-            let trimmed = infos[i].trimmed(store.get(i));
-            if let Some(rest) = trimmed.strip_prefix("movq ") {
-                if let Some((src_part, dst_part)) = rest.split_once(',') {
-                    let src = src_part.trim();
-                    let dst = dst_part.trim();
-                    let sfam = register_family_fast(src);
-                    let dfam = register_family_fast(dst);
-                    if sfam == REG_NONE || sfam > REG_GP_MAX || sfam == 4 || sfam == 5
-                        || dfam == REG_NONE || dfam > REG_GP_MAX || dfam == 4 || dfam == 5
-                        || sfam == dfam
-                    {
-                        i += 1;
-                        continue;
-                    }
-                    if !src.starts_with("%r") || !dst.starts_with("%r") {
-                        i += 1;
-                        continue;
-                    }
-                    src_id = sfam;
-                    dst_id = dfam;
-                } else {
-                    i += 1;
-                    continue;
-                }
+        // Check if this is a reg-to-reg movq that defines a new copy
+        let trimmed = infos[i].trimmed(store.get(i));
+        if let Some((src_id, dst_id)) = parse_reg_to_reg_movq(&infos[i], trimmed) {
+            // Resolve transitive copies: if src itself is a copy of something,
+            // use the ultimate source. This handles chains like:
+            //   movq %rax, %rcx   -> copy_src[rcx] = rax
+            //   movq %rcx, %rdx   -> copy_src[rdx] = rax (not rcx)
+            let ultimate_src = if copy_src[src_id as usize] != REG_NONE {
+                copy_src[src_id as usize]
             } else {
-                i += 1;
-                continue;
-            }
-        } else {
-            i += 1;
-            continue;
-        }
-
-        let src_name = REG_NAMES[0][src_id as usize];
-        let dst_name = REG_NAMES[0][dst_id as usize];
-
-        // Find the next non-NOP instruction
-        let mut j = i + 1;
-        while j < len && infos[j].is_nop() {
-            j += 1;
-        }
-        if j >= len || infos[j].is_barrier() {
-            i += 1;
-            continue;
-        }
-
-        // The next instruction must reference the destination register
-        if infos[j].reg_refs & (1u16 << dst_id) == 0 {
-            i += 1;
-            continue;
-        }
-
-        // Get the next instruction's destination register
-        let next_dest = match infos[j].kind {
-            LineKind::Other { dest_reg } => dest_reg,
-            LineKind::StoreRbp { reg, .. } => {
-                // Store to stack: the register is a source, not a destination.
-                // We can propagate into the register being stored.
-                // StoreRbp doesn't have a register destination.
-                // But we need to check if dst is the register being stored
-                // (it's a read, so replacement is safe).
-                // Treat as no register destination.
-                let _ = reg;
-                REG_NONE
-            }
-            LineKind::LoadRbp { reg, .. } => reg,
-            LineKind::SetCC { reg } => reg,
-            LineKind::Pop { reg } => reg,
-            LineKind::Cmp => REG_NONE, // cmp/test don't write to a register
-            LineKind::Push { .. } => REG_NONE, // push reads its operand
-            _ => { i += 1; continue; }
-        };
-
-        let next_line = infos[j].trimmed(store.get(j));
-
-        // Safety: x86 shift/rotate instructions require %cl as the shift count.
-        // Don't propagate when dst is %rcx (family 1) and the next instruction
-        // is a shift or rotate (shl, shr, sar, sal, rol, ror, rcl, rcr).
-        // Also skip for div/idiv/mul which use specific registers (rax, rdx).
-        if dst_id == 1 {
-            let nb = next_line.as_bytes();
-            if nb.len() >= 3 && (
-                (nb[0] == b's' && (nb[1] == b'h' || nb[1] == b'a')) || // shl, shr, sal, sar
-                (nb[0] == b'r' && (nb[1] == b'o' || nb[1] == b'c'))    // rol, ror, rcl, rcr
-            ) {
-                i += 1;
-                continue;
-            }
-        }
-        // Similarly, don't propagate into div/idiv/mul/cqto which have implicit
-        // register usage (rax, rdx, rcx).
-        {
-            let nb = next_line.as_bytes();
-            if nb.len() >= 3 && (
-                (nb[0] == b'd' && nb[1] == b'i' && nb[2] == b'v') || // div, divl, divq
-                (nb[0] == b'i' && nb[1] == b'd' && nb[2] == b'i') || // idiv
-                (nb[0] == b'm' && nb[1] == b'u' && nb[2] == b'l') || // mul, mulq
-                next_line.starts_with("cqto") || next_line.starts_with("cdq") ||
-                next_line.starts_with("cqo") || next_line.starts_with("cwd") ||
-                next_line.starts_with("rep ") || next_line.starts_with("repne ") ||
-                next_line.starts_with("cpuid") || next_line.starts_with("syscall") ||
-                next_line.starts_with("rdtsc") || next_line.starts_with("rdmsr") ||
-                next_line.starts_with("wrmsr") ||
-                next_line.starts_with("xchg") || next_line.starts_with("cmpxchg") ||
-                next_line.starts_with("lock ")
-            ) {
-                i += 1;
-                continue;
-            }
-        }
-
-        // Safety check: if the next instruction writes to the source register,
-        // we can only propagate safely if dst is used ONLY as a read source
-        // (the read happens before the write in x86). But if src is also read
-        // directly, replacing dst with src changes the value read when they
-        // differ. Example problem: addq %rcx, %rax where src=rax, dst=rcx:
-        // replacing %rcx with %rax changes the addition operand.
-        // Skip if the source register is written AND also appears in source operands.
-        if next_dest == src_id {
-            // Source register is being written by next instruction.
-            // Only safe if dst appears ONLY in a memory base position like (%dst),
-            // which is read before the destination write.
-            let dst_paren = format!("({})", dst_name);
-            if !next_line.contains(dst_paren.as_str()) {
-                i += 1;
-                continue;
-            }
-            // Also check src doesn't appear directly as a source operand in addition
-            // to being the destination.
-            let src_paren = format!("({})", src_name);
-            let src_direct_count = next_line.matches(src_name).count();
-            let src_paren_count = next_line.matches(src_paren.as_str()).count();
-            // Count how many times src appears as the destination (last operand)
-            let is_dest_only = if let Some((_before, after_comma)) = next_line.rsplit_once(',') {
-                after_comma.trim() == src_name
-            } else {
-                false
+                src_id
             };
-            let src_as_source = src_direct_count - src_paren_count - if is_dest_only { 1 } else { 0 };
-            if src_as_source > 0 {
-                // src is used as both source and destination - not safe to fold
+
+            // If the source register has an active copy, rewrite the movq to
+            // use the ultimate source directly. For example:
+            //   movq %rax, %r14   ; copy_src[rax] = NONE, so r14 = rax
+            //   movq %r14, %rax   ; copy_src[r14] = rax, rewrite to: movq %rax, %rax (self-move!)
+            //   movq %rax, %rdi   ; copy_src[rax] = r14, rewrite to: movq %r14, %rdi
+            if ultimate_src != src_id && ultimate_src != dst_id {
+                // Rewrite movq %src, %dst -> movq %ultimate_src, %dst
+                let new_src_name = REG_NAMES[0][ultimate_src as usize];
+                let dst_name = REG_NAMES[0][dst_id as usize];
+                let new_text = format!("    movq {}, {}", new_src_name, dst_name);
+                replace_line(store, &mut infos[i], i, new_text);
+                changed = true;
+            } else if ultimate_src == dst_id {
+                // This movq copies a register to itself via an intermediate.
+                // E.g., movq %rax, %rcx; movq %rcx, %rax -> the second is movq %rax, %rax (self-move).
+                // Mark as NOP - it will be cleaned up.
+                mark_nop(&mut infos[i]);
+                changed = true;
                 i += 1;
                 continue;
             }
-            // Safe: dst is only in memory base, and src is only the dest
-            let new_text = format!("    {}",
-                replace_reg_family(next_line, dst_id, src_id));
-            replace_line(store, &mut infos[j], j, new_text);
-            changed = true;
+
+            // Before recording: invalidate any copies that have dst as their source.
+            // Writing to dst invalidates "X is a copy of dst".
+            for k in 0..16u8 {
+                if copy_src[k as usize] == dst_id {
+                    copy_src[k as usize] = REG_NONE;
+                }
+            }
+
+            // Record the copy
+            copy_src[dst_id as usize] = ultimate_src;
+
             i += 1;
             continue;
         }
 
-        // Source register is NOT modified by next instruction.
-        // We can safely replace all read-uses of dst_name with src_name.
-        // But be careful: dst might appear as the DESTINATION of the next
-        // instruction (in which case we shouldn't replace that occurrence).
-        //
-        // Strategy: replace dst with src everywhere EXCEPT in the destination
-        // position (after the last comma for two-operand instructions).
+        // Not a copy instruction. Try to propagate active copies into this instruction.
+        // First, determine which registers this instruction writes to (kills).
+        let dest_reg = get_dest_reg(&infos[i]);
 
-        // Check: if dst is not the destination of the next instruction,
-        // replace all occurrences.
-        if next_dest != dst_id {
-            // dst is purely a source operand in the next instruction.
-            // Replace all register-family occurrences of dst with src.
-            let new_content = replace_reg_family(next_line, dst_id, src_id);
-            if new_content != next_line {
-                let new_text = format!("    {}", new_content);
-                replace_line(store, &mut infos[j], j, new_text);
-                changed = true;
-            }
-        } else {
-            // dst is the destination of the next instruction AND a source.
-            // For single-operand read-modify-write instructions (negq, notq,
-            // incq, decq, etc.), the single operand is both source and
-            // destination. Replacing it would change which register is
-            // modified, which is incorrect. Detect these by checking for
-            // the absence of a comma in the instruction.
-            if !next_line.contains(',') {
-                i += 1;
+        // Try to propagate each active copy into this instruction.
+        // We process one copy at a time to avoid conflicts from multiple replacements.
+        // Iterate through active copies and try to apply them.
+        let mut did_propagate = false;
+        for reg in 0..16u8 {
+            let src = copy_src[reg as usize];
+            if src == REG_NONE {
                 continue;
             }
-            // Only replace the source-position occurrences.
-            let new_content = replace_reg_family_in_source(next_line, dst_id, src_id);
-            if new_content != next_line {
-                let new_text = format!("    {}", new_content);
-                replace_line(store, &mut infos[j], j, new_text);
+            // Check if this instruction references the copied register
+            if infos[i].reg_refs & (1u16 << reg) == 0 {
+                continue;
+            }
+            // Skip if instruction has implicit register usage
+            let cur_trimmed = infos[i].trimmed(store.get(i));
+            if has_implicit_reg_usage(cur_trimmed) {
+                break; // Don't propagate any copy into this instruction
+            }
+
+            // Try to propagate: replace reg with src
+            if try_propagate_into(store, infos, i, src, reg) {
                 changed = true;
+                did_propagate = true;
+                // After replacement, the line text changed - re-read for subsequent copies.
+                // Only do one replacement per instruction to keep things safe.
+                break;
+            }
+        }
+
+        // If we propagated, re-process this instruction (it may have new opportunities
+        // or different register references now). But limit to avoid infinite loops.
+        if did_propagate {
+            // Don't increment i - re-process this line for additional copy propagations
+            // But we need a limit to prevent infinite loops
+            // Actually, let's just continue; the next iteration of the outer loop
+            // (phase 1/3 re-run) will catch cascaded opportunities.
+            // Fall through to invalidation logic below.
+        }
+
+        // Invalidate copies affected by this instruction's writes.
+        // If this instruction writes to register `dest_reg`, then:
+        //   1. copy_src[dest_reg] is no longer valid (dest_reg got a new value)
+        //   2. Any copy whose source is dest_reg is invalidated
+        if dest_reg != REG_NONE && dest_reg <= REG_GP_MAX {
+            copy_src[dest_reg as usize] = REG_NONE;
+            for k in 0..16u8 {
+                if copy_src[k as usize] == dest_reg {
+                    copy_src[k as usize] = REG_NONE;
+                }
+            }
+        }
+
+        // Instructions with implicit register usage (xchg, cmpxchg, lock prefix,
+        // div/idiv, mul, etc.) may modify registers not captured by dest_reg.
+        // For example, xchgl %eax, (%rcx) writes to %eax but parse_dest_reg_fast
+        // sees (%rcx) as the last operand and returns REG_NONE. Similarly, div/idiv
+        // write both rax and rdx. Conservatively invalidate all register copies
+        // when we encounter such instructions.
+        {
+            let cur_trimmed = infos[i].trimmed(store.get(i));
+            if has_implicit_reg_usage(cur_trimmed) {
+                copy_src = [REG_NONE; 16];
             }
         }
 
