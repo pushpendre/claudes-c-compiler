@@ -162,6 +162,13 @@ pub struct Driver {
     /// Color mode for diagnostic output, controlled by -fdiagnostics-color={auto,always,never}.
     /// Defaults to Auto (colorize when stderr is a terminal).
     color_mode: ColorMode,
+    /// Whether to use COMMON linkage for tentative definitions (-fcommon).
+    /// When true, uninitialized global variables (tentative definitions) are emitted
+    /// as COMMON symbols, allowing multiple TUs to define the same global without
+    /// linker "multiple definition" errors. GCC defaulted to -fcommon before GCC 10.
+    /// When false (-fno-common, the default), tentative definitions go to BSS with
+    /// strong linkage, and duplicate definitions cause link errors.
+    fcommon: bool,
 }
 
 impl Driver {
@@ -210,6 +217,7 @@ impl Driver {
             gnu89_inline: false,
             dump_defines: false,
             color_mode: ColorMode::Auto,
+            fcommon: false,
         }
     }
 
@@ -520,6 +528,8 @@ impl Driver {
                 "-fno-function-sections" => self.function_sections = false,
                 "-fdata-sections" => self.data_sections = true,
                 "-fno-data-sections" => self.data_sections = false,
+                "-fcommon" => self.fcommon = true,
+                "-fno-common" => self.fcommon = false,
                 "-fgnu89-inline" => self.gnu89_inline = true,
                 "-fno-gnu89-inline" => self.gnu89_inline = false,
                 // Diagnostic color: -fdiagnostics-color, -fdiagnostics-color={auto,always,never}
@@ -1427,6 +1437,21 @@ impl Driver {
         // during lowering/codegen for the case where new_name is external.
         for (old_name, new_name) in &preprocessor.redefine_extname_pragmas {
             module.aliases.push((old_name.clone(), new_name.clone(), false));
+        }
+
+        // Apply -fcommon: mark tentative definitions as COMMON symbols.
+        // A tentative definition is a global variable at file scope with no initializer
+        // and no extern/static storage class. With -fcommon, these use COMMON linkage
+        // so the linker merges duplicates across TUs instead of reporting errors.
+        if self.fcommon {
+            for global in &mut module.globals {
+                if !global.is_common && !global.is_extern && !global.is_static
+                    && !global.is_thread_local
+                    && matches!(global.init, crate::ir::module::GlobalInit::Zero)
+                {
+                    global.is_common = true;
+                }
+            }
         }
 
         if time_phases { eprintln!("[TIME] lowering: {:.3}s ({} functions)", t4.elapsed().as_secs_f64(), module.functions.len()); }
