@@ -1,0 +1,27 @@
+Task: Fix jemalloc build: -M/-MM dependency generation and ternary struct member access
+Status: in_progress
+Started: 2026-01-30
+
+Problem 1 - Missing -M/-MM dependency-only mode (cli.rs, driver.rs):
+jemalloc's build system runs `CC -MM -MF dep.d -MT target.o source.c` to generate
+Make-compatible dependency files. Our compiler treated -M/-MM as no-ops, causing
+full compilation instead of dependency output, which produced linker errors for
+.sym.o test binaries.
+
+Fix: Implement -M/-MM as dependency-only preprocessing modes. Set dep_only=true and
+mode=PreprocessOnly. Store -MT target in dep_target. In run_preprocess_only, output
+"target: source\n" rule.
+
+Problem 2 - Ternary expression struct member access offset (structs.rs):
+get_pointed_struct_layout for Expr::Conditional only checked then_expr to determine
+the pointed-to struct layout. In the pattern `(ptr == NULL ? (void*)0 : ptr->field)->id`,
+the then_expr is (void*)0 which resolves to no struct layout, so the fallback returns
+field offset 0 instead of the correct offset (e.g. 16 for id after two pointer fields).
+
+Fix: Try both branches: .or_else(|| get_pointed_struct_layout(else_expr)).
+Same fix applied to GnuConditional.
+
+Testing:
+- New regression test: ternary-struct-member-access
+- jemalloc ql test: 27/27 pass (was 0/27)
+- jemalloc unit tests: 81 pass, 22 skip, 1 fail (hpa_background_thread Docker timing)
