@@ -103,7 +103,29 @@ pub fn peephole_optimize(asm: String) -> String {
         }
     }
 
-    // Phase 4: Eliminate unused callee-saved register saves/restores.
+    // Phase 4: Eliminate loop backedge trampoline blocks.
+    // SSA codegen creates "trampoline" blocks for loop back-edges to resolve phi
+    // nodes. These blocks contain only register shuffles (movq %regA, %regB) and
+    // a final jmp back to the loop header. This pass detects such trampolines and
+    // coalesces the register copies by rewriting the loop body to update registers
+    // in-place, then redirects the conditional branch directly to the loop header.
+    let trampoline_changed = eliminate_loop_trampolines(&mut store, &mut infos);
+
+    // Phase 4b: If trampoline elimination made changes, do another round of local
+    // cleanup (the coalescing may expose self-moves and dead stores).
+    if trampoline_changed {
+        let mut changed3 = true;
+        let mut pass_count3 = 0;
+        while changed3 && pass_count3 < MAX_POST_GLOBAL_ITERATIONS {
+            changed3 = false;
+            changed3 |= combined_local_pass(&store, &mut infos);
+            changed3 |= fuse_movq_ext_truncation(&mut store, &mut infos);
+            changed3 |= eliminate_dead_stores(&store, &mut infos);
+            pass_count3 += 1;
+        }
+    }
+
+    // Phase 5: Eliminate unused callee-saved register saves/restores.
     // After all optimization passes, some callee-saved registers that were
     // allocated by the register allocator may have had all their body uses
     // eliminated by earlier peephole passes. Detect these and remove the
@@ -1766,6 +1788,534 @@ fn extract_jump_target(s: &str) -> Option<&str> {
     None
 }
 
+// ── Loop trampoline elimination ──────────────────────────────────────────────
+//
+// SSA codegen creates "trampoline" blocks for loop back-edges to resolve phi
+// nodes. Instead of updating loop variables in-place, it creates new SSA values
+// in fresh registers and uses a separate block to shuffle them back:
+//
+//   .LOOP:
+//       ; ... loop body using %r9, %r10, %r11 ...
+//       movq %r9, %r14           ; copy old dest to new reg
+//       addq $320, %r14          ; modify new dest
+//       movq %r10, %r15          ; copy old frac to new reg
+//       addl %r8d, %r15d         ; modify new frac
+//       ; ... loop condition ...
+//       jne .TRAMPOLINE
+//   .TRAMPOLINE:
+//       movq %r14, %r9           ; shuffle new dest back
+//       movq %r15, %r10          ; shuffle new frac back
+//       jmp .LOOP
+//
+// This pass detects trampoline blocks and coalesces the register copies:
+//   1. For each trampoline copy %src -> %dst, find where %src was created in
+//      the predecessor (as a copy from %dst followed by modifications).
+//   2. Rewrite those modifications to target %dst directly.
+//   3. NOP the initial copy and the trampoline copy.
+//   4. Redirect the branch directly to the loop header.
+//
+// Result: the loop body modifies registers in-place, eliminating 5+ instructions
+// per iteration in typical rendering loops.
+
+fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
+    let len = store.len();
+    if len < 4 {
+        return false;
+    }
+
+    let mut changed = false;
+
+    // Build a map of label_name -> line_index for all labels.
+    // Also count how many branches target each label (to detect single-predecessor).
+    let mut label_positions: Vec<(u32, usize)> = Vec::new(); // (label_num, line_idx)
+    let mut label_branch_count: Vec<u32> = Vec::new(); // indexed by label number
+    let mut max_label_num: u32 = 0;
+
+    for i in 0..len {
+        if infos[i].is_nop() { continue; }
+        if infos[i].kind == LineKind::Label {
+            let trimmed = infos[i].trimmed(store.get(i));
+            if let Some(n) = parse_label_number(trimmed) {
+                label_positions.push((n, i));
+                if n > max_label_num { max_label_num = n; }
+            }
+        }
+    }
+
+    if label_positions.is_empty() {
+        return false;
+    }
+
+    // Build label_num -> line_index lookup
+    let mut label_line: Vec<usize> = vec![usize::MAX; (max_label_num + 1) as usize];
+    for &(num, idx) in &label_positions {
+        label_line[num as usize] = idx;
+    }
+
+    // Count branch references to each label
+    label_branch_count.resize((max_label_num + 1) as usize, 0);
+    for i in 0..len {
+        if infos[i].is_nop() { continue; }
+        match infos[i].kind {
+            LineKind::Jmp | LineKind::CondJmp => {
+                let trimmed = infos[i].trimmed(store.get(i));
+                if let Some(target) = extract_jump_target(trimmed) {
+                    if let Some(n) = parse_dotl_number(target) {
+                        if (n as usize) < label_branch_count.len() {
+                            label_branch_count[n as usize] += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Find trampoline blocks: label followed by only reg-reg movq (possibly via
+    // %rax from stack) and ending with jmp .LBB_N.
+    for &(tramp_num, tramp_label_idx) in &label_positions {
+        // Only consider trampolines targeted by exactly one branch
+        if label_branch_count[tramp_num as usize] != 1 {
+            continue;
+        }
+
+        // Parse the trampoline block contents
+        let mut tramp_moves: Vec<(RegId, RegId)> = Vec::new(); // (src_family, dst_family)
+        let mut tramp_jmp_target: Option<u32> = None;
+        let mut has_stack_load = false;
+        let mut tramp_stack_loads: Vec<(i32, RegId, usize, usize)> = Vec::new(); // (offset, dst_fam, load_idx, mov_idx)
+        let mut tramp_all_lines: Vec<usize> = Vec::new();
+
+        let mut j = tramp_label_idx + 1;
+        while j < len {
+            if infos[j].is_nop() || infos[j].kind == LineKind::Empty {
+                j += 1;
+                continue;
+            }
+            let trimmed = infos[j].trimmed(store.get(j));
+
+            // Check for movq %regA, %regB (register-to-register copy)
+            if let Some(rest) = trimmed.strip_prefix("movq %") {
+                if let Some((src_str, dst_str)) = rest.split_once(", %") {
+                    let src_name = format!("%{}", src_str);
+                    let dst_name = format!("%{}", dst_str.trim());
+                    let src_fam = register_family_fast(&src_name);
+                    let dst_fam = register_family_fast(&dst_name);
+                    if src_fam != REG_NONE && dst_fam != REG_NONE && src_fam != dst_fam {
+                        tramp_moves.push((src_fam, dst_fam));
+                        tramp_all_lines.push(j);
+                        j += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Check for movslq %regA, %regB (sign-extend register copy)
+            if let Some(rest) = trimmed.strip_prefix("movslq %") {
+                if let Some((src_str, dst_str)) = rest.split_once(", %") {
+                    let src_name = format!("%{}", src_str);
+                    let dst_name = format!("%{}", dst_str.trim());
+                    let src_fam = register_family_fast(&src_name);
+                    let dst_fam = register_family_fast(&dst_name);
+                    if src_fam != REG_NONE && dst_fam != REG_NONE && src_fam != dst_fam {
+                        tramp_moves.push((src_fam, dst_fam));
+                        tramp_all_lines.push(j);
+                        j += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Check for stack load pattern: movq -N(%rbp), %rax (intermediate for
+            // stack-to-register transfer, must be followed by movq %rax, %regB)
+            if let LineKind::LoadRbp { reg: 0, offset, .. } = infos[j].kind {
+                // This is a load to %rax from stack - peek at next to see if it's
+                // movq %rax, %regB (forming a stack-to-register pair)
+                let mut k = j + 1;
+                while k < len && (infos[k].is_nop() || infos[k].kind == LineKind::Empty) {
+                    k += 1;
+                }
+                if k < len {
+                    let next_trimmed = infos[k].trimmed(store.get(k));
+                    if let Some(rest) = next_trimmed.strip_prefix("movq %rax, %") {
+                        let dst_name = format!("%{}", rest.trim());
+                        let dst_fam = register_family_fast(&dst_name);
+                        if dst_fam != REG_NONE && dst_fam != 0 {
+                            // This is a stack load via %rax to a target register.
+                            // Record it with a special marker source (REG_NONE)
+                            // and the stack offset for later coalescing.
+                            has_stack_load = true;
+                            tramp_stack_loads.push((offset, dst_fam, j, k));
+                            tramp_all_lines.push(j);
+                            tramp_all_lines.push(k);
+                            j = k + 1;
+                            continue;
+                        }
+                    }
+                }
+                // Not a valid trampoline pattern
+                break;
+            }
+
+            // Check for jmp .LBB_N (final instruction)
+            if infos[j].kind == LineKind::Jmp {
+                if let Some(target) = extract_jump_target(trimmed) {
+                    if let Some(n) = parse_dotl_number(target) {
+                        tramp_jmp_target = Some(n);
+                        tramp_all_lines.push(j);
+                    }
+                }
+                break;
+            }
+
+            // Any other instruction - not a trampoline
+            break;
+        }
+
+        // Must have a jmp target and at least one register move
+        let target_num = match tramp_jmp_target {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Must have at least one move
+        if tramp_moves.is_empty() && !has_stack_load {
+            continue;
+        }
+
+        // Stack loads in the trampoline require special handling.
+        // For each stack load (offset -> dst_fam), we need to find the corresponding
+        // store in the predecessor block and coalesce it.
+
+        // Find the conditional branch that targets this trampoline
+        let mut branch_idx = None;
+        for i in 0..len {
+            if infos[i].is_nop() { continue; }
+            if infos[i].kind == LineKind::CondJmp {
+                let trimmed = infos[i].trimmed(store.get(i));
+                if let Some(target) = extract_jump_target(trimmed) {
+                    if let Some(n) = parse_dotl_number(target) {
+                        if n == tramp_num {
+                            branch_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let branch_idx = match branch_idx {
+            Some(i) => i,
+            None => continue,
+        };
+
+        // Now try to coalesce each trampoline move.
+        // For each trampoline move (src -> dst), look backwards from the branch to
+        // find where src was created as a copy of dst, and rewrite modifications of
+        // src to target dst instead.
+        //
+        // Pattern we're looking for in the predecessor block:
+        //   movq %dst, %src     ; create new SSA value as copy of old
+        //   <modify %src>       ; one or more instructions that modify %src
+        //   ...                  ; (no reads of %dst between here and trampoline)
+        //   jCC .TRAMPOLINE     ; conditional branch
+        // Trampoline:
+        //   movq %src, %dst     ; shuffle back
+        //   jmp .LOOP
+
+        // Per-move coalescing results: track which trampoline moves we can coalesce.
+        // Each entry corresponds to a move in tramp_moves at the same index.
+        let mut move_coalesced: Vec<bool> = Vec::with_capacity(tramp_moves.len());
+        let mut coalesce_actions: Vec<(usize, RegId, RegId)> = Vec::new(); // (line_idx, old_reg, new_reg)
+        let mut copy_nop_lines: Vec<usize> = Vec::new();
+        for &(src_fam, dst_fam) in &tramp_moves {
+            // Search backwards from branch for movq %dst_64, %src_64
+            // (the initial copy that creates the new SSA value)
+            let src_64 = REG_NAMES[0][src_fam as usize];
+            let dst_64 = REG_NAMES[0][dst_fam as usize];
+
+            let mut copy_idx = None;
+            let mut modifications: Vec<usize> = Vec::new();
+            let mut scan_ok = true;
+
+            // Scan backwards from branch to find the copy and modifications
+            let mut k = branch_idx;
+            while k > 0 {
+                k -= 1;
+                if infos[k].is_nop() || infos[k].kind == LineKind::Empty {
+                    continue;
+                }
+                // Stop at labels (block boundary)
+                if infos[k].kind == LineKind::Label {
+                    break;
+                }
+                // Stop at calls, jumps, etc.
+                if matches!(infos[k].kind, LineKind::Call | LineKind::Jmp |
+                    LineKind::JmpIndirect | LineKind::Ret) {
+                    break;
+                }
+
+                let trimmed = infos[k].trimmed(store.get(k));
+
+                // Check if this instruction modifies src_fam
+                let modifies_src = match infos[k].kind {
+                    LineKind::Other { dest_reg } => dest_reg == src_fam,
+                    LineKind::StoreRbp { .. } => false,
+                    LineKind::LoadRbp { reg, .. } => reg == src_fam,
+                    LineKind::SetCC { reg } => reg == src_fam,
+                    LineKind::Pop { reg } => reg == src_fam,
+                    _ => false,
+                };
+
+                // Check if this is the initial copy: movq %dst, %src
+                if modifies_src {
+                    let expected_copy = format!("movq {}, {}", dst_64, src_64);
+                    if trimmed == expected_copy {
+                        copy_idx = Some(k);
+                        break;
+                    }
+                    // Check for movslq copy variant: movslq %dst_32, %src_64
+                    // (sign-extending copy from dst to src - can't simply NOP)
+                    let dst_32 = REG_NAMES[1][dst_fam as usize];
+                    let expected_movslq = format!("movslq {}, {}", dst_32, src_64);
+                    if trimmed == expected_movslq {
+                        scan_ok = false;
+                        break;
+                    }
+                    modifications.push(k);
+                    continue;
+                }
+
+                // Check if this instruction reads src_fam without modifying it.
+                // Since we'll NOP the initial copy (movq %dst, %src), any read of
+                // src between the copy and the branch must be rewritten to read dst
+                // instead. Record such instructions for rewriting.
+                if infos[k].reg_refs & (1u16 << src_fam) != 0 {
+                    // This instruction reads src but doesn't modify it. We need to
+                    // rewrite it to use dst instead. But first check that it doesn't
+                    // ALSO reference dst (that would make the rewrite ambiguous).
+                    if infos[k].reg_refs & (1u16 << dst_fam) != 0 {
+                        // Both src and dst are referenced - can't safely rewrite.
+                        scan_ok = false;
+                        break;
+                    }
+                    modifications.push(k);
+                    continue;
+                }
+
+                // Check if this instruction reads dst_fam (the register we want to
+                // rewrite to). If so, we can't coalesce because that would change
+                // the value read. We need to ensure dst_fam is NOT read between
+                // the copy and the branch.
+                if infos[k].reg_refs & (1u16 << dst_fam) != 0 {
+                    scan_ok = false;
+                    break;
+                }
+            }
+
+            if !scan_ok || copy_idx.is_none() {
+                move_coalesced.push(false);
+                continue;
+            }
+
+            let copy_idx = copy_idx.unwrap();
+
+            // Verify: on the fall-through path (after the branch), dst_fam is NOT
+            // read before being overwritten. If it is, the fall-through code expects
+            // the PRE-modification value of dst, but after coalescing, dst holds the
+            // POST-modification value.
+            //
+            // Conservative approach: scan forward from the branch until we hit a
+            // ret or unconditional jmp. If dst_fam is read (by reg_refs) by any
+            // instruction before being overwritten, bail out.
+            let mut fall_through_safe = true;
+            let mut m = branch_idx + 1;
+            while m < len {
+                if infos[m].is_nop() || infos[m].kind == LineKind::Empty
+                    || infos[m].kind == LineKind::Label {
+                    m += 1;
+                    continue;
+                }
+                // Stop at unconditional jumps or returns - end of fall-through path
+                if matches!(infos[m].kind, LineKind::Jmp | LineKind::JmpIndirect
+                    | LineKind::Ret) {
+                    break;
+                }
+                // Conditional jumps: fall-through continues past them, but they
+                // might also jump to code that uses dst. Conservatively bail out
+                // if we encounter a conditional jump (the analysis would need to
+                // check both paths which is too complex).
+                if infos[m].kind == LineKind::CondJmp {
+                    // Check if dst_fam is used before this conditional jump
+                    // We've already been checking, so just stop - the code after
+                    // the conditional is too complex to analyze.
+                    break;
+                }
+                // Check if dst_fam is written (then old value is dead)
+                let writes_dst = match infos[m].kind {
+                    LineKind::Other { dest_reg } => dest_reg == dst_fam,
+                    LineKind::LoadRbp { reg, .. } => reg == dst_fam,
+                    LineKind::SetCC { reg } => reg == dst_fam,
+                    LineKind::Pop { reg } => reg == dst_fam,
+                    _ => false,
+                };
+                if writes_dst {
+                    break; // dst is overwritten, so old value is dead
+                }
+                // Check if dst_fam is read (including by stores that reference it)
+                if infos[m].reg_refs & (1u16 << dst_fam) != 0 {
+                    fall_through_safe = false;
+                    break;
+                }
+                m += 1;
+            }
+            if !fall_through_safe {
+                move_coalesced.push(false);
+                continue;
+            }
+
+            // Record the coalescing actions:
+            // 1. NOP the initial copy (movq %dst, %src)
+            copy_nop_lines.push(copy_idx);
+
+            // 2. Rewrite each modification of %src to target %dst instead
+            for &mod_idx in &modifications {
+                coalesce_actions.push((mod_idx, src_fam, dst_fam));
+            }
+
+            move_coalesced.push(true);
+        }
+
+        // Stack-load coalescing is not attempted here because the store to a
+        // stack slot may serve dual purposes (loop variable AND local variable
+        // used on the fall-through path). Eliminating the store would break
+        // non-trampoline paths that read from the same slot.
+        // Only reg-reg coalescing is performed.
+        let stack_coalesced: Vec<bool> = vec![false; tramp_stack_loads.len()];
+        let stack_nop_lines: Vec<usize> = Vec::new();
+        let stack_store_rewrites: Vec<(usize, String)> = Vec::new();
+
+        // Count how many moves/stack-loads were coalesced
+        let num_moves_coalesced = move_coalesced.iter().filter(|&&c| c).count();
+        let num_stack_coalesced = stack_coalesced.iter().filter(|&&c| c).count();
+        let total_coalesced = num_moves_coalesced + num_stack_coalesced;
+
+        // Need at least one coalesced item to make progress
+        if total_coalesced == 0 {
+            continue;
+        }
+
+        let all_coalesced = num_moves_coalesced == tramp_moves.len()
+            && num_stack_coalesced == tramp_stack_loads.len();
+
+        // Apply the register-register coalescing actions
+        for &nop_idx in &copy_nop_lines {
+            mark_nop(&mut infos[nop_idx]);
+        }
+
+        for &(mod_idx, old_fam, new_fam) in &coalesce_actions {
+            let old_line = infos[mod_idx].trimmed(store.get(mod_idx)).to_string();
+            if let Some(new_line) = rewrite_instruction_register(&old_line, old_fam, new_fam) {
+                replace_line(store, &mut infos[mod_idx], mod_idx, format!("    {}", new_line));
+            }
+        }
+
+        // Apply stack-load coalescing: rewrite stores and NOP trampoline load+mov pairs
+        for &(store_idx, ref new_line) in &stack_store_rewrites {
+            replace_line(store, &mut infos[store_idx], store_idx, new_line.clone());
+        }
+        for &nop_idx in &stack_nop_lines {
+            mark_nop(&mut infos[nop_idx]);
+        }
+
+        if all_coalesced {
+            // All moves coalesced - NOP the entire trampoline and redirect branch
+            for &line_idx in &tramp_all_lines {
+                mark_nop(&mut infos[line_idx]);
+            }
+            mark_nop(&mut infos[tramp_label_idx]);
+
+            // Redirect the conditional branch to the loop header
+            let branch_trimmed = infos[branch_idx].trimmed(store.get(branch_idx)).to_string();
+            if let Some(space_pos) = branch_trimmed.find(' ') {
+                let cc = &branch_trimmed[..space_pos];
+                let target_label = format!(".LBB{}", target_num);
+                let new_branch = format!("    {} {}", cc, target_label);
+                replace_line(store, &mut infos[branch_idx], branch_idx, new_branch);
+            }
+        } else {
+            // Partial coalescing - NOP only the coalesced move lines from the
+            // trampoline. The trampoline block remains for the uncoalesced moves.
+            //
+            // We need to figure out which trampoline lines correspond to coalesced
+            // reg-reg moves vs. coalesced stack-load pairs.
+            //
+            // tramp_all_lines was built in parse order. We need to map each
+            // trampoline line back to whether it was coalesced.
+            //
+            // Approach: rebuild the mapping by re-scanning the trampoline.
+            // Reg-reg moves are at indices that match their position in tramp_moves.
+            // Stack-load pairs occupy 2 lines each.
+            // The jmp is always the last line in tramp_all_lines.
+            //
+            // Instead of complex index tracking, just identify lines to NOP:
+            // For each coalesced reg-reg move, the corresponding trampoline line
+            // is a movq/movslq with src_fam/dst_fam that we can match.
+            for (idx, &(src_fam, dst_fam)) in tramp_moves.iter().enumerate() {
+                if !move_coalesced[idx] { continue; }
+                // Find and NOP the trampoline line for this move
+                for &line_idx in &tramp_all_lines {
+                    if infos[line_idx].is_nop() { continue; }
+                    let trimmed = infos[line_idx].trimmed(store.get(line_idx));
+                    // Check if this line is "movq %src, %dst" or "movslq %src, %dst"
+                    let src_64 = REG_NAMES[0][src_fam as usize];
+                    let dst_64 = REG_NAMES[0][dst_fam as usize];
+                    let expected = format!("movq {}, {}", src_64, dst_64);
+                    if trimmed == expected {
+                        mark_nop(&mut infos[line_idx]);
+                        break;
+                    }
+                    // Also check movslq
+                    let src_32 = REG_NAMES[1][src_fam as usize];
+                    let expected2 = format!("movslq {}, {}", src_32, dst_64);
+                    if trimmed == expected2 {
+                        mark_nop(&mut infos[line_idx]);
+                        break;
+                    }
+                }
+            }
+            // Stack-load pairs that were coalesced already had their trampoline
+            // lines (load_line, mov_line) NOPed via stack_nop_lines above.
+        }
+
+        changed = true;
+    }
+
+    changed
+}
+
+/// Rewrite an instruction to use a different register family.
+/// For example, rewriting `addq $320, %r14` with old=r14, new=r9 gives `addq $320, %r9`.
+fn rewrite_instruction_register(inst: &str, old_fam: RegId, new_fam: RegId) -> Option<String> {
+    // Replace all occurrences of registers in the old family with the new family.
+    // We need to handle all sizes: 64-bit (%rXX), 32-bit (%eXX/%rXXd), 16-bit, 8-bit.
+    let mut result = inst.to_string();
+    for size_idx in 0..4 {
+        let old_name = REG_NAMES[size_idx][old_fam as usize];
+        let new_name = REG_NAMES[size_idx][new_fam as usize];
+        // Only replace if the old register actually appears
+        if result.contains(old_name) {
+            result = result.replace(old_name, new_name);
+        }
+    }
+    // Verify we actually changed something
+    if result == inst {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 #[cfg(test)]
 fn is_self_move(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("movq ") {
@@ -2242,5 +2792,69 @@ mod tests {
         let result = peephole_optimize(asm);
         assert!(result.contains("-16(%rbp), %rcx"),
             "must NOT forward rcx across syscall (rcx clobbered): {}", result);
+    }
+
+    #[test]
+    fn test_loop_trampoline_simple_coalesce() {
+        // Simple loop trampoline: one register copy gets coalesced.
+        // Before: copy %r9 to %r14, modify %r14, trampoline copies %r14 back to %r9
+        // After: modify %r9 directly, branch to loop header directly
+        let asm = [
+            ".LBB1:",                       // loop header
+            "    movq %r9, %rax",           // use r9 in loop body
+            "    movq %r9, %r14",           // copy to new reg
+            "    addq $320, %r14",          // modify new reg
+            "    testq %rax, %rax",         // loop condition
+            "    jne .LBB2",               // branch to trampoline
+            "    ret",                     // loop exit
+            ".LBB2:",                       // trampoline
+            "    movq %r14, %r9",           // shuffle back
+            "    jmp .LBB1",               // back to loop header
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The trampoline should be eliminated.
+        // %r14 should be replaced with %r9 (in-place update).
+        assert!(result.contains("addq $320, %r9"),
+            "should rewrite addq to target %r9 directly: {}", result);
+        assert!(!result.contains("movq %r9, %r14"),
+            "should eliminate the initial copy: {}", result);
+        assert!(!result.contains("movq %r14, %r9"),
+            "should eliminate the trampoline copy: {}", result);
+        // Branch should go directly to loop header
+        assert!(result.contains("jne .LBB1"),
+            "should redirect branch to loop header: {}", result);
+    }
+
+    #[test]
+    fn test_loop_trampoline_two_copies() {
+        // Two register copies in the trampoline (common in DOOM rendering loops).
+        let asm = [
+            ".LBB10:",                      // loop header
+            "    movq %r9, %rax",           // use r9
+            "    movq %r10, %rcx",          // use r10
+            "    movq %r9, %r14",           // copy dest to new reg
+            "    addq $320, %r14",          // modify new dest
+            "    movq %r10, %r15",          // copy frac to new reg
+            "    addl %r8d, %r15d",         // modify new frac
+            "    testq %rax, %rax",         // loop condition
+            "    jne .LBB20",              // branch to trampoline
+            "    ret",
+            ".LBB20:",                      // trampoline
+            "    movq %r14, %r9",           // shuffle dest back
+            "    movq %r15, %r10",          // shuffle frac back
+            "    jmp .LBB10",              // back to loop header
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // Both copies should be coalesced
+        assert!(result.contains("addq $320, %r9"),
+            "should rewrite dest addq to %r9: {}", result);
+        assert!(result.contains("addl %r8d, %r10d"),
+            "should rewrite frac addl to %r10d: {}", result);
+        assert!(!result.contains("movq %r9, %r14"),
+            "should eliminate dest copy: {}", result);
+        assert!(!result.contains("movq %r10, %r15"),
+            "should eliminate frac copy: {}", result);
+        assert!(result.contains("jne .LBB10"),
+            "should redirect branch to loop header: {}", result);
     }
 }
