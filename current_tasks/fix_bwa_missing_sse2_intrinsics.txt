@@ -1,0 +1,12 @@
+Task: Add missing SSE2 intrinsics for bwa (ksw.c Smith-Waterman alignment)
+
+bwa's ksw.c uses SSE2 intrinsics for its Smith-Waterman alignment kernel that
+were missing from our emmintrin.h:
+- _mm_max_epu8 (PMAXUB) - unsigned byte maximum
+- _mm_max_epi16 (PMAXSW) - signed 16-bit maximum
+- _mm_adds_epi16 (PADDSW) - signed 16-bit saturated add
+- _mm_subs_epu16 (PSUBUSW) - unsigned 16-bit saturated subtract
+- _mm_min_epu8 (PMINUB) - unsigned byte minimum (added for completeness)
+
+All implemented as pure C inline functions in emmintrin.h.
+bwa now passes all 4 architectures (x86, i686, arm, riscv).
