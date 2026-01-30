@@ -1,8 +1,0 @@
-Task: Fix libjpeg-turbo ARM test failure
-Status: in_progress
-
-The libjpeg-turbo check_arm.sh build script doesn't set FLOATTEST8, so CMake
-auto-detects it as fp-contract (since our compiler identifies as GCC 14.2.0).
-But our compiler doesn't do FP expression contraction (FMA fusion), so the
-float DCT test produces no-fp-contract checksums. Fix: add
--DFLOATTEST8=no-fp-contract to the ARM check script's cmake invocation.

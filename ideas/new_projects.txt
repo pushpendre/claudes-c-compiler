@@ -8,7 +8,7 @@ libsodium - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: crypto library
 mquickjs - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JS engine, i686 now passing
 libpng - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: PNG library
 jq - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JSON processor
-libjpeg - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JPEG library
+libjpeg-turbo - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JPEG library. FIXED ARM - check_arm.sh needed -DFLOATTEST8=no-fp-contract because our compiler doesn't do FP expression contraction (FMA fusion) but CMake auto-detects it as GCC and assumes fp-contract mode.
 mbedtls - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: TLS library. FIXED - was failing on x86/arm due to include guard optimization skipping headers with #else at guard level (ev_wrap.h pattern)
 libuv - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: async I/O
 libffi - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: riscv now passing
