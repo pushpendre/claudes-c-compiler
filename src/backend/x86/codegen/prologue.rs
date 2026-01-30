@@ -199,9 +199,14 @@ impl X86Codegen {
 
             match class {
                 ParamClass::IntReg { reg_idx } => {
-                    let store_instr = Self::mov_store_for_type(ty);
-                    let reg = Self::reg_for_type(X86_ARG_REGS[reg_idx], ty);
-                    self.state.emit_fmt(format_args!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                    // Always store the full 64-bit register to ensure the entire 8-byte
+                    // slot is initialized. Using a typed store (e.g., movl for I32) would
+                    // only write 4 bytes, leaving the upper bytes uninitialized. Later
+                    // untyped loads via value_to_reg use movq (8 bytes), which would read
+                    // uninitialized memory and trigger valgrind errors.
+                    // The typed load in emit_param_ref_impl correctly extracts only the
+                    // meaningful bytes (e.g., movslq for I32).
+                    self.state.out.emit_instr_reg_rbp("    movq", X86_ARG_REGS[reg_idx], slot.0);
                 }
                 ParamClass::FloatReg { reg_idx } => {
                     if ty == IrType::F32 {
@@ -248,11 +253,11 @@ impl X86Codegen {
                     self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0 + 8);
                 }
                 ParamClass::StackScalar { offset } => {
+                    // Load from caller's stack frame and store full 8 bytes to ensure
+                    // the entire slot is initialized (see IntReg comment above).
                     let src = stack_base + offset;
                     self.state.out.emit_instr_rbp_reg("    movq", src, "rax");
-                    let store_instr = Self::mov_store_for_type(ty);
-                    let reg = Self::reg_for_type("rax", ty);
-                    self.state.emit_fmt(format_args!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                    self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0);
                 }
                 ParamClass::StructStack { offset, size } | ParamClass::LargeStructStack { offset, size } => {
                     let src = stack_base + offset;
