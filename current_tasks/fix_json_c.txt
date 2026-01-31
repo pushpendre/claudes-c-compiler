@@ -1,0 +1,3 @@
+Fixing json-c project to pass on all architectures.
+Currently fails on ARM and partially on i686 (test_json_patch crash).
+Investigating and fixing compiler bugs causing these failures.
