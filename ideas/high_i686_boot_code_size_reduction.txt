@@ -40,4 +40,15 @@ Key improvements needed (in priority order):
    - More aggressive inlining threshold reduction
    - Tail call optimization for leaf functions
 
-Status: -mregparm=3 has been implemented (this alone doesn't reach 32KB).
+Status:
+- -mregparm=3 has been implemented
+- i686 peephole optimizer has been implemented (Phase 1 done):
+  - Store/load forwarding, self-move elimination, dead store elimination,
+    compare-branch fusion (enhanced with store/load pair skipping),
+    memory operand folding, branch inversion, reverse move elimination,
+    never-read store elimination
+  - Strength reduction: addl $1 → incl, subl $1 → decl, movl $0 → xorl
+  - Redundant movsbl elimination
+- Current boot size: ~63KB (target: 32KB)
+- Remaining gap requires items 2-4 above (frame pointer omission, better
+  register allocation, -Os specific optimizations)
