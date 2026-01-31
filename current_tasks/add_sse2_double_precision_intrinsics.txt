@@ -1,0 +1,28 @@
+Add SSE2 double-precision (__m128d) intrinsics to emmintrin.h
+
+Currently emmintrin.h has __m128i (integer) and __m128 (float) intrinsics
+well-covered, but is missing most __m128d (double-precision) intrinsics.
+
+These are commonly used in real-world projects (e.g., _mm_set_pd has
+2691 occurrences across /other_deps/ projects).
+
+Adding:
+- _mm_set_pd, _mm_set1_pd, _mm_set_sd, _mm_setr_pd, _mm_setzero_pd
+- _mm_load_pd, _mm_loadu_pd, _mm_load_sd, _mm_loadl_pd, _mm_loadh_pd
+- _mm_store_pd, _mm_storeu_pd, _mm_store_sd, _mm_storel_pd, _mm_storeh_pd
+- _mm_add_pd, _mm_sub_pd, _mm_mul_pd, _mm_div_pd
+- _mm_add_sd, _mm_sub_sd, _mm_mul_sd, _mm_div_sd
+- _mm_min_pd, _mm_max_pd, _mm_min_sd, _mm_max_sd
+- _mm_sqrt_pd, _mm_sqrt_sd
+- _mm_and_pd, _mm_or_pd, _mm_xor_pd, _mm_andnot_pd
+- _mm_cmpeq_pd, _mm_cmplt_pd, _mm_cmple_pd, _mm_cmpgt_pd, _mm_cmpge_pd
+- _mm_cmpneq_pd, _mm_cmpnlt_pd, _mm_cmpnle_pd, _mm_cmpord_pd, _mm_cmpunord_pd
+- _mm_cmpeq_sd, _mm_cmplt_sd, _mm_cmple_sd
+- _mm_unpacklo_pd, _mm_unpackhi_pd, _mm_shuffle_pd
+- _mm_movemask_pd
+- _mm_cvtsd_f64, _mm_cvtsd_si32, _mm_cvtsd_si64
+- _mm_cvtpd_ps, _mm_cvtps_pd
+- _mm_cvtsd_ss, _mm_cvtss_sd
+- _mm_cvtpd_epi32, _mm_cvttpd_epi32
+
+Fixes test: compiler_suite_0107_0094 (and likely 0107_0093, 0103_0020)
