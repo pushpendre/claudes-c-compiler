@@ -1,0 +1,23 @@
+Fix __has_attribute/__has_builtin macro aliasing in preprocessor
+
+Status: in_progress
+
+Problem: __has_attribute, __has_builtin, __has_feature, and __has_extension
+were defined as function-like macros expanding to 0. This meant that when
+a macro expanded to __has_attribute(cleanup), the macro expander would
+replace it with 0 before the #if expression evaluator could handle it.
+
+This broke glib's g_autoptr() which uses:
+  #define g_macro__has_attribute __has_attribute
+  #if g_macro__has_attribute(cleanup)
+
+Fix: Remove these as function-like macros and instead:
+1. Special-case them in is_defined() for #ifdef support
+2. Handle them in resolve_defined_in_expr() for #if evaluation
+3. Run resolve_defined_in_expr() again after macro expansion to catch
+   cases where macros expand to __has_attribute(...) etc.
+
+Also expanded the list of supported attributes for __has_attribute() to
+include cleanup, fallthrough, flatten, and many other GCC attributes.
+
+Impact: Enables QEMU build (which uses glib g_autoptr extensively).
