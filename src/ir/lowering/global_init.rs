@@ -1542,13 +1542,19 @@ impl Lowerer {
             }
             Initializer::Expr(expr) => {
                 if let Expr::StringLiteral(s, _) = expr {
-                    let string_sub_count = if index_designators.len() < array_dim_strides.len() {
-                        let remaining = &array_dim_strides[index_designators.len()..];
-                        if !remaining.is_empty() && base_type_size > 0 {
-                            remaining[0] / base_type_size
-                        } else {
-                            sub_elem_count
-                        }
+                    // For designated string literal in a multi-dim char array:
+                    // e.g., char arr[2][5] = { [0] = "ABCD" }
+                    // index_designators = [0], array_dim_strides = [5, 1]
+                    // We need to fill 5 chars (the inner array size).
+                    // Use the stride at the designator level (strides[0] = 5), not after it.
+                    let string_sub_count = if !index_designators.is_empty()
+                        && index_designators.len() < array_dim_strides.len()
+                        && base_type_size > 0
+                    {
+                        // Stride at the last designator level gives the size of the target element
+                        array_dim_strides[index_designators.len() - 1] / base_type_size
+                    } else if index_designators.len() < array_dim_strides.len() {
+                        sub_elem_count
                     } else {
                         1
                     };

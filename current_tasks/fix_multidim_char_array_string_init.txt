@@ -1,6 +1,0 @@
-Fix multi-dimensional char array string literal initializer stride computation.
-
-When a designated string literal initializes an inner array in a multi-dim char array
-(e.g., char arr[2][5] = { [0] = "ABCD" }), the stride calculation was using
-the stride *after* the designator level instead of *at* the designator level,
-causing incorrect element counts.
