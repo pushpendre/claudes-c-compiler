@@ -1,0 +1,11 @@
+Add doomgeneric (DOOM) as a verified project in the test/verification suite.
+
+This verifies that ccc-x86 can compile and statically link the doomgeneric
+DOOM port (ANSI terminal renderer), producing a working static binary.
+
+The doomgeneric project is a good test because:
+- It's a real-world C codebase (~70 source files)
+- Uses -lm (math library linkage)
+- Static linking (-static flag)
+- Standard C with POSIX extensions
+- Already verified to work: kernel + DOOM boots in QEMU
