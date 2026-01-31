@@ -56,6 +56,7 @@ impl I686Codegen {
                             _fptr_spill: usize, _f128_temp_space: usize) -> i64 {
         if stack_arg_space > 0 {
             emit!(self.state, "    subl ${}, %esp", stack_arg_space);
+            self.esp_adjust += stack_arg_space as i64;
         }
 
         let mut stack_offset: usize = 0;
@@ -152,14 +153,17 @@ impl I686Codegen {
     pub(super) fn emit_call_cleanup_impl(&mut self, stack_arg_space: usize, _f128_temp_space: usize, _indirect: bool) {
         if stack_arg_space > 0 {
             emit!(self.state, "    addl ${}, %esp", stack_arg_space);
+            self.esp_adjust -= stack_arg_space as i64;
         }
     }
 
     pub(super) fn emit_call_store_result_impl(&mut self, dest: &Value, return_type: IrType) {
         if return_type == IrType::I64 || return_type == IrType::U64 {
             if let Some(slot) = self.state.get_slot(dest.0) {
-                emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-                emit!(self.state, "    movl %edx, {}(%ebp)", slot.0 + 4);
+                let sr0 = self.slot_ref(slot);
+                let sr4 = self.slot_ref_offset(slot, 4);
+                emit!(self.state, "    movl %eax, {}", sr0);
+                emit!(self.state, "    movl %edx, {}", sr4);
             }
             self.state.reg_cache.invalidate_acc();
         } else if is_i128_type(return_type) {
@@ -179,14 +183,17 @@ impl I686Codegen {
 
     pub(super) fn emit_call_store_i128_result_impl(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-            emit!(self.state, "    movl %edx, {}(%ebp)", slot.0 + 4);
+            let sr0 = self.slot_ref(slot);
+            let sr4 = self.slot_ref_offset(slot, 4);
+            emit!(self.state, "    movl %eax, {}", sr0);
+            emit!(self.state, "    movl %edx, {}", sr4);
         }
     }
 
     pub(super) fn emit_call_store_f128_result_impl(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    fstpt {}", sr);
             self.state.f128_direct_slots.insert(dest.0);
         }
     }

@@ -118,7 +118,9 @@ impl I686Codegen {
             }
             IntrinsicOp::ReturnAddress => {
                 // On i686, return address is at 4(%ebp) (32-bit stack frame)
-                self.state.emit("    movl 4(%ebp), %eax");
+                // With FP omission: param_ref(4) computes the correct ESP-relative offset
+                let ra = self.param_ref(4);
+                emit!(self.state, "    movl {}, %eax", ra);
                 self.state.reg_cache.invalidate_acc();
                 if let Some(d) = dest {
                     self.store_eax_to(d);
@@ -434,9 +436,11 @@ impl I686Codegen {
                 self.state.emit("    movl %eax, %ecx");
                 if let Operand::Value(v) = &args[0] {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
+                        let sr0 = self.slot_ref(slot);
+                        let sr4 = self.slot_ref_offset(slot, 4);
+                        emit!(self.state, "    movl {}, %eax", sr0);
                         self.state.emit("    movnti %eax, (%ecx)");
-                        emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
+                        emit!(self.state, "    movl {}, %eax", sr4);
                         self.state.emit("    movnti %eax, 4(%ecx)");
                     } else {
                         self.operand_to_eax(&args[0]);
@@ -474,10 +478,12 @@ impl I686Codegen {
             self.state.emit("    movl %eax, %edx");
             if let Operand::Value(v) = &args[1] {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
+                    let sr0 = self.slot_ref(slot);
+                    let sr4 = self.slot_ref_offset(slot, 4);
+                    emit!(self.state, "    movl {}, %ecx", sr0);
                     self.state.emit("    movl %edx, %eax");
                     self.state.emit("    crc32l %ecx, %eax");
-                    emit!(self.state, "    movl {}(%ebp), %ecx", slot.0 + 4);
+                    emit!(self.state, "    movl {}, %ecx", sr4);
                     self.state.emit("    crc32l %ecx, %eax");
                 } else {
                     self.operand_to_ecx(&args[1]);
@@ -514,7 +520,8 @@ impl I686Codegen {
         self.state.emit_fmt(format_args!("    {}", x87_op));
         if let Some(d) = dest {
             if let Some(slot) = self.state.get_slot(d.0) {
-                emit!(self.state, "    fstpl {}(%ebp)", slot.0);
+                let sr = self.slot_ref(slot);
+                emit!(self.state, "    fstpl {}", sr);
             } else {
                 self.state.emit("    fstp %st(0)");
             }
@@ -562,7 +569,8 @@ impl I686Codegen {
         match op {
             Operand::Value(v) if self.state.get_slot(v.0).is_some() => {
                 let slot = self.state.get_slot(v.0).expect("slot exists (guarded by is_some)");
-                emit!(self.state, "    flds {}(%ebp)", slot.0);
+                let sr = self.slot_ref(slot);
+                emit!(self.state, "    flds {}", sr);
             }
             Operand::Const(IrConst::F32(fval)) => {
                 emit!(self.state, "    movl ${}, %eax", fval.to_bits() as i32);
@@ -583,7 +591,8 @@ impl I686Codegen {
     fn emit_f32_store_from_x87(&mut self, dest: &Option<Value>) {
         if let Some(d) = dest {
             if let Some(slot) = self.state.get_slot(d.0) {
-                emit!(self.state, "    fstps {}(%ebp)", slot.0);
+                let sr = self.slot_ref(slot);
+                emit!(self.state, "    fstps {}", sr);
             } else {
                 self.state.emit("    fstp %st(0)");
             }

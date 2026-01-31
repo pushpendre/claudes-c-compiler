@@ -227,15 +227,14 @@ fn parse_offset(s: &str) -> i32 {
 
 /// Check if a line has indirect memory access (pointer dereference through a register).
 fn has_indirect_memory_access(s: &str) -> bool {
-    // Pattern: offset(%eXX) where XX is not bp
-    // or (%eXX) where XX is not bp
+    // Pattern: offset(%eXX) where XX is not bp or sp
+    // or (%eXX) where XX is not bp or sp
     // or (%eXX, %eYY, N)
     let bytes = s.as_bytes();
     for i in 0..bytes.len() {
         if bytes[i] == b'(' && i + 4 < bytes.len() && bytes[i + 1] == b'%' {
-            // Check if it's (%ebp) - that's a stack access, not indirect
-            if i + 5 < bytes.len() && &bytes[i + 1..i + 5] == b"%ebp" {
-                // It's ebp-relative, but skip to after the closing paren
+            // Check if it's (%ebp) or (%esp) - those are stack accesses, not indirect
+            if i + 5 < bytes.len() && (&bytes[i + 1..i + 5] == b"%ebp" || &bytes[i + 1..i + 5] == b"%esp") {
                 continue;
             }
             return true;
@@ -1444,9 +1443,9 @@ fn eliminate_never_read_stores(store: &LineStore, infos: &mut [LineInfo]) {
         match infos[i].kind {
             LineKind::LoadEbp { offset, .. } => { loaded_offsets.insert(offset); }
             _ => {
-                // Check for address-of-slot patterns (leal N(%ebp), %reg)
+                // Check for address-of-slot patterns (leal N(%ebp), %reg or leal N(%esp), %reg)
                 let s = trimmed(store, &infos[i], i);
-                if s.starts_with("leal ") && s.contains("(%ebp)") {
+                if s.starts_with("leal ") && (s.contains("(%ebp)") || s.contains("(%esp)")) {
                     addr_taken = true;
                 }
                 // Indirect memory access means we can't know what's read

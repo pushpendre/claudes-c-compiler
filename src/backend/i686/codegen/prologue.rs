@@ -10,7 +10,7 @@ use crate::backend::call_emit::{ParamClass, classify_params};
 use crate::emit;
 use super::codegen::{
     I686Codegen, phys_reg_name, i686_constraint_to_phys, i686_clobber_to_phys,
-    I686_CALLEE_SAVED, I686_CALLER_SAVED,
+    I686_CALLEE_SAVED, I686_CALLEE_SAVED_WITH_EBP, I686_CALLER_SAVED,
 };
 use crate::backend::regalloc::PhysReg;
 use crate::backend::traits::ArchCodegen;
@@ -22,6 +22,12 @@ impl I686Codegen {
         self.is_variadic = func.is_variadic;
         self.is_fastcall = func.is_fastcall;
         self.current_return_type = func.return_type;
+
+        // Dynamic alloca (VLAs) requires the frame pointer to track the stack,
+        // since ESP changes by runtime-computed amounts.
+        if self.state.has_dyn_alloca {
+            self.omit_frame_pointer = false;
+        }
 
         // Compute named parameter stack bytes for va_start (variadic functions).
         if func.is_variadic {
@@ -36,11 +42,20 @@ impl I686Codegen {
         // present. On i686, the scratch allocator may pick esi/edi/ebx for generic
         // constraints, which would clobber values the register allocator placed there.
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();
+
+        // When omitting the frame pointer, EBP is available as a callee-saved
+        // register, so use the extended set that includes EBP.
+        let callee_saved_set = if self.omit_frame_pointer {
+            I686_CALLEE_SAVED_WITH_EBP
+        } else {
+            I686_CALLEE_SAVED
+        };
+
         collect_inline_asm_callee_saved_with_generic(
             func, &mut asm_clobbered_regs,
             i686_constraint_to_phys,
             i686_clobber_to_phys,
-            I686_CALLEE_SAVED,
+            callee_saved_set,
         );
         // In PIC mode, %ebx (PhysReg(0)) is reserved as the GOT base pointer.
         if self.state.pic_mode {
@@ -48,7 +63,7 @@ impl I686Codegen {
                 asm_clobbered_regs.push(PhysReg(0));
             }
         }
-        let available_regs = filter_available_regs(I686_CALLEE_SAVED, &asm_clobbered_regs);
+        let available_regs = filter_available_regs(callee_saved_set, &asm_clobbered_regs);
 
         let caller_saved_regs = I686_CALLER_SAVED.to_vec();
 
@@ -87,7 +102,13 @@ impl I686Codegen {
     pub(super) fn aligned_frame_size_impl(&self, raw_space: i64) -> i64 {
         let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
         let raw_locals = raw_space - callee_saved_bytes;
-        let fixed_overhead = callee_saved_bytes + 8;
+        // With frame pointer: overhead = callee_saved + 8 (saved ebp + return addr)
+        // Without frame pointer: overhead = callee_saved + 4 (return addr only)
+        let fixed_overhead = if self.omit_frame_pointer {
+            callee_saved_bytes + 4
+        } else {
+            callee_saved_bytes + 8
+        };
         let needed = raw_locals + fixed_overhead;
         let aligned = (needed + 15) & !15;
         aligned - fixed_overhead
@@ -96,12 +117,13 @@ impl I686Codegen {
     // ---- emit_prologue ----
 
     pub(super) fn emit_prologue_impl(&mut self, _func: &IrFunction, frame_size: i64) {
-        // TODO: when omit_frame_pointer is true, skip the frame pointer setup
-        // and use ESP-relative addressing for all slot accesses. This requires
-        // tracking ESP offset at each instruction point and adjusting all
-        // slot references accordingly.
-        self.state.emit("    pushl %ebp");
-        self.state.emit("    movl %esp, %ebp");
+        if self.omit_frame_pointer {
+            // No frame pointer setup; use ESP-relative addressing.
+            // frame_base_offset and esp_adjust will be set after callee-saved pushes.
+        } else {
+            self.state.emit("    pushl %ebp");
+            self.state.emit("    movl %esp, %ebp");
+        }
 
         for &reg in self.used_callee_saved.iter() {
             let name = phys_reg_name(reg);
@@ -119,16 +141,30 @@ impl I686Codegen {
         if frame_size > 0 {
             emit!(self.state, "    subl ${}, %esp", frame_size);
         }
+
+        if self.omit_frame_pointer {
+            let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
+            self.frame_base_offset = callee_saved_bytes + frame_size;
+            self.esp_adjust = 0;
+        }
     }
 
     // ---- emit_epilogue ----
 
     pub(super) fn emit_epilogue_impl(&mut self, _frame_size: i64) {
-        let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
-        if callee_saved_bytes > 0 {
-            emit!(self.state, "    leal -{}(%ebp), %esp", callee_saved_bytes);
+        if self.omit_frame_pointer {
+            let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
+            let total = self.frame_base_offset - callee_saved_bytes;
+            if total > 0 {
+                emit!(self.state, "    addl ${}, %esp", total);
+            }
         } else {
-            self.state.emit("    movl %ebp, %esp");
+            let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
+            if callee_saved_bytes > 0 {
+                emit!(self.state, "    leal -{}(%ebp), %esp", callee_saved_bytes);
+            } else {
+                self.state.emit("    movl %ebp, %esp");
+            }
         }
 
         for &reg in self.used_callee_saved.iter().rev() {
@@ -136,7 +172,9 @@ impl I686Codegen {
             emit!(self.state, "    popl %{}", name);
         }
 
-        self.state.emit("    popl %ebp");
+        if !self.omit_frame_pointer {
+            self.state.emit("    popl %ebp");
+        }
     }
 
     // ---- emit_store_params ----
@@ -207,31 +245,32 @@ impl I686Codegen {
 
             if self.is_fastcall && fastcall_reg_idx < fastcall_reg_count && self.is_fastcall_reg_eligible(ty) {
                 let src_reg_full = if fastcall_reg_idx == 0 { "%ecx" } else { "%edx" };
+                let slot_ref = self.slot_ref(slot);
                 // For sub-int types, sign/zero-extend to full 32-bit before
                 // storing to the 4-byte SSA slot (avoids partial-write issues).
                 match ty {
                     IrType::I8 => {
                         let src_byte = if fastcall_reg_idx == 0 { "%cl" } else { "%dl" };
                         emit!(self.state, "    movsbl {}, {}", src_byte, src_reg_full);
-                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                        emit!(self.state, "    movl {}, {}", src_reg_full, slot_ref);
                     }
                     IrType::U8 => {
                         let src_byte = if fastcall_reg_idx == 0 { "%cl" } else { "%dl" };
                         emit!(self.state, "    movzbl {}, {}", src_byte, src_reg_full);
-                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                        emit!(self.state, "    movl {}, {}", src_reg_full, slot_ref);
                     }
                     IrType::I16 => {
                         let src_word = if fastcall_reg_idx == 0 { "%cx" } else { "%dx" };
                         emit!(self.state, "    movswl {}, {}", src_word, src_reg_full);
-                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                        emit!(self.state, "    movl {}, {}", src_reg_full, slot_ref);
                     }
                     IrType::U16 => {
                         let src_word = if fastcall_reg_idx == 0 { "%cx" } else { "%dx" };
                         emit!(self.state, "    movzwl {}, {}", src_word, src_reg_full);
-                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                        emit!(self.state, "    movl {}, {}", src_reg_full, slot_ref);
                     }
                     _ => {
-                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                        emit!(self.state, "    movl {}, {}", src_reg_full, slot_ref);
                     }
                 }
                 fastcall_reg_idx += 1;
@@ -244,32 +283,42 @@ impl I686Codegen {
                 ParamClass::StackScalar { offset } => {
                     let src_offset = stack_base + offset - stack_offset_adjust;
                     if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
-                        emit!(self.state, "    movl {}(%ebp), %eax", src_offset);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-                        emit!(self.state, "    movl {}(%ebp), %eax", src_offset + 4);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + 4);
+                        let src_ref = self.param_ref(src_offset);
+                        let dst_ref = self.slot_ref(slot);
+                        emit!(self.state, "    movl {}, %eax", src_ref);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
+                        let src_ref_hi = self.param_ref(src_offset + 4);
+                        let dst_ref_hi = self.slot_ref_offset(slot, 4);
+                        emit!(self.state, "    movl {}, %eax", src_ref_hi);
+                        emit!(self.state, "    movl %eax, {}", dst_ref_hi);
                     } else {
                         let load_instr = self.mov_load_for_type(ty);
-                        emit!(self.state, "    {} {}(%ebp), %eax", load_instr, src_offset);
+                        let src_ref = self.param_ref(src_offset);
+                        let dst_ref = self.slot_ref(slot);
+                        emit!(self.state, "    {} {}, %eax", load_instr, src_ref);
                         // Always store full 32-bit value to SSA slot. The load
                         // instruction above already sign/zero-extended sub-int
                         // types into the full eax register. Using movb/movw here
                         // would leave garbage in the upper bytes of the 4-byte
                         // slot, which gets read back later by movl.
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
                     }
                 }
                 ParamClass::StructStack { offset, size } => {
                     let src = stack_base + offset - stack_offset_adjust;
                     let mut copied = 0usize;
                     while copied + 4 <= size {
-                        emit!(self.state, "    movl {}(%ebp), %eax", src + copied as i64);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + copied as i64);
+                        let src_ref = self.param_ref(src + copied as i64);
+                        let dst_ref = self.slot_ref_offset(slot, copied as i64);
+                        emit!(self.state, "    movl {}, %eax", src_ref);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
                         copied += 4;
                     }
                     while copied < size {
-                        emit!(self.state, "    movb {}(%ebp), %al", src + copied as i64);
-                        emit!(self.state, "    movb %al, {}(%ebp)", slot.0 + copied as i64);
+                        let src_ref = self.param_ref(src + copied as i64);
+                        let dst_ref = self.slot_ref_offset(slot, copied as i64);
+                        emit!(self.state, "    movb {}, %al", src_ref);
+                        emit!(self.state, "    movb %al, {}", dst_ref);
                         copied += 1;
                     }
                 }
@@ -277,33 +326,43 @@ impl I686Codegen {
                     let src = stack_base + offset - stack_offset_adjust;
                     let mut copied = 0usize;
                     while copied + 4 <= size {
-                        emit!(self.state, "    movl {}(%ebp), %eax", src + copied as i64);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + copied as i64);
+                        let src_ref = self.param_ref(src + copied as i64);
+                        let dst_ref = self.slot_ref_offset(slot, copied as i64);
+                        emit!(self.state, "    movl {}, %eax", src_ref);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
                         copied += 4;
                     }
                     while copied < size {
-                        emit!(self.state, "    movb {}(%ebp), %al", src + copied as i64);
-                        emit!(self.state, "    movb %al, {}(%ebp)", slot.0 + copied as i64);
+                        let src_ref = self.param_ref(src + copied as i64);
+                        let dst_ref = self.slot_ref_offset(slot, copied as i64);
+                        emit!(self.state, "    movb {}, %al", src_ref);
+                        emit!(self.state, "    movb %al, {}", dst_ref);
                         copied += 1;
                     }
                 }
                 ParamClass::F128AlwaysStack { offset } => {
                     let src = stack_base + offset - stack_offset_adjust;
-                    emit!(self.state, "    fldt {}(%ebp)", src);
-                    emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    let src_ref = self.param_ref(src);
+                    let dst_ref = self.slot_ref(slot);
+                    emit!(self.state, "    fldt {}", src_ref);
+                    emit!(self.state, "    fstpt {}", dst_ref);
                     self.state.f128_direct_slots.insert(dest_id);
                 }
                 ParamClass::I128Stack { offset } => {
                     let src = stack_base + offset - stack_offset_adjust;
                     for j in (0..16).step_by(4) {
-                        emit!(self.state, "    movl {}(%ebp), %eax", src + j as i64);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + j as i64);
+                        let src_ref = self.param_ref(src + j as i64);
+                        let dst_ref = self.slot_ref_offset(slot, j as i64);
+                        emit!(self.state, "    movl {}, %eax", src_ref);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
                     }
                 }
                 ParamClass::F128Stack { offset } => {
                     let src = stack_base + offset - stack_offset_adjust;
-                    emit!(self.state, "    fldt {}(%ebp)", src);
-                    emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    let src_ref = self.param_ref(src);
+                    let dst_ref = self.slot_ref(slot);
+                    emit!(self.state, "    fldt {}", src_ref);
+                    emit!(self.state, "    fstpt {}", dst_ref);
                     self.state.f128_direct_slots.insert(dest_id);
                 }
                 ParamClass::IntReg { reg_idx } => {
@@ -312,29 +371,30 @@ impl I686Codegen {
                     let regparm_regs_byte = ["%al", "%dl", "%cl"];
                     let regparm_regs_word = ["%ax", "%dx", "%cx"];
                     let src_full = regparm_regs_full[reg_idx];
+                    let slot_ref = self.slot_ref(slot);
                     match ty {
                         IrType::I8 => {
                             let src_byte = regparm_regs_byte[reg_idx];
                             emit!(self.state, "    movsbl {}, {}", src_byte, src_full);
-                            emit!(self.state, "    movl {}, {}(%ebp)", src_full, slot.0);
+                            emit!(self.state, "    movl {}, {}", src_full, slot_ref);
                         }
                         IrType::U8 => {
                             let src_byte = regparm_regs_byte[reg_idx];
                             emit!(self.state, "    movzbl {}, {}", src_byte, src_full);
-                            emit!(self.state, "    movl {}, {}(%ebp)", src_full, slot.0);
+                            emit!(self.state, "    movl {}, {}", src_full, slot_ref);
                         }
                         IrType::I16 => {
                             let src_word = regparm_regs_word[reg_idx];
                             emit!(self.state, "    movswl {}, {}", src_word, src_full);
-                            emit!(self.state, "    movl {}, {}(%ebp)", src_full, slot.0);
+                            emit!(self.state, "    movl {}, {}", src_full, slot_ref);
                         }
                         IrType::U16 => {
                             let src_word = regparm_regs_word[reg_idx];
                             emit!(self.state, "    movzwl {}, {}", src_word, src_full);
-                            emit!(self.state, "    movl {}, {}(%ebp)", src_full, slot.0);
+                            emit!(self.state, "    movl {}, {}", src_full, slot_ref);
                         }
                         _ => {
-                            emit!(self.state, "    movl {}, {}(%ebp)", src_full, slot.0);
+                            emit!(self.state, "    movl {}, {}", src_full, slot_ref);
                         }
                     }
                 }
@@ -361,21 +421,30 @@ impl I686Codegen {
                 if let Some(dest_slot) = self.state.get_slot(dest.0) {
                     if is_i128_type(ty) {
                         for i in (0..16).step_by(4) {
-                            emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0 + i as i64);
-                            emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + i as i64);
+                            let src_ref = self.slot_ref_offset(alloca_slot, i as i64);
+                            let dst_ref = self.slot_ref_offset(dest_slot, i as i64);
+                            emit!(self.state, "    movl {}, %eax", src_ref);
+                            emit!(self.state, "    movl %eax, {}", dst_ref);
                         }
                     } else if ty == IrType::F128 {
-                        emit!(self.state, "    fldt {}(%ebp)", alloca_slot.0);
-                        emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                        let src_ref = self.slot_ref(alloca_slot);
+                        let dst_ref = self.slot_ref(dest_slot);
+                        emit!(self.state, "    fldt {}", src_ref);
+                        emit!(self.state, "    fstpt {}", dst_ref);
                         self.state.f128_direct_slots.insert(dest.0);
                     } else if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
-                        emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
-                        emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0 + 4);
-                        emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
+                        let src_ref = self.slot_ref(alloca_slot);
+                        let dst_ref = self.slot_ref(dest_slot);
+                        emit!(self.state, "    movl {}, %eax", src_ref);
+                        emit!(self.state, "    movl %eax, {}", dst_ref);
+                        let src_ref_hi = self.slot_ref_offset(alloca_slot, 4);
+                        let dst_ref_hi = self.slot_ref_offset(dest_slot, 4);
+                        emit!(self.state, "    movl {}, %eax", src_ref_hi);
+                        emit!(self.state, "    movl %eax, {}", dst_ref_hi);
                     } else {
                         let load_instr = self.mov_load_for_type(ty);
-                        emit!(self.state, "    {} {}(%ebp), %eax", load_instr, alloca_slot.0);
+                        let src_ref = self.slot_ref(alloca_slot);
+                        emit!(self.state, "    {} {}, %eax", load_instr, src_ref);
                         self.store_eax_to(dest);
                     }
                     return;
@@ -386,7 +455,8 @@ impl I686Codegen {
         if self.is_fastcall && param_idx < self.fastcall_reg_param_count {
             if let Some(Some((slot, _slot_ty))) = self.state.param_alloca_slots.get(param_idx) {
                 let load_instr = self.mov_load_for_type(ty);
-                emit!(self.state, "    {} {}(%ebp), %eax", load_instr, slot.0);
+                let slot_ref = self.slot_ref(*slot);
+                emit!(self.state, "    {} {}, %eax", load_instr, slot_ref);
                 self.store_eax_to(dest);
             }
             return;
@@ -418,26 +488,35 @@ impl I686Codegen {
         if is_i128_type(ty) {
             if let Some(slot) = self.state.get_slot(dest.0) {
                 for i in (0..16).step_by(4) {
-                    emit!(self.state, "    movl {}(%ebp), %eax", param_offset + i as i64);
-                    emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + i as i64);
+                    let src_ref = self.param_ref(param_offset + i as i64);
+                    let dst_ref = self.slot_ref_offset(slot, i as i64);
+                    emit!(self.state, "    movl {}, %eax", src_ref);
+                    emit!(self.state, "    movl %eax, {}", dst_ref);
                 }
             }
         } else if ty == IrType::F128 {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                emit!(self.state, "    fldt {}(%ebp)", param_offset);
-                emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                let src_ref = self.param_ref(param_offset);
+                let dst_ref = self.slot_ref(dest_slot);
+                emit!(self.state, "    fldt {}", src_ref);
+                emit!(self.state, "    fstpt {}", dst_ref);
                 self.state.f128_direct_slots.insert(dest.0);
             }
         } else if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
             if let Some(slot) = self.state.get_slot(dest.0) {
-                emit!(self.state, "    movl {}(%ebp), %eax", param_offset);
-                emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-                emit!(self.state, "    movl {}(%ebp), %eax", param_offset + 4);
-                emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + 4);
+                let src_ref = self.param_ref(param_offset);
+                let dst_ref = self.slot_ref(slot);
+                emit!(self.state, "    movl {}, %eax", src_ref);
+                emit!(self.state, "    movl %eax, {}", dst_ref);
+                let src_ref_hi = self.param_ref(param_offset + 4);
+                let dst_ref_hi = self.slot_ref_offset(slot, 4);
+                emit!(self.state, "    movl {}, %eax", src_ref_hi);
+                emit!(self.state, "    movl %eax, {}", dst_ref_hi);
             }
         } else {
             let load_instr = self.mov_load_for_type(ty);
-            emit!(self.state, "    {} {}(%ebp), %eax", load_instr, param_offset);
+            let src_ref = self.param_ref(param_offset);
+            emit!(self.state, "    {} {}, %eax", load_instr, src_ref);
             self.store_eax_to(dest);
         }
     }

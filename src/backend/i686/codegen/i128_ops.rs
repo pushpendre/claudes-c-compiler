@@ -23,8 +23,10 @@ impl I686Codegen {
         match op {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-                    emit!(self.state, "    movl {}(%ebp), %edx", slot.0 + 4);
+                    let sr0 = self.slot_ref(slot);
+                    let sr4 = self.slot_ref_offset(slot, 4);
+                    emit!(self.state, "    movl {}, %eax", sr0);
+                    emit!(self.state, "    movl {}, %edx", sr4);
                 } else if let Some(phys) = self.reg_assignments.get(&v.0).copied() {
                     let reg = super::codegen::phys_reg_name(phys);
                     emit!(self.state, "    movl %{}, %eax", reg);
@@ -71,19 +73,25 @@ impl I686Codegen {
 
     pub(super) fn emit_store_acc_pair_impl(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-            emit!(self.state, "    movl %edx, {}(%ebp)", slot.0 + 4);
+            let sr0 = self.slot_ref(slot);
+            let sr4 = self.slot_ref_offset(slot, 4);
+            emit!(self.state, "    movl %eax, {}", sr0);
+            emit!(self.state, "    movl %edx, {}", sr4);
         }
     }
 
     pub(super) fn emit_store_pair_to_slot_impl(&mut self, slot: StackSlot) {
-        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-        emit!(self.state, "    movl %edx, {}(%ebp)", slot.0 + 4);
+        let sr0 = self.slot_ref(slot);
+        let sr4 = self.slot_ref_offset(slot, 4);
+        emit!(self.state, "    movl %eax, {}", sr0);
+        emit!(self.state, "    movl %edx, {}", sr4);
     }
 
     pub(super) fn emit_load_pair_from_slot_impl(&mut self, slot: StackSlot) {
-        emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-        emit!(self.state, "    movl {}(%ebp), %edx", slot.0 + 4);
+        let sr0 = self.slot_ref(slot);
+        let sr4 = self.slot_ref_offset(slot, 4);
+        emit!(self.state, "    movl {}, %eax", sr0);
+        emit!(self.state, "    movl {}, %edx", sr4);
     }
 
     pub(super) fn emit_save_acc_pair_impl(&mut self) {
@@ -186,7 +194,9 @@ impl I686Codegen {
     pub(super) fn emit_i128_prep_binop_impl(&mut self, lhs: &Operand, rhs: &Operand) {
         self.emit_load_acc_pair(rhs);
         self.state.emit("    pushl %edx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %eax");
+        self.esp_adjust += 4;
         self.emit_load_acc_pair(lhs);
     }
 
@@ -198,12 +208,14 @@ impl I686Codegen {
         self.state.emit("    addl (%esp), %eax");
         self.state.emit("    adcl 4(%esp), %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_sub_impl(&mut self) {
         self.state.emit("    subl (%esp), %eax");
         self.state.emit("    sbbl 4(%esp), %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_mul_impl(&mut self) {
@@ -215,24 +227,28 @@ impl I686Codegen {
         self.state.emit("    mull (%esp)");
         self.state.emit("    addl %ecx, %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_and_impl(&mut self) {
         self.state.emit("    andl (%esp), %eax");
         self.state.emit("    andl 4(%esp), %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_or_impl(&mut self) {
         self.state.emit("    orl (%esp), %eax");
         self.state.emit("    orl 4(%esp), %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_xor_impl(&mut self) {
         self.state.emit("    xorl (%esp), %eax");
         self.state.emit("    xorl 4(%esp), %edx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_shl_impl(&mut self) {
@@ -240,6 +256,7 @@ impl I686Codegen {
         let done_label = format!(".Lshl64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
         self.state.emit("    shldl %cl, %eax, %edx");
         self.state.emit("    shll %cl, %eax");
         self.state.emit("    testb $32, %cl");
@@ -254,6 +271,7 @@ impl I686Codegen {
         let done_label = format!(".Llshr64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
         self.state.emit("    shrdl %cl, %edx, %eax");
         self.state.emit("    shrl %cl, %edx");
         self.state.emit("    testb $32, %cl");
@@ -268,6 +286,7 @@ impl I686Codegen {
         let done_label = format!(".Lashr64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
         self.state.emit("    shrdl %cl, %edx, %eax");
         self.state.emit("    sarl %cl, %edx");
         self.state.emit("    testb $32, %cl");
@@ -290,7 +309,9 @@ impl I686Codegen {
 
         self.emit_load_acc_pair(rhs);
         self.state.emit("    pushl %edx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %eax");
+        self.esp_adjust += 4;
         self.emit_load_acc_pair(lhs);
         self.state.emit("    pushl %edx");
         self.state.emit("    pushl %eax");
@@ -300,6 +321,7 @@ impl I686Codegen {
             emit!(self.state, "    call {}", di_func);
         }
         self.state.emit("    addl $16, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_store_result_impl(&mut self, dest: &Value) {
@@ -368,6 +390,7 @@ impl I686Codegen {
         }
         self.state.emit("    movzbl %al, %eax");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_cmp_ordered_impl(&mut self, op: IrCmpOp) {
@@ -423,6 +446,7 @@ impl I686Codegen {
         }
         self.state.emit("    movzbl %al, %eax");
         self.state.emit("    addl $8, %esp");
+        self.esp_adjust -= 8;
     }
 
     pub(super) fn emit_i128_cmp_store_result_impl(&mut self, dest: &Value) {

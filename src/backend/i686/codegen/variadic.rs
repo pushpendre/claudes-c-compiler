@@ -15,23 +15,27 @@ impl I686Codegen {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
                 for i in (0..16).step_by(4) {
                     emit!(self.state, "    movl {}(%ecx), %eax", i);
-                    emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + i as i64);
+                    let sr = self.slot_ref_offset(dest_slot, i as i64);
+                    emit!(self.state, "    movl %eax, {}", sr);
                 }
             }
             self.state.emit("    addl $16, %ecx");
         } else if result_ty == IrType::F128 {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
                 self.state.emit("    fldt (%ecx)");
-                emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                let sr = self.slot_ref(dest_slot);
+                emit!(self.state, "    fstpt {}", sr);
                 self.state.f128_direct_slots.insert(dest.0);
             }
             self.state.emit("    addl $12, %ecx");
         } else if result_ty == IrType::F64 || result_ty == IrType::I64 || result_ty == IrType::U64 {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                let sr0 = self.slot_ref(dest_slot);
+                let sr4 = self.slot_ref_offset(dest_slot, 4);
                 self.state.emit("    movl (%ecx), %eax");
-                emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
+                emit!(self.state, "    movl %eax, {}", sr0);
                 self.state.emit("    movl 4(%ecx), %eax");
-                emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
+                emit!(self.state, "    movl %eax, {}", sr4);
             }
             self.state.emit("    addl $8, %ecx");
         } else {
@@ -48,7 +52,9 @@ impl I686Codegen {
     pub(super) fn emit_va_start_impl(&mut self, va_list_ptr: &Value) {
         let vararg_offset = 8 + self.va_named_stack_bytes as i64;
         self.load_va_list_addr_to_edx(va_list_ptr);
-        emit!(self.state, "    leal {}(%ebp), %eax", vararg_offset);
+        // vararg_offset is an EBP-relative param offset
+        let pr = self.param_ref(vararg_offset);
+        emit!(self.state, "    leal {}, %eax", pr);
         self.state.emit("    movl %eax, (%edx)");
     }
 

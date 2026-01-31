@@ -152,16 +152,19 @@ impl Driver {
                     self.opt_level = 2; // internally always optimize
                     self.optimize = false;
                     self.optimize_size = false;
+                    self.omit_frame_pointer = false;
                 }
                 "-O" | "-O1" | "-O2" | "-O3" => {
                     self.opt_level = 2;
                     self.optimize = true;
                     self.optimize_size = false;
+                    self.omit_frame_pointer = true;
                 }
                 "-Os" | "-Oz" => {
                     self.opt_level = 2;
                     self.optimize = true;
                     self.optimize_size = true;
+                    self.omit_frame_pointer = true;
                 }
 
                 // Debug info

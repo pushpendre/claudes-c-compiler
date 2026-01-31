@@ -21,7 +21,8 @@ impl I686Codegen {
                         self.state.emit("    fstpt (%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                        let sr = self.slot_ref(slot);
+                        emit!(self.state, "    fstpt {}", sr);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, ptr.0);
@@ -39,24 +40,34 @@ impl I686Codegen {
                 match addr {
                     SlotAddr::OverAligned(slot, id) => {
                         self.state.emit("    pushl %edx");
+                        self.esp_adjust += 4;
                         self.state.emit("    pushl %eax");
+                        self.esp_adjust += 4;
                         self.emit_alloca_aligned_addr(slot, id);
                         self.state.emit("    popl %eax");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %eax, (%ecx)");
                         self.state.emit("    popl %edx");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %edx, 4(%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-                        emit!(self.state, "    movl %edx, {}(%ebp)", slot.0 + 4);
+                        let sr0 = self.slot_ref(slot);
+                        let sr4 = self.slot_ref_offset(slot, 4);
+                        emit!(self.state, "    movl %eax, {}", sr0);
+                        emit!(self.state, "    movl %edx, {}", sr4);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.state.emit("    pushl %edx");
+                        self.esp_adjust += 4;
                         self.state.emit("    pushl %eax");
+                        self.esp_adjust += 4;
                         self.emit_load_ptr_from_slot(slot, ptr.0);
                         self.state.emit("    popl %eax");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %eax, (%ecx)");
                         self.state.emit("    popl %edx");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %edx, 4(%ecx)");
                     }
                 }
@@ -77,7 +88,8 @@ impl I686Codegen {
                         self.state.emit("    fldt (%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        emit!(self.state, "    fldt {}(%ebp)", slot.0);
+                        let sr = self.slot_ref(slot);
+                        emit!(self.state, "    fldt {}", sr);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, ptr.0);
@@ -85,7 +97,8 @@ impl I686Codegen {
                     }
                 }
                 if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    let sr = self.slot_ref(dest_slot);
+                    emit!(self.state, "    fstpt {}", sr);
                     self.state.f128_direct_slots.insert(dest.0);
                 }
             }
@@ -101,8 +114,10 @@ impl I686Codegen {
                         self.state.emit("    movl 4(%ecx), %edx");
                     }
                     SlotAddr::Direct(slot) => {
-                        emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-                        emit!(self.state, "    movl {}(%ebp), %edx", slot.0 + 4);
+                        let sr0 = self.slot_ref(slot);
+                        let sr4 = self.slot_ref_offset(slot, 4);
+                        emit!(self.state, "    movl {}, %eax", sr0);
+                        emit!(self.state, "    movl {}, %edx", sr4);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, ptr.0);
@@ -132,8 +147,9 @@ impl I686Codegen {
                         self.state.emit("    fstpt (%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        let folded = slot.0 + offset;
-                        emit!(self.state, "    fstpt {}(%ebp)", folded);
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        let sr = self.slot_ref(folded_slot);
+                        emit!(self.state, "    fstpt {}", sr);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, base.0);
@@ -154,31 +170,41 @@ impl I686Codegen {
                 match addr {
                     SlotAddr::OverAligned(slot, id) => {
                         self.state.emit("    pushl %edx");
+                        self.esp_adjust += 4;
                         self.state.emit("    pushl %eax");
+                        self.esp_adjust += 4;
                         self.emit_alloca_aligned_addr(slot, id);
                         if offset != 0 {
                             self.emit_add_offset_to_addr_reg(offset);
                         }
                         self.state.emit("    popl %eax");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %eax, (%ecx)");
                         self.state.emit("    popl %edx");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %edx, 4(%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        let folded = slot.0 + offset;
-                        emit!(self.state, "    movl %eax, {}(%ebp)", folded);
-                        emit!(self.state, "    movl %edx, {}(%ebp)", folded + 4);
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        let sr0 = self.slot_ref(folded_slot);
+                        let sr4 = self.slot_ref_offset(folded_slot, 4);
+                        emit!(self.state, "    movl %eax, {}", sr0);
+                        emit!(self.state, "    movl %edx, {}", sr4);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.state.emit("    pushl %edx");
+                        self.esp_adjust += 4;
                         self.state.emit("    pushl %eax");
+                        self.esp_adjust += 4;
                         self.emit_load_ptr_from_slot(slot, base.0);
                         if offset != 0 {
                             self.emit_add_offset_to_addr_reg(offset);
                         }
                         self.state.emit("    popl %eax");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %eax, (%ecx)");
                         self.state.emit("    popl %edx");
+                        self.esp_adjust -= 4;
                         self.state.emit("    movl %edx, 4(%ecx)");
                     }
                 }
@@ -227,8 +253,9 @@ impl I686Codegen {
                         self.state.emit("    fldt (%ecx)");
                     }
                     SlotAddr::Direct(slot) => {
-                        let folded = slot.0 + offset;
-                        emit!(self.state, "    fldt {}(%ebp)", folded);
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        let sr = self.slot_ref(folded_slot);
+                        emit!(self.state, "    fldt {}", sr);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, base.0);
@@ -239,7 +266,8 @@ impl I686Codegen {
                     }
                 }
                 if let Some(dest_slot) = self.state.get_slot(dest.0) {
-                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    let sr = self.slot_ref(dest_slot);
+                    emit!(self.state, "    fstpt {}", sr);
                     self.state.f128_direct_slots.insert(dest.0);
                 }
             }
@@ -258,9 +286,11 @@ impl I686Codegen {
                         self.state.emit("    movl 4(%ecx), %edx");
                     }
                     SlotAddr::Direct(slot) => {
-                        let folded = slot.0 + offset;
-                        emit!(self.state, "    movl {}(%ebp), %eax", folded);
-                        emit!(self.state, "    movl {}(%ebp), %edx", folded + 4);
+                        let folded_slot = StackSlot(slot.0 + offset);
+                        let sr0 = self.slot_ref(folded_slot);
+                        let sr4 = self.slot_ref_offset(folded_slot, 4);
+                        emit!(self.state, "    movl {}, %eax", sr0);
+                        emit!(self.state, "    movl {}, %edx", sr4);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_ptr_from_slot(slot, base.0);
@@ -305,11 +335,13 @@ impl I686Codegen {
 
     pub(super) fn emit_typed_store_to_slot_impl(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) {
         let reg = self.eax_for_type(ty);
-        emit!(self.state, "    {} {}, {}(%ebp)", instr, reg, slot.0);
+        let sr = self.slot_ref(slot);
+        emit!(self.state, "    {} {}, {}", instr, reg, sr);
     }
 
     pub(super) fn emit_typed_load_from_slot_impl(&mut self, instr: &'static str, slot: StackSlot) {
-        emit!(self.state, "    {} {}(%ebp), %eax", instr, slot.0);
+        let sr = self.slot_ref(slot);
+        emit!(self.state, "    {} {}, %eax", instr, sr);
     }
 
     pub(super) fn emit_load_ptr_from_slot_impl(&mut self, slot: StackSlot, val_id: u32) {
@@ -317,7 +349,8 @@ impl I686Codegen {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %ecx", reg);
         } else {
-            emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl {}, %ecx", sr);
         }
     }
 
@@ -344,18 +377,21 @@ impl I686Codegen {
 
     pub(super) fn emit_slot_addr_to_secondary_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    leal {}, %ecx", sr);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %ecx", reg);
         } else {
-            emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl {}, %ecx", sr);
         }
     }
 
     pub(super) fn emit_gep_direct_const_impl(&mut self, slot: StackSlot, offset: i64) {
-        let total = slot.0 + offset;
-        emit!(self.state, "    leal {}(%ebp), %eax", total);
+        let folded_slot = StackSlot(slot.0 + offset);
+        let sr = self.slot_ref(folded_slot);
+        emit!(self.state, "    leal {}, %eax", sr);
     }
 
     pub(super) fn emit_gep_indirect_const_impl(&mut self, slot: StackSlot, offset: i64, val_id: u32) {
@@ -367,7 +403,8 @@ impl I686Codegen {
                 emit!(self.state, "    leal {}(%{}), %eax", offset, reg);
             }
         } else {
-            emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl {}, %eax", sr);
             if offset != 0 {
                 emit!(self.state, "    addl ${}, %eax", offset as i32);
             }
@@ -406,7 +443,8 @@ impl I686Codegen {
     // ---- Alloca aligned addr ----
 
     pub(super) fn emit_alloca_aligned_addr_impl(&mut self, slot: StackSlot, _val_id: u32) {
-        emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
+        let sr = self.slot_ref(slot);
+        emit!(self.state, "    leal {}, %ecx", sr);
         let align = (-slot.0) as usize;
         if align > 1 {
             emit!(self.state, "    addl ${}, %ecx", align - 1);
@@ -415,7 +453,8 @@ impl I686Codegen {
     }
 
     pub(super) fn emit_alloca_aligned_addr_to_acc_impl(&mut self, slot: StackSlot, _val_id: u32) {
-        emit!(self.state, "    leal {}(%ebp), %eax", slot.0);
+        let sr = self.slot_ref(slot);
+        emit!(self.state, "    leal {}, %eax", sr);
         let align = (-slot.0) as usize;
         if align > 1 {
             emit!(self.state, "    addl ${}, %eax", align - 1);
@@ -428,23 +467,27 @@ impl I686Codegen {
 
     pub(super) fn emit_memcpy_load_dest_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            emit!(self.state, "    leal {}(%ebp), %edi", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    leal {}, %edi", sr);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %edi", reg);
         } else {
-            emit!(self.state, "    movl {}(%ebp), %edi", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl {}, %edi", sr);
         }
     }
 
     pub(super) fn emit_memcpy_load_src_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            emit!(self.state, "    leal {}(%ebp), %esi", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    leal {}, %esi", sr);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %esi", reg);
         } else {
-            emit!(self.state, "    movl {}(%ebp), %esi", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl {}, %esi", sr);
         }
     }
 

@@ -95,10 +95,12 @@ impl I686Codegen {
         self.state.emit("    movl %eax, %edx");
         self.operand_to_eax(desired);
         self.state.emit("    pushl %eax");
+        self.esp_adjust += 4;
         self.operand_to_eax(ptr);
         self.state.emit("    movl %eax, %ecx");
         self.state.emit("    movl %edx, %eax");
         self.state.emit("    popl %edx");
+        self.esp_adjust -= 4;
         let suffix = self.type_suffix(ty);
         let reg = match ty {
             IrType::I8 | IrType::U8 => "%dl",

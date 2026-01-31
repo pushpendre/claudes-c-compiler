@@ -62,11 +62,22 @@ pub struct I686Codegen {
     pub(super) regparm: u8,
     /// Whether to omit the frame pointer (-fomit-frame-pointer).
     pub(super) omit_frame_pointer: bool,
+    /// When omit_frame_pointer is true, this holds the offset from ESP (at its
+    /// base position after prologue) to where EBP would have pointed.
+    /// slot_ref() adds this to convert EBP-relative slot offsets to ESP-relative.
+    /// Value: frame_size + callee_saved_bytes (without the pushed EBP).
+    pub(super) frame_base_offset: i64,
+    /// Tracks temporary ESP adjustments (e.g., subl $N,%esp for call args,
+    /// subl $4,%esp for f32 conversion). Incremented on subl, decremented on addl.
+    /// Added to frame_base_offset in slot_ref() to get the correct ESP offset.
+    pub(super) esp_adjust: i64,
 }
 
 // Callee-saved physical register indices for i686
-// PhysReg(0) = ebx, PhysReg(1) = esi, PhysReg(2) = edi
+// PhysReg(0) = ebx, PhysReg(1) = esi, PhysReg(2) = edi, PhysReg(3) = ebp
 pub(super) const I686_CALLEE_SAVED: &[PhysReg] = &[PhysReg(0), PhysReg(1), PhysReg(2)];
+// Extended callee-saved list including ebp (used when -fomit-frame-pointer)
+pub(super) const I686_CALLEE_SAVED_WITH_EBP: &[PhysReg] = &[PhysReg(0), PhysReg(1), PhysReg(2), PhysReg(3)];
 // No caller-saved registers available for allocation (eax/ecx/edx are scratch)
 pub(super) const I686_CALLER_SAVED: &[PhysReg] = &[];
 
@@ -75,6 +86,7 @@ pub(super) fn phys_reg_name(reg: PhysReg) -> &'static str {
         0 => "ebx",
         1 => "esi",
         2 => "edi",
+        3 => "ebp",
         _ => panic!("invalid i686 phys reg: {:?}", reg),
     }
 }
@@ -116,6 +128,8 @@ impl I686Codegen {
             needs_pc_thunk_bx: false,
             regparm: 0,
             omit_frame_pointer: false,
+            frame_base_offset: 0,
+            esp_adjust: 0,
         }
     }
 
@@ -137,6 +151,48 @@ impl I686Codegen {
 
     // --- i686 helper methods ---
 
+    /// Format a stack slot reference as either `offset(%ebp)` or `offset(%esp)`.
+    /// When frame pointer is omitted, converts EBP-relative offsets to ESP-relative
+    /// by adding frame_base_offset + esp_adjust.
+    pub(super) fn slot_ref(&self, slot: StackSlot) -> String {
+        if self.omit_frame_pointer {
+            let esp_off = slot.0 + self.frame_base_offset + self.esp_adjust;
+            format!("{}(%esp)", esp_off)
+        } else {
+            format!("{}(%ebp)", slot.0)
+        }
+    }
+
+    /// Format a stack slot reference with an additional byte offset.
+    /// Used for accessing sub-fields of multi-byte slots (e.g., upper 4 bytes of i64).
+    pub(super) fn slot_ref_offset(&self, slot: StackSlot, extra: i64) -> String {
+        if self.omit_frame_pointer {
+            let esp_off = slot.0 + extra + self.frame_base_offset + self.esp_adjust;
+            format!("{}(%esp)", esp_off)
+        } else {
+            format!("{}(%ebp)", slot.0 + extra)
+        }
+    }
+
+    /// Format a parameter reference from the caller's stack frame.
+    /// With frame pointer: offset(%ebp) where offset is positive (above EBP).
+    /// Without frame pointer: params are at ESP + frame_base_offset + esp_adjust + offset,
+    /// but we need to subtract 4 because there's no pushed EBP taking up space.
+    /// The param_offset is the EBP-relative offset (e.g., 8 for first param).
+    pub(super) fn param_ref(&self, ebp_offset: i64) -> String {
+        if self.omit_frame_pointer {
+            // Without pushed EBP, params are 4 bytes closer to the frame.
+            // EBP would have been at original_esp - 4 (after push ebp).
+            // Without push ebp, the return address is at original_esp.
+            // So param at ebp_offset(%ebp) = (ebp_offset - 4) relative to original_esp.
+            // And relative to current ESP: ebp_offset - 4 + frame_base_offset + esp_adjust.
+            let esp_off = ebp_offset - 4 + self.frame_base_offset + self.esp_adjust;
+            format!("{}(%esp)", esp_off)
+        } else {
+            format!("{}(%ebp)", ebp_offset)
+        }
+    }
+
     pub(super) fn dest_reg(&self, dest: &Value) -> Option<PhysReg> {
         self.reg_assignments.get(&dest.0).copied()
     }
@@ -155,12 +211,13 @@ impl I686Codegen {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %edx", reg);
         } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            let sr = self.slot_ref(slot);
             if is_alloca {
                 // Alloca: the slot IS the va_list; get the address of the slot
-                emit!(self.state, "    leal {}(%ebp), %edx", slot.0);
+                emit!(self.state, "    leal {}, %edx", sr);
             } else {
                 // Regular value: the slot holds a pointer to the va_list storage
-                emit!(self.state, "    movl {}(%ebp), %edx", slot.0);
+                emit!(self.state, "    movl {}, %edx", sr);
             }
         }
     }
@@ -226,19 +283,20 @@ impl I686Codegen {
                     emit!(self.state, "    movl %{}, %eax", reg);
                     self.state.reg_cache.set_acc(v.0, false);
                 } else if let Some(slot) = self.state.get_slot(v.0) {
+                    let sr = self.slot_ref(slot);
                     if is_alloca {
                         // Alloca: the slot IS the data; load the address of the slot
                         if let Some(align) = self.state.alloca_over_align(v.0) {
                             // Over-aligned alloca: compute aligned address
-                            emit!(self.state, "    leal {}(%ebp), %eax", slot.0);
+                            emit!(self.state, "    leal {}, %eax", sr);
                             emit!(self.state, "    addl ${}, %eax", align - 1);
                             emit!(self.state, "    andl ${}, %eax", -(align as i32));
                         } else {
-                            emit!(self.state, "    leal {}(%ebp), %eax", slot.0);
+                            emit!(self.state, "    leal {}, %eax", sr);
                         }
                     } else {
                         // Regular value: load the value from the slot
-                        emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
+                        emit!(self.state, "    movl {}, %eax", sr);
                     }
                     self.state.reg_cache.set_acc(v.0, is_alloca);
                 }
@@ -251,8 +309,10 @@ impl I686Codegen {
     /// is nonzero iff either half is nonzero.
     pub(super) fn emit_wide_value_to_eax_ored(&mut self, value_id: u32) {
         if let Some(slot) = self.state.get_slot(value_id) {
-            emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-            emit!(self.state, "    orl {}(%ebp), %eax", slot.0 + 4);
+            let sr0 = self.slot_ref(slot);
+            let sr4 = self.slot_ref_offset(slot, 4);
+            emit!(self.state, "    movl {}, %eax", sr0);
+            emit!(self.state, "    orl {}, %eax", sr4);
         } else {
             // Wide values (I64/F64) on i686 should always have stack slots since
             // they can't fit in a single 32-bit register. Fall back to loading
@@ -307,17 +367,18 @@ impl I686Codegen {
                     let reg = phys_reg_name(phys);
                     emit!(self.state, "    movl %{}, %ecx", reg);
                 } else if let Some(slot) = self.state.get_slot(v.0) {
+                    let sr = self.slot_ref(slot);
                     if is_alloca {
                         // Alloca: load the address of the slot
                         if let Some(align) = self.state.alloca_over_align(v.0) {
-                            emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
+                            emit!(self.state, "    leal {}, %ecx", sr);
                             emit!(self.state, "    addl ${}, %ecx", align - 1);
                             emit!(self.state, "    andl ${}, %ecx", -(align as i32));
                         } else {
-                            emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
+                            emit!(self.state, "    leal {}, %ecx", sr);
                         }
                     } else {
-                        emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
+                        emit!(self.state, "    movl {}, %ecx", sr);
                     }
                 } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
                     // Value is in accumulator (no stack slot) — move eax to ecx.
@@ -336,14 +397,16 @@ impl I686Codegen {
             emit!(self.state, "    movl %eax, %{}", reg);
             self.state.reg_cache.invalidate_acc();
         } else if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    movl %eax, {}", sr);
             // If this dest is a wide value (I64/U64/F64), zero the upper 4 bytes.
             // Wide values occupy 8-byte slots, and other paths (e.g. Copy from
             // IrConst::I64) may write all 8 bytes. If we only write the low 4,
             // the upper half retains stack garbage, which corrupts truthiness
             // checks that OR both halves (emit_wide_value_to_eax_ored).
             if self.state.wide_values.contains(&dest.0) {
-                emit!(self.state, "    movl $0, {}(%ebp)", slot.0 + 4);
+                let sr4 = self.slot_ref_offset(slot, 4);
+                emit!(self.state, "    movl $0, {}", sr4);
             }
             self.state.reg_cache.set_acc(dest.0, false);
         }
@@ -455,7 +518,8 @@ impl I686Codegen {
         match op {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    fldt {}(%ebp)", slot.0);
+                    let sr = self.slot_ref(slot);
+                    emit!(self.state, "    fldt {}", sr);
                 }
             }
             Operand::Const(IrConst::LongDouble(_, bytes)) => {
@@ -505,7 +569,8 @@ impl I686Codegen {
         match op {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    fldl {}(%ebp)", slot.0);
+                    let sr = self.slot_ref(slot);
+                    emit!(self.state, "    fldl {}", sr);
                 }
             }
             Operand::Const(IrConst::F64(fval)) => {
@@ -541,7 +606,8 @@ impl I686Codegen {
     /// Pops st(0).
     pub(super) fn emit_f64_store_from_x87(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    fstpl {}(%ebp)", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    fstpl {}", sr);
         } else {
             // No slot available, pop x87 stack to discard
             self.state.emit("    fstp %st(0)");
@@ -570,7 +636,9 @@ impl I686Codegen {
                             val: &Operand) {
         // Save callee-saved registers we need to clobber
         self.state.emit("    pushl %ebx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %esi");
+        self.esp_adjust += 4;
 
         // Load pointer into esi
         self.operand_to_eax(ptr);
@@ -672,7 +740,9 @@ impl I686Codegen {
         self.state.emit("    addl $8, %esp");
         // Restore callee-saved registers
         self.state.emit("    popl %esi");
+        self.esp_adjust -= 4;
         self.state.emit("    popl %ebx");
+        self.esp_adjust -= 4;
 
         // Result (old value) is in edx:eax — store to dest's 64-bit stack slot
         self.state.reg_cache.invalidate_acc();
@@ -688,7 +758,9 @@ impl I686Codegen {
                                 desired: &Operand, returns_bool: bool) {
         // Save callee-saved registers
         self.state.emit("    pushl %ebx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %esi");
+        self.esp_adjust += 4;
 
         // Load pointer into esi
         self.operand_to_eax(ptr);
@@ -697,7 +769,9 @@ impl I686Codegen {
         // Load expected into edx:eax, save on stack temporarily
         self.emit_load_acc_pair(expected);
         self.state.emit("    pushl %edx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %eax");
+        self.esp_adjust += 4;
 
         // Load desired into ecx:ebx
         self.emit_load_acc_pair(desired);
@@ -706,7 +780,9 @@ impl I686Codegen {
 
         // Restore expected into edx:eax
         self.state.emit("    popl %eax");
+        self.esp_adjust -= 4;
         self.state.emit("    popl %edx");
+        self.esp_adjust -= 4;
 
         // Execute cmpxchg8b
         self.state.emit("    lock cmpxchg8b (%esi)");
@@ -716,14 +792,18 @@ impl I686Codegen {
             self.state.emit("    movzbl %al, %eax");
             // Restore callee-saved registers
             self.state.emit("    popl %esi");
+            self.esp_adjust -= 4;
             self.state.emit("    popl %ebx");
+            self.esp_adjust -= 4;
             self.state.reg_cache.invalidate_acc();
             self.store_eax_to(dest);
         } else {
             // Result (old value) is in edx:eax
             // Restore callee-saved registers
             self.state.emit("    popl %esi");
+            self.esp_adjust -= 4;
             self.state.emit("    popl %ebx");
+            self.esp_adjust -= 4;
             self.state.reg_cache.invalidate_acc();
             self.emit_store_acc_pair(dest);
         }
@@ -737,7 +817,9 @@ impl I686Codegen {
     /// we get the current value in edx:eax without modifying memory.
     pub(super) fn emit_atomic_load_wide(&mut self, dest: &Value, ptr: &Operand) {
         self.state.emit("    pushl %ebx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %esi");
+        self.esp_adjust += 4;
 
         self.operand_to_eax(ptr);
         self.state.emit("    movl %eax, %esi");
@@ -751,7 +833,9 @@ impl I686Codegen {
         self.state.emit("    lock cmpxchg8b (%esi)");
 
         self.state.emit("    popl %esi");
+        self.esp_adjust -= 4;
         self.state.emit("    popl %ebx");
+        self.esp_adjust -= 4;
 
         self.state.reg_cache.invalidate_acc();
         self.emit_store_acc_pair(dest);
@@ -763,7 +847,9 @@ impl I686Codegen {
     /// use a cmpxchg8b loop: read current value, try to replace with desired.
     pub(super) fn emit_atomic_store_wide(&mut self, ptr: &Operand, val: &Operand) {
         self.state.emit("    pushl %ebx");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %esi");
+        self.esp_adjust += 4;
 
         // Load pointer into esi
         self.operand_to_eax(ptr);
@@ -784,7 +870,9 @@ impl I686Codegen {
         emit!(self.state, "    jne {}", loop_label);
 
         self.state.emit("    popl %esi");
+        self.esp_adjust -= 4;
         self.state.emit("    popl %ebx");
+        self.esp_adjust -= 4;
         self.state.reg_cache.invalidate_acc();
     }
 
@@ -830,6 +918,7 @@ impl I686Codegen {
         // Phase 1: Allocate stack space and write stack args.
         if stack_arg_space > 0 {
             emit!(self.state, "    subl ${}, %esp", stack_arg_space);
+            self.esp_adjust += stack_arg_space as i64;
         }
 
         // Write stack args (skipping register args).
@@ -856,7 +945,8 @@ impl I686Codegen {
                     if let Operand::Value(v) = arg {
                         if let Some(slot) = self.state.get_slot(v.0) {
                             for j in (0..16).step_by(4) {
-                                emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
+                                let sr = self.slot_ref_offset(slot, j as i64);
+                                emit!(self.state, "    movl {}, %eax", sr);
                                 emit!(self.state, "    movl %eax, {}(%esp)", offset + j as i64);
                             }
                         }
@@ -896,13 +986,17 @@ impl I686Codegen {
         // Phase 4: For indirect calls, pop the spilled function pointer.
         // Note: callee already cleaned up the stack args, so we only need
         // to handle the fptr spill and alignment padding.
+        // After call: callee popped stack_bytes, so esp_adjust drops by that amount.
+        self.esp_adjust -= stack_bytes as i64;
         if indirect {
             self.state.emit("    addl $4, %esp"); // pop fptr spill
+            self.esp_adjust -= 4;
         }
         // Clean up alignment padding (the difference between actual stack bytes and aligned)
         let padding = stack_arg_space - stack_bytes;
         if padding > 0 {
             emit!(self.state, "    addl ${}, %esp", padding);
+            self.esp_adjust -= padding as i64;
         }
 
         // Phase 5: Store return value.
@@ -1002,15 +1096,17 @@ impl I686Codegen {
     }
 
     /// Copy `n_bytes` from stack slot to call stack area, 4 bytes at a time.
-    pub(super) fn emit_copy_slot_to_stack(&mut self, slot_offset: i64, stack_offset: usize, n_bytes: usize) {
+    pub(super) fn emit_copy_slot_to_stack(&mut self, slot: StackSlot, stack_offset: usize, n_bytes: usize) {
         let mut copied = 0usize;
         while copied + 4 <= n_bytes {
-            emit!(self.state, "    movl {}(%ebp), %eax", slot_offset + copied as i64);
+            let sr = self.slot_ref_offset(slot, copied as i64);
+            emit!(self.state, "    movl {}, %eax", sr);
             emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + copied);
             copied += 4;
         }
         while copied < n_bytes {
-            emit!(self.state, "    movb {}(%ebp), %al", slot_offset + copied as i64);
+            let sr = self.slot_ref_offset(slot, copied as i64);
+            emit!(self.state, "    movb {}, %al", sr);
             emit!(self.state, "    movb %al, {}(%esp)", stack_offset + copied);
             copied += 1;
         }
@@ -1030,7 +1126,7 @@ impl I686Codegen {
     pub(super) fn emit_call_i128_stack_arg(&mut self, arg: &Operand, stack_offset: usize) {
         if let Operand::Value(v) = arg {
             if let Some(slot) = self.state.get_slot(v.0) {
-                self.emit_copy_slot_to_stack(slot.0, stack_offset, 16);
+                self.emit_copy_slot_to_stack(slot, stack_offset, 16);
             } else {
                 self.emit_eax_to_stack_zeroed(arg, stack_offset, 16);
             }
@@ -1043,11 +1139,12 @@ impl I686Codegen {
             Operand::Value(v) => {
                 if self.state.f128_direct_slots.contains(&v.0) {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        emit!(self.state, "    fldt {}(%ebp)", slot.0);
+                        let sr = self.slot_ref(slot);
+                        emit!(self.state, "    fldt {}", sr);
                         emit!(self.state, "    fstpt {}(%esp)", stack_offset);
                     }
                 } else if let Some(slot) = self.state.get_slot(v.0) {
-                    self.emit_copy_slot_to_stack(slot.0, stack_offset, 12);
+                    self.emit_copy_slot_to_stack(slot, stack_offset, 12);
                 } else {
                     self.emit_eax_to_stack_zeroed(arg, stack_offset, 12);
                 }
@@ -1083,7 +1180,7 @@ impl I686Codegen {
         if let Operand::Value(v) = arg {
             if self.state.is_alloca(v.0) {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    self.emit_copy_slot_to_stack(slot.0, stack_offset, size);
+                    self.emit_copy_slot_to_stack(slot, stack_offset, size);
                 }
             } else {
                 // Non-alloca: value is a pointer to struct data.
@@ -1109,9 +1206,11 @@ impl I686Codegen {
     pub(super) fn emit_call_8byte_stack_arg(&mut self, arg: &Operand, ty: IrType, stack_offset: usize) {
         if let Operand::Value(v) = arg {
             if let Some(slot) = self.state.get_slot(v.0) {
-                emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
+                let sr0 = self.slot_ref(slot);
+                let sr4 = self.slot_ref_offset(slot, 4);
+                emit!(self.state, "    movl {}, %eax", sr0);
                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-                emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
+                emit!(self.state, "    movl {}, %eax", sr4);
                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
                 self.state.reg_cache.invalidate_acc();
             } else {
@@ -1193,7 +1292,9 @@ impl ArchCodegen for I686Codegen {
         // to them in this function. A caller may be relying on their preservation
         // across a call to this function.
         self.state.emit("    pushl %esi");
+        self.esp_adjust += 4;
         self.state.emit("    pushl %edi");
+        self.esp_adjust += 4;
 
         // Load dest address into edi
         if let Some(addr) = self.state.resolve_slot_addr(dest.0) {
@@ -1222,7 +1323,9 @@ impl ArchCodegen for I686Codegen {
 
         // Restore edi and esi (reverse order of push)
         self.state.emit("    popl %edi");
+        self.esp_adjust -= 4;
         self.state.emit("    popl %esi");
+        self.esp_adjust -= 4;
     }
 
     /// Override emit_binop to route I64/U64 through register-pair (eax:edx) arithmetic.
@@ -1341,6 +1444,10 @@ impl ArchCodegen for I686Codegen {
         self.emit_call_reg_args(args, &arg_classes_vec, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space, &[]);
         self.emit_call_instruction(direct_name, func_ptr, indirect, stack_arg_space);
         let callee_pops = self.callee_pops_bytes_for_sret(is_sret);
+        // Account for bytes the callee pops via `ret $N` (sret pointer on i686).
+        if callee_pops > 0 {
+            self.esp_adjust -= callee_pops as i64;
+        }
         let effective_stack_cleanup = stack_arg_space.saturating_sub(callee_pops);
         self.emit_call_cleanup(effective_stack_cleanup, f128_temp_space, indirect);
         if let Some(dest) = dest {
@@ -1529,7 +1636,8 @@ impl ArchCodegen for I686Codegen {
             self.emit_f128_load_to_x87(rhs);
             emit!(self.state, "    f{}p %st, %st(1)", mnemonic);
             if let Some(slot) = self.state.get_slot(dest.0) {
-                emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                let sr = self.slot_ref(slot);
+                emit!(self.state, "    fstpt {}", sr);
                 self.state.f128_direct_slots.insert(dest.0);
             }
             self.state.reg_cache.invalidate_acc();
@@ -1572,7 +1680,8 @@ impl ArchCodegen for I686Codegen {
         if let Operand::Const(IrConst::LongDouble(..)) = src {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
                 self.emit_f128_load_to_x87(src);
-                emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                let sr = self.slot_ref(dest_slot);
+                emit!(self.state, "    fstpt {}", sr);
                 self.state.f128_direct_slots.insert(dest.0);
                 return;
             }
@@ -1581,8 +1690,10 @@ impl ArchCodegen for I686Codegen {
         if let Operand::Value(v) = src {
             if self.state.f128_direct_slots.contains(&v.0) {
                 if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
-                    emit!(self.state, "    fldt {}(%ebp)", src_slot.0);
-                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    let ssr = self.slot_ref(src_slot);
+                    let dsr = self.slot_ref(dest_slot);
+                    emit!(self.state, "    fldt {}", ssr);
+                    emit!(self.state, "    fstpt {}", dsr);
                     self.state.f128_direct_slots.insert(dest.0);
                     return;
                 }
@@ -1590,8 +1701,10 @@ impl ArchCodegen for I686Codegen {
             if let Some(&alloca_ty) = self.state.alloca_types.get(&v.0) {
                 if alloca_ty == IrType::F128 {
                     if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
-                        emit!(self.state, "    fldt {}(%ebp)", src_slot.0);
-                        emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                        let ssr = self.slot_ref(src_slot);
+                        let dsr = self.slot_ref(dest_slot);
+                        emit!(self.state, "    fldt {}", ssr);
+                        emit!(self.state, "    fstpt {}", dsr);
                         self.state.f128_direct_slots.insert(dest.0);
                         return;
                     }
@@ -1610,24 +1723,32 @@ impl ArchCodegen for I686Codegen {
                 match src {
                     Operand::Value(v) => {
                         if let Some(src_slot) = self.state.get_slot(v.0) {
-                            emit!(self.state, "    movl {}(%ebp), %eax", src_slot.0);
-                            emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
-                            emit!(self.state, "    movl {}(%ebp), %eax", src_slot.0 + 4);
-                            emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
+                            let ssr0 = self.slot_ref(src_slot);
+                            let dsr0 = self.slot_ref(dest_slot);
+                            let ssr4 = self.slot_ref_offset(src_slot, 4);
+                            let dsr4 = self.slot_ref_offset(dest_slot, 4);
+                            emit!(self.state, "    movl {}, %eax", ssr0);
+                            emit!(self.state, "    movl %eax, {}", dsr0);
+                            emit!(self.state, "    movl {}, %eax", ssr4);
+                            emit!(self.state, "    movl %eax, {}", dsr4);
                         }
                     }
                     Operand::Const(IrConst::F64(val)) => {
                         let bits = val.to_bits();
                         let lo = bits as u32;
                         let hi = (bits >> 32) as u32;
-                        emit!(self.state, "    movl ${}, {}(%ebp)", lo as i32, dest_slot.0);
-                        emit!(self.state, "    movl ${}, {}(%ebp)", hi as i32, dest_slot.0 + 4);
+                        let dsr0 = self.slot_ref(dest_slot);
+                        let dsr4 = self.slot_ref_offset(dest_slot, 4);
+                        emit!(self.state, "    movl ${}, {}", lo as i32, dsr0);
+                        emit!(self.state, "    movl ${}, {}", hi as i32, dsr4);
                     }
                     Operand::Const(IrConst::I64(val)) => {
                         let lo = *val as u32;
                         let hi = (*val >> 32) as u32;
-                        emit!(self.state, "    movl ${}, {}(%ebp)", lo as i32, dest_slot.0);
-                        emit!(self.state, "    movl ${}, {}(%ebp)", hi as i32, dest_slot.0 + 4);
+                        let dsr0 = self.slot_ref(dest_slot);
+                        let dsr4 = self.slot_ref_offset(dest_slot, 4);
+                        emit!(self.state, "    movl ${}, {}", lo as i32, dsr0);
+                        emit!(self.state, "    movl ${}, {}", hi as i32, dsr4);
                     }
                     _ => unreachable!("unexpected wide constant type in i686 emit_copy"),
                 }

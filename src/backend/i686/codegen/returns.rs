@@ -75,7 +75,8 @@ impl I686Codegen {
 
     pub(super) fn emit_get_return_f128_second_impl(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            let sr = self.slot_ref(slot);
+            emit!(self.state, "    fstpt {}", sr);
             self.state.f128_direct_slots.insert(dest.0);
         }
     }
