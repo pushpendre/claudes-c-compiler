@@ -522,9 +522,16 @@ impl Lowerer {
                     } else {
                         push_zero_bytes(elements, field_size);
                     }
-                } else if let Expr::CompoundLiteral(_, ref cl_init, _) = expr {
-                    // Non-pointer compound literal: unwrap and use inner initializer
-                    self.emit_compound_field_init(elements, cl_init, field_ty, field_size, field_is_pointer);
+                } else if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
+                    if field_is_pointer {
+                        // Compound literal initializing a pointer field (array-to-pointer decay):
+                        // create anonymous global storage and emit its address
+                        let addr_init = self.create_compound_literal_global(cl_type_spec, cl_init);
+                        elements.push(addr_init);
+                    } else {
+                        // Non-pointer compound literal: unwrap and use inner initializer
+                        self.emit_compound_field_init(elements, cl_init, field_ty, field_size, field_is_pointer);
+                    }
                 } else {
                     // Scalar constant, string literal addr, global addr, or zero fallback
                     self.emit_expr_to_compound(elements, expr, field_size, Some(field_ty));

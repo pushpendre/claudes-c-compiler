@@ -82,7 +82,7 @@ impl Lowerer {
         type_spec: &TypeSpecifier,
         base_ty: IrType,
         is_array: bool,
-        struct_layout: &Option<RcLayout>,
+        _struct_layout: &Option<RcLayout>,
         is_long_double_target: bool,
         is_bool_target: bool,
     ) -> GlobalInit {
@@ -129,7 +129,7 @@ impl Lowerer {
         // Compound literal used directly as initializer value
         if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
             return self.lower_compound_literal_init(
-                cl_type_spec, cl_init, base_ty, is_array, struct_layout,
+                cl_type_spec, cl_init, base_ty, is_array,
             );
         }
 
@@ -325,9 +325,8 @@ impl Lowerer {
         &mut self,
         cl_type_spec: &TypeSpecifier,
         cl_init: &Initializer,
-        base_ty: IrType,
+        _base_ty: IrType,
         is_array: bool,
-        struct_layout: &Option<RcLayout>,
     ) -> GlobalInit {
         let cl_ctype = self.type_spec_to_ctype(cl_type_spec);
         let is_aggregate = matches!(
@@ -340,12 +339,11 @@ impl Lowerer {
             return self.create_compound_literal_global(cl_type_spec, cl_init);
         }
 
-        // When an aggregate compound literal initializes a pointer,
-        // create an anonymous global (array-to-pointer decay).
-        let target_is_pointer = base_ty == IrType::Ptr
-            && !is_array
-            && struct_layout.is_none();
-        if target_is_pointer {
+        // When a compound literal of array type initializes a non-array variable,
+        // it's array-to-pointer decay: create an anonymous global for the array
+        // and use its address as the initializer value.
+        let cl_is_array_type = matches!(cl_ctype, CType::Array(..));
+        if cl_is_array_type && !is_array {
             return self.create_compound_literal_global(cl_type_spec, cl_init);
         }
 
@@ -1076,7 +1074,13 @@ impl Lowerer {
         };
 
         let struct_layout = self.get_struct_layout_for_type(type_spec);
-        let alloc_size = struct_layout.as_ref().map_or(computed_alloc_size, |l| l.size);
+        // For arrays, struct_layout is for the element type, not the whole array,
+        // so always use computed_alloc_size which accounts for the element count.
+        let alloc_size = if is_array {
+            computed_alloc_size
+        } else {
+            struct_layout.as_ref().map_or(computed_alloc_size, |l| l.size)
+        };
         let align = struct_layout.as_ref()
             .map_or(base_ty.align(), |l| l.align.max(base_ty.align()));
 
@@ -1284,6 +1288,12 @@ impl Lowerer {
                 }
                 if let Expr::AddressOf(inner, _) = expr {
                     if matches!(inner.as_ref(), Expr::CompoundLiteral(..)) {
+                        return true;
+                    }
+                }
+                // Bare compound literal initializing a pointer field (array-to-pointer decay)
+                if let Expr::CompoundLiteral(..) = expr {
+                    if matches!(field_ty, CType::Pointer(_, _)) {
                         return true;
                     }
                 }
