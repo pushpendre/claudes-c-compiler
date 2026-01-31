@@ -665,6 +665,14 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
     for (g, sect) in globals.iter().zip(&classified) {
         if matches!(sect, GlobalSection::Extern) {
             emit_visibility_directive(out, &g.name, &g.visibility);
+            // For extern TLS variables, emit .type @tls_object so the assembler
+            // creates a TLS-typed undefined symbol. Without this, the linker
+            // reports "TLS definition mismatches non-TLS reference" when the
+            // defining TU has the symbol in .tdata but this TU's reference
+            // lacks TLS type information (defaults to STT_NOTYPE).
+            if g.is_thread_local {
+                out.emit_fmt(format_args!(".type {}, @tls_object", g.name));
+            }
         }
     }
 

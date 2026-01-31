@@ -96,10 +96,11 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_alloca", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
     m.insert("__builtin_alloca_with_align", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
 
-    // Return address / frame address
+    // Return address / frame address / thread pointer
     m.insert("__builtin_return_address", BuiltinInfo::intrinsic(BuiltinIntrinsic::ReturnAddress));
     m.insert("__builtin_frame_address", BuiltinInfo::intrinsic(BuiltinIntrinsic::FrameAddress));
     m.insert("__builtin_extract_return_addr", BuiltinInfo::identity());
+    m.insert("__builtin_thread_pointer", BuiltinInfo::intrinsic(BuiltinIntrinsic::ThreadPointer));
 
     // Compiler hints (these become no-ops or identity)
     m.insert("__builtin_expect", BuiltinInfo::identity()); // returns first arg
@@ -615,6 +616,8 @@ pub enum BuiltinIntrinsic {
     FortifyChk,
     /// __builtin_va_arg_pack(): used in always_inline fortification wrappers, returns 0
     VaArgPack,
+    /// __builtin_thread_pointer(): returns the thread pointer (TLS base address)
+    ThreadPointer,
 }
 
 impl BuiltinInfo {

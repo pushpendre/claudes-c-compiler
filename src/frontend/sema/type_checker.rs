@@ -832,7 +832,8 @@ impl<'a> ExprTypeChecker<'a> {
             // Memory/string builtins returning pointers
             "__builtin_memcpy" | "__builtin_memmove" | "__builtin_memset"
             | "__builtin_alloca" | "__builtin_alloca_with_align"
-            | "__builtin_frame_address" | "__builtin_return_address" => {
+            | "__builtin_frame_address" | "__builtin_return_address"
+            | "__builtin_thread_pointer" => {
                 Some(CType::Pointer(Box::new(CType::Void), AddressSpace::Default))
             }
 

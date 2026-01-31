@@ -734,6 +734,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -808,6 +809,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -873,6 +875,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -944,6 +947,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -1015,6 +1019,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -1091,6 +1096,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -1196,6 +1202,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         };
 
         let mut module = IrModule {
@@ -1251,6 +1258,7 @@ mod tests {
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         }
     }
 

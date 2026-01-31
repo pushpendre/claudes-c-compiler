@@ -569,6 +569,7 @@ impl Lowerer {
             is_naked: func.attrs.is_naked(),
             global_init_label_blocks: global_init_labels,
             ret_eightbyte_classes,
+            is_gnu_inline_def: is_gnu_inline_no_extern_def,
         };
         self.module.functions.push(ir_func);
         self.pop_scope();

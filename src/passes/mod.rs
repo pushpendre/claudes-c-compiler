@@ -216,6 +216,20 @@ fn run_inline_phase(module: &mut IrModule, disabled: &str) {
         return;
     }
     inline::run(module);
+
+    // After inlining, convert extern inline gnu_inline functions to declarations.
+    // These function bodies were only needed for inlining; they must not be emitted
+    // as standalone definitions because their internal calls (e.g., `call btowc`)
+    // would resolve to the local definition instead of the external library symbol,
+    // causing infinite recursion. Converting to declarations ensures any remaining
+    // (non-inlined) calls resolve to the external symbol at link time.
+    for func in &mut module.functions {
+        if func.is_gnu_inline_def && !func.is_declaration {
+            func.is_declaration = true;
+            func.blocks.clear();
+        }
+    }
+
     crate::ir::mem2reg::promote_allocas_with_params(module);
     constant_fold::run(module);
     copy_prop::run(module);

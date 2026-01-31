@@ -365,6 +365,8 @@ impl Lowerer {
             | "__builtin___vprintf_chk" | "__builtin___vfprintf_chk" => Some(IrType::I32),
             // __builtin_va_arg_pack / __builtin_va_arg_pack_len return int
             "__builtin_va_arg_pack" | "__builtin_va_arg_pack_len" => Some(IrType::I32),
+            // __builtin_thread_pointer returns a void pointer (thread pointer / TLS base)
+            "__builtin_thread_pointer" => Some(IrType::Ptr),
             _ => None,
         }
     }

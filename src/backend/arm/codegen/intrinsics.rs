@@ -231,6 +231,11 @@ impl ArmCodegen {
                 self.state.emit("    ldr x0, [x29, #8]");
                 self.store_scalar_dest(dest, "x0");
             }
+            IntrinsicOp::ThreadPointer => {
+                // __builtin_thread_pointer(): read TLS base from tpidr_el0
+                self.state.emit("    mrs x0, tpidr_el0");
+                self.store_scalar_dest(dest, "x0");
+            }
             IntrinsicOp::SqrtF64 => self.emit_f64_unary_neon(dest, args, "fsqrt"),
             IntrinsicOp::SqrtF32 => self.emit_f32_unary_neon(dest, args, "fsqrt"),
             IntrinsicOp::FabsF64 => self.emit_f64_unary_neon(dest, args, "fabs"),

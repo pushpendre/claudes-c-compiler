@@ -420,6 +420,18 @@ impl Lowerer {
                 }
                 Some(Operand::Const(IrConst::I32(0)))
             }
+            // __builtin_thread_pointer() -> returns the TLS base address (thread pointer)
+            BuiltinIntrinsic::ThreadPointer => {
+                let dest_val = self.fresh_value();
+                self.emit(Instruction::Intrinsic {
+                    dest: Some(dest_val),
+                    op: IntrinsicOp::ThreadPointer,
+                    dest_ptr: None,
+                    args: vec![],
+                });
+                Some(Operand::Value(dest_val))
+            }
+
             // __builtin_frame_address(level) / __builtin_return_address(level)
             // Only level 0 is supported; higher levels return 0.
             BuiltinIntrinsic::FrameAddress | BuiltinIntrinsic::ReturnAddress => {

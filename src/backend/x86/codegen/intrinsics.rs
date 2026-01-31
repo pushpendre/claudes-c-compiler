@@ -238,6 +238,13 @@ impl X86Codegen {
                     self.store_rax_to(d);
                 }
             }
+            IntrinsicOp::ThreadPointer => {
+                // __builtin_thread_pointer(): read the TLS base from %fs:0
+                self.state.emit("    movq %fs:0, %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
             IntrinsicOp::SqrtF64 => {
                 // sqrtsd: scalar double-precision square root
                 self.float_operand_to_xmm0(&args[0], false);

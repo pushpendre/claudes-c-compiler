@@ -57,6 +57,8 @@ pub enum IntrinsicOp {
     FrameAddress,
     /// __builtin_return_address(0) - returns current return address
     ReturnAddress,
+    /// __builtin_thread_pointer() - returns thread pointer (TLS base address)
+    ThreadPointer,
     /// Scalar square root: sqrtsd/sqrtss on x86, fsqrt on ARM/RISC-V
     /// args[0] = input float value; dest = sqrt result
     SqrtF32,

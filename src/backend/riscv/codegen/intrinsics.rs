@@ -203,6 +203,13 @@ impl RiscvCodegen {
                     self.store_t0_to(d);
                 }
             }
+            IntrinsicOp::ThreadPointer => {
+                // __builtin_thread_pointer(): read TLS base from tp register
+                self.state.emit("    mv t0, tp");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
             IntrinsicOp::SqrtF64 => {
                 self.operand_to_t0(&args[0]);
                 self.state.emit("    fmv.d.x ft0, t0");

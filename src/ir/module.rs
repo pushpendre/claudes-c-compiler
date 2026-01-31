@@ -214,6 +214,13 @@ pub struct IrFunction {
     /// returned in a GP register (rax/rdx) or SSE register (xmm0/xmm1).
     /// Empty for non-struct returns, sret, or non-x86-64 targets.
     pub ret_eightbyte_classes: Vec<crate::common::types::EightbyteClass>,
+    /// True for `extern inline __attribute__((gnu_inline))` functions (or `extern inline`
+    /// in GNU89 mode). These function bodies are lowered for inlining, but must NOT be
+    /// emitted as standalone definitions. After the inlining pass, they are converted to
+    /// declarations so any remaining calls resolve to the external libc/library symbol.
+    /// This prevents infinite recursion when the inline body calls the same symbol
+    /// (e.g., glibc's `btowc` inline calling `__btowc_alias` with asm name "btowc").
+    pub is_gnu_inline_def: bool,
 }
 
 /// A function parameter.
@@ -301,6 +308,7 @@ impl IrFunction {
             is_naked: false,
             global_init_label_blocks: Vec::new(),
             ret_eightbyte_classes: Vec::new(),
+            is_gnu_inline_def: false,
         }
     }
 

@@ -124,6 +124,14 @@ impl I686Codegen {
                     self.store_eax_to(d);
                 }
             }
+            IntrinsicOp::ThreadPointer => {
+                // __builtin_thread_pointer(): read TLS base from %gs:0 on i686
+                self.state.emit("    movl %gs:0, %eax");
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
 
             // --- Floating-point intrinsics via x87 FPU ---
             IntrinsicOp::SqrtF64 => {
