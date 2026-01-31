@@ -1,0 +1,12 @@
+Task: Major i686 code size optimizations for boot code
+Status: in_progress
+
+Goal: Reduce i686 -m16 boot code from ~66KB to <32KB (currently 4.8x GCC)
+
+Planned optimizations:
+1. Immediate operand support in comparisons (cmpl $imm, %eax instead of mov + cmp)
+2. Direct register-to-register comparisons (cmpl %esi, %ebx without going through eax/ecx)
+3. Improved compare-branch fusion at IR level (relax "last instruction" restriction)
+4. Enhanced peephole patterns for size reduction
+5. Epilogue tail-merging to share return sequences
+6. Strength reduction of common instruction patterns in -m16 mode
