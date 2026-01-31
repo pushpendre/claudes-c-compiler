@@ -659,13 +659,6 @@ _mm_set1_epi64x(long long __q)
     return (__m128i){ { __q, __q } };
 }
 
-/* _mm_set_epi64x: set two 64-bit integers (high, low order) */
-static __inline__ __m128i __attribute__((__always_inline__))
-_mm_set_epi64x(long long __q1, long long __q0)
-{
-    return (__m128i){ { __q0, __q1 } };
-}
-
 /* === Insert / Extract === */
 
 #define _mm_insert_epi16(a, i, imm) \
@@ -695,6 +688,15 @@ _mm_cvtsi128_si64(__m128i __a)
 }
 
 #define _mm_cvtsi128_si64x(a) _mm_cvtsi128_si64(a)
+
+/* _mm_cvtsi64_si128: convert 64-bit integer to __m128i (MOVQ, zero upper) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtsi64_si128(long long __a)
+{
+    return _mm_set_epi64x(0, __a);
+}
+
+#define _mm_cvtsi64x_si128(a) _mm_cvtsi64_si128(a)
 
 /* === Store low 64 bits === */
 

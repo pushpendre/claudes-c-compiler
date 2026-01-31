@@ -116,8 +116,8 @@ libressl - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86
 wolfssl - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 socat - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 libssh2 - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
-libevent - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
+libevent - ARM: pass, x86: pass, riscv: pass, i686: untested. Notes: x86/arm/riscv pass without changes.
 brieflz - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 pngquant - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 linenoise - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
-giflib - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
+giflib - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: passes on all architectures without changes.
