@@ -1,0 +1,15 @@
+Fix aligned local variable initialization on ARM (and potentially other backends).
+
+When a local variable has __attribute__((aligned(64))), the stack slot is allocated
+with proper alignment but the initialization data is written at the wrong offset.
+The first N bytes of the aligned variable contain garbage, and the actual initialization
+data is written starting at an offset equal to the alignment padding.
+
+This causes wolfssl's aesgcm_default_test to fail on ARM because cipher1/plain1 arrays
+with ALIGN64 attribute have corrupted contents.
+
+Reproducer:
+  __attribute__((aligned(64))) unsigned char data[] = {0xcc, 0x38, ...};
+  // data[0..15] = garbage, data[16..] = the actual initialization values
+
+Status: in_progress
