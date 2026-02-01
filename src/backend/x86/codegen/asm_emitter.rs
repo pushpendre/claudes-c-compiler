@@ -333,7 +333,8 @@ impl InlineAsmEmitter for X86Codegen {
                         } else {
                             let load_instr = match ty {
                                 IrType::F32 => "movss",
-                                _ => "movsd",
+                                IrType::F64 => "movsd",
+                                _ => "movdqu",
                             };
                             self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
                         }
@@ -469,7 +470,8 @@ impl InlineAsmEmitter for X86Codegen {
                 if is_xmm {
                     let load_instr = match ty {
                         IrType::F32 => "movss",
-                        _ => "movsd",
+                        IrType::F64 => "movsd",
+                        _ => "movdqu",
                     };
                     self.state.emit_fmt(format_args!("    {} (%{}), %{}", load_instr, reg, reg));
                 } else {
@@ -608,7 +610,8 @@ impl InlineAsmEmitter for X86Codegen {
                 } else {
                     let store_instr = match ty {
                         IrType::F32 => "movss",
-                        _ => "movsd",
+                        IrType::F64 => "movsd",
+                        _ => "movdqu",
                     };
                     let scratch = "rcx";
                     self.state.out.emit_instr_reg("    pushq", scratch);

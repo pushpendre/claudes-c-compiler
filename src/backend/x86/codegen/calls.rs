@@ -89,9 +89,33 @@ impl X86Codegen {
                     }
                 }
                 CallArgClass::I128Stack => {
-                    self.operand_to_rax_rdx(&args[si]);
-                    self.state.emit("    pushq %rdx");
-                    self.state.emit("    pushq %rax");
+                    // Push 128-bit value to stack. Load directly from slot
+                    // to avoid operand_to_rax_rdx clobbering rdx.
+                    match &args[si] {
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                self.state.emit_fmt(format_args!("    pushq {}(%rbp)", slot.0 + 8));
+                                self.state.emit_fmt(format_args!("    pushq {}(%rbp)", slot.0));
+                            } else {
+                                self.state.emit("    pushq $0");
+                                self.state.emit("    pushq $0");
+                            }
+                        }
+                        Operand::Const(c) => {
+                            if let IrConst::I128(v) = c {
+                                let low = *v as u64;
+                                let high = (*v >> 64) as u64;
+                                self.state.emit_fmt(format_args!("    pushq ${}", high as i64));
+                                self.state.emit_fmt(format_args!("    pushq ${}", low as i64));
+                            } else {
+                                // Smaller constant or zero
+                                if let Operand::Value(_) = &args[si] {} // can't happen
+                                self.operand_to_rax(&args[si]);
+                                self.state.emit("    pushq $0");
+                                self.state.emit("    pushq %rax");
+                            }
+                        }
+                    }
                 }
                 CallArgClass::StructByValStack { size } | CallArgClass::LargeStructStack { size } => {
                     self.operand_to_rax(&args[si]);
@@ -128,15 +152,43 @@ impl X86Codegen {
         for (i, arg) in args.iter().enumerate() {
             match arg_classes[i] {
                 CallArgClass::I128RegPair { base_reg_idx } => {
-                    self.operand_to_rax_rdx(arg);
                     let lo_reg = X86_ARG_REGS[base_reg_idx];
                     let hi_reg = X86_ARG_REGS[base_reg_idx + 1];
-                    if lo_reg == "rdx" {
-                        self.state.out.emit_instr_reg_reg("    movq", "rdx", hi_reg);
-                        self.state.out.emit_instr_reg_reg("    movq", "rax", lo_reg);
-                    } else {
-                        self.state.out.emit_instr_reg_reg("    movq", "rax", lo_reg);
-                        self.state.out.emit_instr_reg_reg("    movq", "rdx", hi_reg);
+                    // Load 128-bit value directly into the target register pair,
+                    // avoiding operand_to_rax_rdx which clobbers rax and rdx
+                    // (potentially overwriting previously-assigned arguments).
+                    match arg {
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                // Load both halves directly from the stack slot
+                                self.state.out.emit_instr_rbp_reg("    movq", slot.0, lo_reg);
+                                self.state.out.emit_instr_rbp_reg("    movq", slot.0 + 8, hi_reg);
+                            } else {
+                                // No slot: zero both halves
+                                self.state.emit_fmt(format_args!("    xorq %{}, %{}", lo_reg, lo_reg));
+                                self.state.emit_fmt(format_args!("    xorq %{}, %{}", hi_reg, hi_reg));
+                            }
+                        }
+                        Operand::Const(c) => {
+                            match c {
+                                IrConst::I128(v) => {
+                                    let low = *v as u64;
+                                    let high = (*v >> 64) as u64;
+                                    self.state.emit_fmt(format_args!("    movabsq ${}, %{}", low as i64, lo_reg));
+                                    self.state.emit_fmt(format_args!("    movabsq ${}, %{}", high as i64, hi_reg));
+                                }
+                                IrConst::Zero => {
+                                    self.state.emit_fmt(format_args!("    xorq %{}, %{}", lo_reg, lo_reg));
+                                    self.state.emit_fmt(format_args!("    xorq %{}, %{}", hi_reg, hi_reg));
+                                }
+                                _ => {
+                                    // Smaller constant: load into lo_reg via rax, zero hi_reg
+                                    self.operand_to_rax(arg);
+                                    self.state.out.emit_instr_reg_reg("    movq", "rax", lo_reg);
+                                    self.state.emit_fmt(format_args!("    xorq %{}, %{}", hi_reg, hi_reg));
+                                }
+                            }
+                        }
                     }
                 }
                 CallArgClass::StructByValReg { base_reg_idx, size } => {

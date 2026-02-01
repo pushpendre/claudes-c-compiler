@@ -263,7 +263,8 @@ impl InlineAsmEmitter for I686Codegen {
                         } else {
                             let load_instr = match ty {
                                 IrType::F32 => "movss",
-                                _ => "movsd",
+                                IrType::F64 => "movsd",
+                                _ => "movdqu",
                             };
                             self.state.emit_fmt(format_args!("    {} {}, %{}", load_instr, sr, reg));
                         }
@@ -402,7 +403,8 @@ impl InlineAsmEmitter for I686Codegen {
                     if is_xmm {
                         let load_instr = match ty {
                             IrType::F32 => "movss",
-                            _ => "movsd",
+                            IrType::F64 => "movsd",
+                            _ => "movdqu",
                         };
                         self.state.emit_fmt(format_args!("    {} (%{}), %{}", load_instr, reg, reg));
                     } else {
@@ -526,7 +528,8 @@ impl InlineAsmEmitter for I686Codegen {
                 } else {
                     let store_instr = match ty {
                         IrType::F32 => "movss",
-                        _ => "movsd",
+                        IrType::F64 => "movsd",
+                        _ => "movdqu",
                     };
                     self.state.emit("    pushl %ecx");
                     self.esp_adjust += 4;
