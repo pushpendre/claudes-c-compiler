@@ -1,0 +1,12 @@
+Task: ARM Kernel Boot Testing with ccc-arm
+Status: in_progress
+
+Goal: Get Linux 6.9 kernel building and booting on ARM64 (aarch64) using ccc-arm,
+following the same pattern as the existing RISC-V kernel boot process.
+
+Steps:
+1. Build compiler
+2. Verify GCC ARM baseline kernel build + QEMU boot works
+3. Test ccc-arm kernel build, identify first error
+4. Fix the first issue found
+5. Document the process
