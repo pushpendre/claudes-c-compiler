@@ -1,0 +1,12 @@
+Fix _Generic selection expressions in static/global initializers.
+
+Problem: _Generic expressions used in global/static initializer context
+produce zero/NULL values instead of the correctly selected expression.
+This affects QEMU's TCG opcode table (all_outop array) which uses
+_Generic in OUTOP macro for designated array initializers.
+
+Root cause: eval_const_expr() and lower_global_init_expr() don't handle
+Expr::GenericSelection - they fall through to zero initialization.
+
+Fix: Resolve _Generic to its selected expression before evaluating in
+const_eval and global_init paths.
