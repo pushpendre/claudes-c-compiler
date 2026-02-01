@@ -1,0 +1,18 @@
+Fix stack slot alignment overlap in deferred (Tier 3) slot finalization.
+
+Problem: coalescable allocas with alignment > 8 (e.g., 16-byte aligned u128)
+get deferred slots whose block_offset values were computed using assign_slot
+with alignment rounding. During finalization, assign_slot is called again with
+the alignment, causing DOUBLE alignment rounding. This causes adjacent slots
+to collapse to the same final offset, corrupting stack data.
+
+Root cause: finalize_deferred_slots calls assign_slot(nls + block_offset, size, align)
+where block_offset was computed BY assign_slot (which already rounded for alignment).
+When nls is not aligned to the alloca's alignment, the second rounding can cause
+the slot to overlap with its neighbor.
+
+This manifests as a kernel boot crash in __slab_update_freelist where the
+cmpxchg16b memory operand address is clobbered by a 128-bit value copy that
+shares the same stack slot due to the alignment overlap.
+
+Status: in_progress
