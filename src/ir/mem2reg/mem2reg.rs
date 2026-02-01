@@ -509,13 +509,24 @@ fn rename_block(
         }
     }
 
-    // Rewrite instructions in this block
+    // Rewrite instructions in this block.
+    //
+    // asm goto snapshot: An InlineAsm with goto_labels creates implicit
+    // control-flow edges from the *point of the asm* to its label targets.
+    // Any definitions that occur *after* the asm goto in the same block
+    // (e.g., a subsequent InlineAsm output) must NOT be visible along
+    // the goto edge.  We snapshot the def-stack tops at each asm goto
+    // and use those snapshots when filling in phi incoming values for
+    // the goto targets, instead of the end-of-block def-stack tops.
     let mut new_instructions = Vec::with_capacity(func.blocks[block_idx].instructions.len());
     let mut new_spans = Vec::new();
     let has_spans = !func.blocks[block_idx].source_spans.is_empty();
     if has_spans {
         new_spans.reserve(func.blocks[block_idx].source_spans.len());
     }
+    // Map from goto-target BlockId to the def-stack snapshot at the goto point.
+    // Each snapshot is a Vec<Operand> indexed by alloca_idx.
+    let mut goto_label_snapshots: FxHashMap<BlockId, Vec<Operand>> = FxHashMap::default();
     let old_spans = std::mem::take(&mut func.blocks[block_idx].source_spans);
     for (inst_idx, inst) in func.blocks[block_idx].instructions.drain(..).enumerate() {
         match inst {
@@ -560,6 +571,21 @@ fn rename_block(
                 template, mut outputs, inputs, clobbers,
                 operand_types, goto_labels, input_symbols, seg_overrides,
             } => {
+                // Snapshot def stacks BEFORE processing outputs, so goto
+                // targets see the values that were live at the point of the
+                // asm goto, not any definitions produced by the asm outputs.
+                if !goto_labels.is_empty() {
+                    let snapshot: Vec<Operand> = (0..alloca_infos.len())
+                        .map(|ai| {
+                            def_stacks[ai].last().cloned()
+                                .unwrap_or(Operand::Const(IrConst::zero(alloca_infos[ai].ty)))
+                        })
+                        .collect();
+                    for (_, label) in &goto_labels {
+                        goto_label_snapshots.insert(*label, snapshot.clone());
+                    }
+                }
+
                 // Replace output pointers that are promoted allocas with fresh SSA values
                 for (_, out_ptr, _) in outputs.iter_mut() {
                     if let Some(&alloca_idx) = alloca_to_idx.get(&out_ptr.0) {
@@ -603,7 +629,10 @@ fn rename_block(
 
     for succ_label in &succ_labels {
         if let Some(&succ_idx) = label_to_idx.get(succ_label) {
-            // For each phi in the successor block, fill in our value
+            // For each phi in the successor block, fill in our value.
+            // For asm goto targets, use the snapshotted def values from the
+            // point of the asm goto, not the end-of-block values.
+            let goto_snapshot = goto_label_snapshots.get(succ_label);
             for inst in &mut func.blocks[succ_idx].instructions {
                 if let Instruction::Phi { dest, incoming, .. } = inst {
                     // Find which alloca this phi is for
@@ -612,8 +641,12 @@ fn rename_block(
                         .find(|(_, &v)| v == *dest)
                         .map(|(idx, _)| idx)
                     {
-                        let current_val = def_stacks[alloca_idx].last().cloned()
-                            .unwrap_or(Operand::Const(IrConst::zero(alloca_infos[alloca_idx].ty)));
+                        let current_val = if let Some(snapshot) = goto_snapshot {
+                            snapshot[alloca_idx].clone()
+                        } else {
+                            def_stacks[alloca_idx].last().cloned()
+                                .unwrap_or(Operand::Const(IrConst::zero(alloca_infos[alloca_idx].ty)))
+                        };
                         incoming.push((current_val, current_block_label));
                     }
                 } else {
@@ -623,21 +656,59 @@ fn rename_block(
         }
     }
 
-    // Recurse into dominator tree children
+    // Recurse into dominator tree children.
+    //
+    // For children that are asm-goto targets from this block, we must
+    // temporarily adjust the def stacks to the snapshot captured at the
+    // goto point. Otherwise the child would see definitions that were
+    // produced *after* the asm goto (e.g., InlineAsm outputs) which
+    // are not live along the goto edge.
     let children: Vec<usize> = dom_children[block_idx].clone();
+    // Build a set of goto-target block indices for quick lookup.
+    let goto_target_indices: FxHashMap<usize, &Vec<Operand>> = goto_label_snapshots
+        .iter()
+        .filter_map(|(label, snapshot)| {
+            label_to_idx.get(label).map(|&idx| (idx, snapshot))
+        })
+        .collect();
+
     for child in children {
-        rename_block(
-            child,
-            func,
-            alloca_to_idx,
-            alloca_infos,
-            def_stacks,
-            next_value,
-            phi_dests,
-            dom_children,
-            preds,
-            label_to_idx,
-        );
+        if let Some(snapshot) = goto_target_indices.get(&child) {
+            // This child is an asm-goto target: temporarily push snapshot
+            // values so that loads in the child block see the pre-goto defs.
+            let child_depths: Vec<usize> = def_stacks.iter().map(|s| s.len()).collect();
+            for (ai, snap_val) in snapshot.iter().enumerate() {
+                def_stacks[ai].push(snap_val.clone());
+            }
+            rename_block(
+                child,
+                func,
+                alloca_to_idx,
+                alloca_infos,
+                def_stacks,
+                next_value,
+                phi_dests,
+                dom_children,
+                preds,
+                label_to_idx,
+            );
+            for (i, &depth) in child_depths.iter().enumerate() {
+                def_stacks[i].truncate(depth);
+            }
+        } else {
+            rename_block(
+                child,
+                func,
+                alloca_to_idx,
+                alloca_infos,
+                def_stacks,
+                next_value,
+                phi_dests,
+                dom_children,
+                preds,
+                label_to_idx,
+            );
+        }
     }
 
     // Pop definitions pushed in this block
