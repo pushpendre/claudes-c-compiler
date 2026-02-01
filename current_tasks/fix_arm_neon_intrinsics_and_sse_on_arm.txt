@@ -1,0 +1,8 @@
+Fix ARM NEON intrinsics and SSE-on-ARM issues for mbedtls, redis, libsodium
+
+1. Fix ccc-arm incorrectly accepting -msse2/-msse3 flags and providing emmintrin.h on ARM targets
+   - This causes libsodium to try compiling SSE2 code on ARM, which fails
+2. Add missing NEON intrinsics needed by mbedtls and redis:
+   - vdup_n_u32, vcombine_u32, vaddq_u32, vcreate_u32
+   - vreinterpretq_u32_u64, vuzpq_u32, vget_low_u32, vget_high_u32
+   - vmlal_u32, vaddq_u64, vextq_u64, vmovn_u64, vshrn_n_u64
