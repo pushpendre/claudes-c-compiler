@@ -2,16 +2,17 @@ QEMU Build Support Status
 =========================
 
 Summary: QEMU 10.2.50 can be compiled (1700+ C files) and linked using ccc-x86
-without any gcc wrapper workarounds. --version and -cpu help work correctly.
-System emulation (kernel boot) still has a runtime issue in JSON/QMP event
-serialization.
+without any gcc wrapper workarounds. --version, -cpu help, and basic VM startup
+work correctly. Must use --enable-slirp for user networking support.
+Serial output from guest (kernel boot console) is not displayed - likely
+a miscompilation in the chardev/serial I/O path.
 
 Build Status:
 - Configure: PASS
 - Compilation: PASS (all files including qapi-introspect.c compile natively)
 - Linking: PASS
-- Runtime: PARTIAL - "--version" and "-cpu help" work, but kernel boot crashes
-  with JSON parse error in QMP event building
+- Runtime: PARTIAL - "--version", "-cpu help", and VM startup work (no crash),
+  but serial console output from the guest is missing (no output on -nographic)
 
 Build Steps:
   1. Copy QEMU source to writable location (cp -r /deps/qemu /tmp/qemu_build)
@@ -36,22 +37,27 @@ Known Issues Fixed:
      The preprocessor's line accumulation limit for multi-line macro invocations
      was 2000 lines, but QEMU's QLIT_QLIST() macro spans ~32000 lines.
      Increased to 100,000.
+  7. _Generic selection in global/static initializer arrays - FIXED
+     QEMU's OUTOP macro uses _Generic in designated initializers:
+       [INDEX_op_st32] = _Generic(outop_st, TCGOutOpStore: &outop_st.base)
+     The all_outop[] array was zero-initialized because _Generic was not
+     resolved in eval_const_expr, eval_global_addr_expr, array_needs_compound_init,
+     or collect_compound_init_element. This caused SIGILL in opcode_args_ct()
+     when tcg_target_op_def returned C_NotImplemented for basic TCG opcodes.
 
 Remaining Issues:
   1. Test library virtio-9p-client.c: __attribute__((common, weak)) on
      global_qtest causes assembler error "symbol can not be both weak and common".
      Not blocking - only affects test targets, not the main emulator binary.
-  2. JSON parse error during kernel boot:
-     "Unexpected error in json_message_process_token()" / "JSON parse error, stray '{'"
-     Crashes in qobject_from_jsonv() -> qdict_from_jsonf_nofail() when building
-     QMP event dict during vm_start(). The backtrace:
-     - qapi_event_send_resume() calls qmp_event_build_dict()
-     - qmp_event_build_dict() calls qdict_from_jsonf_nofail()
-     - qdict_from_jsonf_nofail() -> qobject_from_vjsonf_nofail() -> qobject_from_jsonv()
-     - JSON parsing fails with "stray '{'"
-     This might be a variadic function argument passing issue or a string
-     formatting bug affecting how JSON template strings are passed through
-     the va_list/printf-style argument chain.
+  2. Serial console output not reaching chardev backend:
+     When running with -nographic or -serial file:..., the guest kernel's
+     serial output (console=ttyS0) is never written to the output fd.
+     The QEMU main loop polls normally and the VM runs, but no serial data
+     appears. The chardev/serial emulation path may have another
+     miscompilation - strace shows only eventfd writes, no file writes.
+     Note: Must use --enable-slirp during configure for -net user support
+     (slirp is a meson subproject, not available via system pkg-config).
 
-Priority: Medium - QEMU can be built natively using ccc-x86 and runs basic
-commands. Kernel boot runtime issue is the remaining blocker.
+Priority: HIGH - Serial output is the remaining blocker for running a
+Linux kernel with DOOM in the compiled QEMU. The VM starts and doesn't
+crash, but without serial output there's no way to interact with the guest.
