@@ -1,0 +1,18 @@
+Fix RISC-V kernel stack overflow by replacing s-register call argument staging
+with stack-based staging.
+
+Currently, emit_call_reg_args uses s2-s6 as staging temporaries for calls with
+>3 GP register arguments. These s-registers are callee-saved, meaning they must
+be saved/restored in the prologue/epilogue, adding 8 bytes per register to the
+frame. They also can't be used for register allocation when reserved for calls.
+
+Fix: Replace s2-s6 staging with stack-based staging. After staging the first 3
+GP args in t3/t4/t5, stage remaining args into temporary stack slots. Then move
+all staged values to their target arg registers (a0-a7) before the call. This:
+1. Eliminates the need to reserve s2-s6 for call staging
+2. Makes all of s2-s6 available for register allocation
+3. Reduces callee-saved register saves in prologue/epilogue
+4. Reduces stack frame sizes across the kernel (average 128.9 -> ~100 bytes)
+
+The RISC-V kernel currently crashes with stack overflow during networking
+operations due to 2.27x average stack frame bloat vs GCC.
