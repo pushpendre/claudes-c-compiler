@@ -441,7 +441,7 @@ fn analyze_loop_memory(
 ///    a. If ptr is an alloca that IS address-taken: never hoisted
 ///    b. If ptr is an alloca that is NOT address-taken: safe if no store targets it
 ///    c. If ptr is a GlobalAddr: safe if the loop has no calls, no unknown stores,
-///       and no store targets that specific GlobalAddr value
+///    and no store targets that specific GlobalAddr value
 fn is_load_hoistable(
     ptr: &Value,
     alloca_info: &AllocaAnalysis,

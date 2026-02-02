@@ -1164,15 +1164,10 @@ impl Parser {
         let message = if self.consume_if(&TokenKind::Comma) {
             let mut msg = String::new();
             let mut found_string = false;
-            loop {
-                match self.peek().clone() {
-                    TokenKind::StringLiteral(s) => {
-                        msg.push_str(&s);
-                        found_string = true;
-                        self.advance();
-                    }
-                    _ => break,
-                }
+            while let TokenKind::StringLiteral(s) = self.peek().clone() {
+                msg.push_str(&s);
+                found_string = true;
+                self.advance();
             }
             if found_string { Some(msg) } else { None }
         } else {

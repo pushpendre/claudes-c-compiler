@@ -335,7 +335,7 @@ impl Preprocessor {
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| self.filename.clone());
                     // Flag 2 indicates returning from an include file (GCC convention)
-                    let _ = write!(output, "# {} \"{}\" 2\n", source_line_num + 2, parent_file);
+                    let _ = writeln!(output, "# {} \"{}\" 2", source_line_num + 2, parent_file);
                 } else if is_include {
                     // Included files always emit a newline for non-include directives
                     output.push('\n');

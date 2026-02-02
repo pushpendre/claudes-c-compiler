@@ -124,31 +124,31 @@ impl Lowerer {
                 //   "str" && x  =>  bool(x) if x is evaluable, else 1 if x is also nonzero
                 //   0 && "str"  =>  0
                 if *op == BinOp::LogicalOr {
-                    let l_nonzero = l.as_ref().map_or(false, |v| v.is_nonzero())
+                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().map_or(false, |v| v.is_nonzero())
+                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(rhs);
                     if l_nonzero || r_nonzero {
                         return Some(IrConst::I64(1));
                     }
                     // Both are zero constants => result is 0
-                    if l.as_ref().map_or(false, |v| !v.is_nonzero())
-                        && r.as_ref().map_or(false, |v| !v.is_nonzero())
+                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
+                        && r.as_ref().is_some_and(|v| !v.is_nonzero())
                     {
                         return Some(IrConst::I64(0));
                     }
                 }
                 if *op == BinOp::LogicalAnd {
                     // If either side is a known zero, result is 0
-                    if l.as_ref().map_or(false, |v| !v.is_nonzero())
-                        || r.as_ref().map_or(false, |v| !v.is_nonzero())
+                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
+                        || r.as_ref().is_some_and(|v| !v.is_nonzero())
                     {
                         return Some(IrConst::I64(0));
                     }
                     // If both sides are known nonzero (including string literals), result is 1
-                    let l_nonzero = l.as_ref().map_or(false, |v| v.is_nonzero())
+                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().map_or(false, |v| v.is_nonzero())
+                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(rhs);
                     if l_nonzero && r_nonzero {
                         return Some(IrConst::I64(1));

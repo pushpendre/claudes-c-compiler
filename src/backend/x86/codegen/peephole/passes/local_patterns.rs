@@ -183,15 +183,13 @@ pub(super) fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo])
         if let LineKind::StoreRbp { reg: sr, offset: so, size: ss } = infos[i].kind {
             if i + 1 < len && !infos[i + 1].is_nop() {
                 if let LineKind::LoadRbp { reg: lr, offset: lo, size: ls } = infos[i + 1].kind {
-                    if so == lo && ss == ls {
-                        if sr == lr && sr != REG_NONE {
-                            // Same register: load is redundant
-                            mark_nop(&mut infos[i + 1]);
-                            changed = true;
-                            i += 1;
-                            continue;
-                        }
-                        // Different register cases are handled by global_store_forwarding
+                    // Different register cases are handled by global_store_forwarding
+                    if so == lo && ss == ls && sr == lr && sr != REG_NONE {
+                        // Same register: load is redundant
+                        mark_nop(&mut infos[i + 1]);
+                        changed = true;
+                        i += 1;
+                        continue;
                     }
                 }
             }
@@ -253,7 +251,7 @@ pub(super) fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo])
 
                 if !i_writes_rax && i > 0 {
                     let mut found_producer = false;
-                    let scan_limit = if i >= 6 { i - 6 } else { 0 };
+                    let scan_limit = i.saturating_sub(6);
                     let mut k = i - 1;
                     while k >= scan_limit {
                         if infos[k].is_nop() {

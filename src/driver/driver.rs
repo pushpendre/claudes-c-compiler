@@ -1,13 +1,13 @@
-/// Core compiler driver: struct definition and compilation pipeline.
-///
-/// The `Driver` struct holds all configuration parsed from the command line.
-/// The compilation pipeline is: preprocess -> lex -> parse -> sema -> lower ->
-/// mem2reg -> optimize -> phi-eliminate -> codegen.
-///
-/// Submodules handle distinct concerns:
-/// - `cli.rs`: GCC-compatible CLI argument parsing
-/// - `external_tools.rs`: assembler, linker, and dependency file invocation
-/// - `file_types.rs`: input file classification by extension/magic bytes
+//! Core compiler driver: struct definition and compilation pipeline.
+//!
+//! The `Driver` struct holds all configuration parsed from the command line.
+//! The compilation pipeline is: preprocess -> lex -> parse -> sema -> lower ->
+//! mem2reg -> optimize -> phi-eliminate -> codegen.
+//!
+//! Submodules handle distinct concerns:
+//! - `cli.rs`: GCC-compatible CLI argument parsing
+//! - `external_tools.rs`: assembler, linker, and dependency file invocation
+//! - `file_types.rs`: input file classification by extension/magic bytes
 
 use crate::backend::Target;
 use crate::common::error::{ColorMode, DiagnosticEngine, WarningConfig};

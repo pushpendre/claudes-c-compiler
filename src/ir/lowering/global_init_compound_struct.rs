@@ -177,9 +177,8 @@ impl Lowerer {
             // Also check anon_synth_items for anonymous member designated inits
             // (e.g., .name = "x" targeting an anonymous struct inside this union)
             if init_fi.is_none() {
-                for (idx, _) in &anon_synth_items {
+                if let Some((idx, _)) = anon_synth_items.first() {
                     init_fi = Some(*idx);
-                    break;
                 }
             }
             let union_size = layout.size;

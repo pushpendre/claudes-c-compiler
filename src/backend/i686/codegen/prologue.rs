@@ -58,10 +58,8 @@ impl I686Codegen {
             callee_saved_set,
         );
         // In PIC mode, %ebx (PhysReg(0)) is reserved as the GOT base pointer.
-        if self.state.pic_mode {
-            if !asm_clobbered_regs.contains(&PhysReg(0)) {
-                asm_clobbered_regs.push(PhysReg(0));
-            }
+        if self.state.pic_mode && !asm_clobbered_regs.contains(&PhysReg(0)) {
+            asm_clobbered_regs.push(PhysReg(0));
         }
         let available_regs = filter_available_regs(callee_saved_set, &asm_clobbered_regs);
 

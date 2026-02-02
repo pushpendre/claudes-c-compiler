@@ -252,8 +252,10 @@ impl Lowerer {
 
     /// Returns true if the function has `extern inline` semantics that do NOT
     /// emit an external definition. This covers two cases:
+    ///
     ///   1. `extern inline` + `__attribute__((gnu_inline__))` (explicit GNU inline attr)
     ///   2. `extern inline` in GNU89 mode (`-std=c89`, `-fgnu89-inline`) without the attr
+    ///
     /// In both cases, the function body is available for inlining but the compiler
     /// must not emit a standalone global symbol.
     pub(super) fn is_gnu_inline_no_extern_def(&self, attrs: &crate::frontend::parser::ast::FunctionAttributes) -> bool {

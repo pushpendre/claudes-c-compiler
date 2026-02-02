@@ -408,7 +408,7 @@ impl Lowerer {
             // __builtin___*_chk: fortification builtins forward to unchecked libc equivalents.
             // Each __builtin___X_chk(args..., extra_check_args...) becomes X(args...).
             BuiltinIntrinsic::FortifyChk => {
-                return self.lower_fortify_chk(name, args);
+                self.lower_fortify_chk(name, args)
             }
             // TODO: __builtin_va_arg_pack / __builtin_va_arg_pack_len are stubbed
             // to return 0. Proper implementation requires forwarding the caller's

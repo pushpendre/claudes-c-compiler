@@ -46,15 +46,36 @@ Full Overhaul (2026-02-02):
 
 - src/frontend/lexer/README.md: Expanded from bare minimum to include design notes
 
+Clippy/style cleanup (2026-02-02):
+- Removed exact numeric counts from READMEs that would go stale:
+  - src/common/README.md: removed "22 primitive" and "14 __builtin_*" counts
+  - src/backend/README.md: removed "~50", "11", "~600", "~10", "~300" numeric claims
+  - src/ir/lowering/README.md: removed "~10 places" count
+  - src/frontend/preprocessor/README.md: fixed stale "up to 20 lines" (actual is 100,000)
+- Fixed all 222 clippy warnings (zero warnings remaining):
+  - 6 doc comment format issues (outer /// to inner //! for module-level docs)
+  - 20 map_or simplifications to is_some_and
+  - 4 clone on Copy types to direct copy
+  - 4 unneeded return statements
+  - 11 collapsible if/else blocks
+  - 1 derivable Default impl, 1 write to writeln, 1 .copied()
+  - 1 bool literal, 1 match to if, 1 unwrap_or_default, 1 elidable lifetime
+  - 1 while let loop, 3 strip_prefix/suffix, 1 saturating_sub
+  - 1 rfind with char array, 1 loop-that-never-loops to if let .first()
+  - Doc list item indentation fixes
+  - Added crate-level #![allow] for intentional patterns (too_many_arguments,
+    module_inception, if_same_then_else, type_complexity, enum_variant_names,
+    needless_range_loop, wrong_self_convention, ptr_arg)
+
 Verified Correct (no changes needed, 2026-02-02):
-- src/backend/README.md: All 14 shared files match disk; module descriptions accurate
-- src/passes/README.md: All 16 submodule files match disk; pipeline order accurate
-- src/common/README.md: All 12 modules match disk
-- src/ir/README.md: All 7 files + 2 directories match disk
-- src/frontend/preprocessor/README.md: All 10 files match disk
-- src/frontend/parser/README.md: All 7 files match disk
-- src/frontend/sema/README.md: All 5 files match disk
-- src/ir/mem2reg/README.md: All 2 files match disk
+- src/backend/README.md: All shared files match disk; module descriptions accurate
+- src/passes/README.md: All submodule files match disk; pipeline order accurate
+- src/common/README.md: All modules match disk
+- src/ir/README.md: All files + directories match disk
+- src/frontend/preprocessor/README.md: All files match disk
+- src/frontend/parser/README.md: All files match disk
+- src/frontend/sema/README.md: All files match disk
+- src/ir/mem2reg/README.md: All files match disk
 - src/backend/x86/codegen/peephole/README.md: Accurate pass pipeline
 - src/driver/README.md: Accurate pipeline and module descriptions
 

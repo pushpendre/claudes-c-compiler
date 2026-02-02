@@ -792,10 +792,10 @@ impl Lowerer {
                 // Statement expression: use CType resolution to find the
                 // pointed-to struct type, since inner variables may not be
                 // in scope yet during layout lookup.
-                if let Some(ctype) = self.get_expr_ctype(expr) {
-                    if let CType::Pointer(pointee, _) = &ctype {
-                        return self.struct_layout_from_ctype(pointee);
-                    }
+                if let Some(CType::Pointer(pointee, _)) =
+                    self.get_expr_ctype(expr).as_ref()
+                {
+                    return self.struct_layout_from_ctype(pointee);
                 }
                 None
             }

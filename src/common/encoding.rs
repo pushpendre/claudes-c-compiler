@@ -63,8 +63,7 @@ fn encode_non_utf8(bytes: Vec<u8>) -> String {
 
 /// Determine the expected length of a UTF-8 sequence from its first byte.
 fn utf8_sequence_length(b: u8) -> usize {
-    if b < 0x80 { 1 }
-    else if b < 0xC0 { 1 } // continuation byte (invalid as start)
+    if b < 0xC0 { 1 } // ASCII or continuation byte (invalid as start)
     else if b < 0xE0 { 2 }
     else if b < 0xF0 { 3 }
     else { 4 }

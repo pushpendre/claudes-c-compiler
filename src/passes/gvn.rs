@@ -536,7 +536,7 @@ fn process_block(
                     let ptr_vn = state.operand_to_vn(&Operand::Value(*ptr));
                     let fwd_key = StoreFwdKey { ptr_vn, ty: *ty };
                     let fwd_key_for_log = fwd_key.clone();
-                    let old_val = state.store_fwd_map.insert(fwd_key, (val.clone(), state.load_generation));
+                    let old_val = state.store_fwd_map.insert(fwd_key, (*val, state.load_generation));
                     state.store_fwd_rollback_log.push((fwd_key_for_log, old_val));
                 }
             }
@@ -556,7 +556,7 @@ fn process_block(
                         let fwd_key = StoreFwdKey { ptr_vn: ptr_vn.clone(), ty };
                         if let Some((stored_op, gen)) = state.store_fwd_map.get(&fwd_key) {
                             if *gen == state.load_generation {
-                                let stored_op = stored_op.clone();
+                                let stored_op = *stored_op;
                                 // Forward the stored value to the load destination.
                                 // Assign the dest a VN matching the stored value.
                                 let dest_idx = dest.0 as usize;

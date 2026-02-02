@@ -1,8 +1,8 @@
-/// External tool invocation: assembler, linker, and dependency files.
-///
-/// The compiler delegates assembly and linking to the system GCC toolchain.
-/// This module centralizes all external process spawning so the rest of the
-/// driver doesn't need to deal with `std::process::Command` building.
+//! External tool invocation: assembler, linker, and dependency files.
+//!
+//! The compiler delegates assembly and linking to the system GCC toolchain.
+//! This module centralizes all external process spawning so the rest of the
+//! driver doesn't need to deal with `std::process::Command` building.
 
 use super::Driver;
 use crate::backend::Target;

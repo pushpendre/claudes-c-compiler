@@ -1,7 +1,0 @@
-Fix all clippy warnings and style issues across the codebase.
-
-- Fix ~222 clippy warnings (doc comments, map_or, clone on Copy, unneeded returns, etc.)
-- Add crate-level clippy allows for intentional patterns (too_many_arguments, module_inception)
-- Remove exact test/number counts from docs that could go stale
-- Update docs verification file
-- No functional changes - style only

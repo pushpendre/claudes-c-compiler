@@ -37,8 +37,9 @@ preprocessing into the lexer but means macro source locations are lost.
 ### Important design notes
 
 - **Multi-line macro invocations**: When a line has unbalanced parentheses, the
-  preprocessor accumulates subsequent lines before expanding (up to 20 lines).
-  This handles macros like `FOO(\n  arg1,\n  arg2)`.
+  preprocessor accumulates subsequent lines before expanding.
+  This handles macros like `FOO(\n  arg1,\n  arg2)` and large generated
+  macro calls spanning thousands of lines.
 - **Include resolution**: Supports GCC-compatible search order with `-iquote`,
   `-I`, `-isystem`, and `-idirafter` path lists. Each included file gets its
   own conditional stack (saved/restored around inclusion).

@@ -762,18 +762,16 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
         }
 
         // Pattern 3: Redundant jump to next label
-        if infos[i].kind == LineKind::Jmp {
-            if infos[j].kind == LineKind::Label {
-                let jmp_s = trimmed(store, &infos[i], i);
-                let label_s = trimmed(store, &infos[j], j);
-                if let Some(target) = parse_jmp_target(jmp_s) {
-                    if let Some(label_name) = label_s.strip_suffix(':') {
-                        if target.trim() == label_name {
-                            infos[i].kind = LineKind::Nop;
-                            changed = true;
-                            i += 1;
-                            continue;
-                        }
+        if infos[i].kind == LineKind::Jmp && infos[j].kind == LineKind::Label {
+            let jmp_s = trimmed(store, &infos[i], i);
+            let label_s = trimmed(store, &infos[j], j);
+            if let Some(target) = parse_jmp_target(jmp_s) {
+                if let Some(label_name) = label_s.strip_suffix(':') {
+                    if target.trim() == label_name {
+                        infos[i].kind = LineKind::Nop;
+                        changed = true;
+                        i += 1;
+                        continue;
                     }
                 }
             }
@@ -1412,8 +1410,8 @@ fn try_fold_memory_operand(s: &str, load_reg: RegId, offset: i32, _size: MoveSiz
             // Pattern: `%load_reg, %dst` → `OPCODE offset(%ebp), %dst`
             if let Some(after) = rest.strip_prefix(reg_name) {
                 let after = after.trim();
-                if after.starts_with(',') {
-                    let dst = after[1..].trim();
+                if let Some(after_comma) = after.strip_prefix(',') {
+                    let dst = after_comma.trim();
                     if dst.starts_with('%') && !dst.contains('(') {
                         // Don't fold if dst is the same as load_reg (would be read after free)
                         if register_family(dst) != load_reg {

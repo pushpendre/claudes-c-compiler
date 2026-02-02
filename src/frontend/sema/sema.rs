@@ -210,7 +210,7 @@ impl SemanticAnalyzer {
         // Preserve noreturn from a prior declaration (e.g., the prototype may have
         // __attribute__((noreturn)) even if the definition doesn't repeat it).
         let prior_noreturn = self.result.functions.get(&func.name)
-            .map_or(false, |fi| fi.is_noreturn);
+            .is_some_and(|fi| fi.is_noreturn);
         let func_info = FunctionInfo {
             return_type: return_type.clone(),
             params: params.clone(),
@@ -911,11 +911,7 @@ impl SemanticAnalyzer {
                     None => {
                         // if without else: can fall through unless condition is constant true
                         // and the body diverges (handles `if(1) abort()` and BUILD_BUG patterns)
-                        if self.is_constant_true_expr(cond) && !self.stmt_can_fall_through(then_br) {
-                            false
-                        } else {
-                            true
-                        }
+                        !self.is_constant_true_expr(cond) || self.stmt_can_fall_through(then_br)
                     }
                 }
             }
@@ -1090,24 +1086,22 @@ impl SemanticAnalyzer {
                 SwitchSegmentOutcome::FallsThrough
             }
 
-            Stmt::If(_, then_br, else_br, _) => match else_br {
-                Some(else_stmt) => {
-                    let then_out = self.stmt_switch_outcome(then_br);
-                    let else_out = self.stmt_switch_outcome(else_stmt);
-                    if then_out == SwitchSegmentOutcome::Returns
-                        && else_out == SwitchSegmentOutcome::Returns
-                    {
-                        SwitchSegmentOutcome::Returns
-                    } else if then_out == SwitchSegmentOutcome::Breaks
-                        || else_out == SwitchSegmentOutcome::Breaks
-                    {
-                        SwitchSegmentOutcome::Breaks
-                    } else {
-                        SwitchSegmentOutcome::FallsThrough
-                    }
+            Stmt::If(_, then_br, Some(else_stmt), _) => {
+                let then_out = self.stmt_switch_outcome(then_br);
+                let else_out = self.stmt_switch_outcome(else_stmt);
+                if then_out == SwitchSegmentOutcome::Returns
+                    && else_out == SwitchSegmentOutcome::Returns
+                {
+                    SwitchSegmentOutcome::Returns
+                } else if then_out == SwitchSegmentOutcome::Breaks
+                    || else_out == SwitchSegmentOutcome::Breaks
+                {
+                    SwitchSegmentOutcome::Breaks
+                } else {
+                    SwitchSegmentOutcome::FallsThrough
                 }
-                None => SwitchSegmentOutcome::FallsThrough,
-            },
+            }
+            Stmt::If(..) => SwitchSegmentOutcome::FallsThrough,
 
             Stmt::While(cond, _, _) => {
                 if self.is_constant_true_expr(cond) {
@@ -1253,10 +1247,7 @@ impl SemanticAnalyzer {
     /// Used to detect infinite loops like `while(1)` and `for(;1;)`, and for
     /// `if(1)` patterns like `if(!(0)) noreturn_call()` in BUILD_BUG macros.
     fn is_constant_true_expr(&self, expr: &Expr) -> bool {
-        match self.try_eval_constant_bool(expr) {
-            Some(val) => val,
-            None => false,
-        }
+        self.try_eval_constant_bool(expr).unwrap_or_default()
     }
 
     /// Try to evaluate an expression as a compile-time boolean (true=non-zero, false=zero).

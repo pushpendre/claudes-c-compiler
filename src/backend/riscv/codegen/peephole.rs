@@ -322,11 +322,7 @@ fn jump_target(line: &str) -> Option<&str> {
 /// Extract the label name from a label line (strip trailing `:`)
 fn label_name(line: &str) -> Option<&str> {
     let trimmed = line.trim();
-    if trimmed.ends_with(':') {
-        Some(&trimmed[..trimmed.len() - 1])
-    } else {
-        None
-    }
+    trimmed.strip_suffix(':')
 }
 
 /// Parse the destination register from an ALU-style instruction.
@@ -1114,7 +1110,7 @@ fn extract_s0_offset_from_line(line: &str) -> Option<i32> {
         // Walk backwards from paren_pos to find the start of the offset number
         let before = &line[..paren_pos];
         // Find the last comma or space before the offset
-        let start = before.rfind(|c: char| c == ',' || c == ' ')
+        let start = before.rfind([',', ' '])
             .map(|p| p + 1)
             .unwrap_or(0);
         let offset_str = before[start..].trim();

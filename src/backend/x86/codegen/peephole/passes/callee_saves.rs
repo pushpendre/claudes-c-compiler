@@ -121,11 +121,9 @@ pub(super) fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [Line
                 }
 
                 if let LineKind::LoadRbp { reg: load_reg, offset: load_offset, size: MoveSize::Q } = infos[k].kind {
-                    if load_reg == reg && load_offset == save.offset {
-                        if is_near_epilogue(infos, k) {
-                            restore_indices.push(k);
-                            continue;
-                        }
+                    if load_reg == reg && load_offset == save.offset && is_near_epilogue(infos, k) {
+                        restore_indices.push(k);
+                        continue;
                     }
                 }
 

@@ -167,9 +167,11 @@ pub enum Instruction {
     /// `eightbyte_classes` carries the SysV AMD64 ABI eightbyte classification
     /// for small structs (<=16 bytes). When non-empty, the x86 backend uses this
     /// to check if all required register slots (GP and/or FP) are available:
+    ///
     /// - If sufficient registers exist, each eightbyte is read from the register
     ///   save area (GP or FP depending on classification).
     /// - If not, the ENTIRE struct is read from the overflow area.
+    ///
     /// This ensures the ABI rule that multi-eightbyte structs must be entirely
     /// in registers or entirely on the stack is respected.
     VaArgStruct {

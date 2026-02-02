@@ -166,28 +166,28 @@ impl<'a> SemaConstEval<'a> {
                 // For LogicalOr/LogicalAnd, handle string literals and other
                 // always-nonzero expressions that can't be folded to numeric values.
                 if *op == BinOp::LogicalOr {
-                    let l_nonzero = l.as_ref().map_or(false, |v| v.is_nonzero())
+                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().map_or(false, |v| v.is_nonzero())
+                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(rhs);
                     if l_nonzero || r_nonzero {
                         return Some(IrConst::I64(1));
                     }
-                    if l.as_ref().map_or(false, |v| !v.is_nonzero())
-                        && r.as_ref().map_or(false, |v| !v.is_nonzero())
+                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
+                        && r.as_ref().is_some_and(|v| !v.is_nonzero())
                     {
                         return Some(IrConst::I64(0));
                     }
                 }
                 if *op == BinOp::LogicalAnd {
-                    if l.as_ref().map_or(false, |v| !v.is_nonzero())
-                        || r.as_ref().map_or(false, |v| !v.is_nonzero())
+                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
+                        || r.as_ref().is_some_and(|v| !v.is_nonzero())
                     {
                         return Some(IrConst::I64(0));
                     }
-                    let l_nonzero = l.as_ref().map_or(false, |v| v.is_nonzero())
+                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().map_or(false, |v| v.is_nonzero())
+                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
                         || Self::expr_is_always_nonzero(rhs);
                     if l_nonzero && r_nonzero {
                         return Some(IrConst::I64(1));
@@ -1158,13 +1158,11 @@ fn ctype_from_type_spec(spec: &TypeSpecifier, types: &TypeContext) -> CType {
             // Inline definition: compute from variants
             if let Some(vars) = variants {
                 let mut variant_values = Vec::new();
-                let mut next_val: i64 = 0;
-                for v in vars {
+                for (next_val, v) in (0_i64..).zip(vars.iter()) {
                     if let Some(ref _val_expr) = v.value {
                         // Can't easily eval here, but this path is rare
                     }
                     variant_values.push((v.name.clone(), next_val));
-                    next_val += 1;
                 }
                 CType::Enum(crate::common::types::EnumType {
                     name: name.clone(),

@@ -163,10 +163,10 @@ impl Lowerer {
                     return true;
                 }
             }
-            if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_)) {
-                if self.known_functions.contains(&declarator.name) {
-                    return true;
-                }
+            if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_))
+                && self.known_functions.contains(&declarator.name)
+            {
+                return true;
             }
         }
         false
@@ -245,7 +245,7 @@ impl Lowerer {
                     // Remove old extern entry and re-emit as defined
                     let prior_was_weak = self.module.globals.iter()
                         .find(|g| g.name == declarator.name)
-                        .map_or(false, |g| g.is_weak);
+                        .is_some_and(|g| g.is_weak);
                     self.module.globals.retain(|g| g.name != declarator.name);
                     self.emitted_global_names.remove(&declarator.name);
                     return RedeclResult::Proceed { prior_was_weak };
@@ -264,7 +264,7 @@ impl Lowerer {
         } else {
             let prior_was_weak = self.module.globals.iter()
                 .find(|g| g.name == declarator.name)
-                .map_or(false, |g| g.is_weak);
+                .is_some_and(|g| g.is_weak);
             self.module.globals.retain(|g| g.name != declarator.name);
             self.emitted_global_names.remove(&declarator.name);
             return RedeclResult::Proceed { prior_was_weak };

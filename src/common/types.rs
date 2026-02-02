@@ -437,9 +437,7 @@ impl StructLayoutBuilder {
         // New placement uses ABI alignment; continuation uses sizeof.
         let storage_mask = if !self.in_bitfield || straddles {
             if field_align > 0 { field_align } else { 1 }
-        } else {
-            if field_size > 0 { field_size } else { 1 }
-        };
+        } else if field_size > 0 { field_size } else { 1 };
         let field_storage_offset = ((placed_abs_bit / 8) as usize) & !(storage_mask - 1);
         let field_bit_in_storage = (placed_abs_bit - (field_storage_offset as u64) * 8) as u32;
 

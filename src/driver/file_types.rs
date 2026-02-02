@@ -1,9 +1,9 @@
-/// File type detection utilities for the compiler driver.
-///
-/// Classifies input files by extension or magic bytes to determine how they
-/// should be processed: C source files go through the full pipeline, assembly
-/// files go to the assembler, and object/archive files pass through to the
-/// linker directly.
+//! File type detection utilities for the compiler driver.
+//!
+//! Classifies input files by extension or magic bytes to determine how they
+//! should be processed: C source files go through the full pipeline, assembly
+//! files go to the assembler, and object/archive files pass through to the
+//! linker directly.
 
 use super::Driver;
 

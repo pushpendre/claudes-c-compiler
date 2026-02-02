@@ -481,13 +481,11 @@ impl RiscvCodegen {
                 self.state.emit("    fmv.x.d t0, fa0");
                 self.emit_store_to_s0("t0", slot.0, "sd");
             }
-        } else {
-            if let Some(&reg) = self.reg_assignments.get(&dest.0) {
-                let reg_name = callee_saved_name(reg);
-                self.state.emit_fmt(format_args!("    mv {}, a0", reg_name));
-            } else if let Some(slot) = self.state.get_slot(dest.0) {
-                self.emit_store_to_s0("a0", slot.0, "sd");
-            }
+        } else if let Some(&reg) = self.reg_assignments.get(&dest.0) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv {}, a0", reg_name));
+        } else if let Some(slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_s0("a0", slot.0, "sd");
         }
     }
 }

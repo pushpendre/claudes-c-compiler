@@ -1,16 +1,14 @@
-/// Re-export hub for all IR types.
-///
-/// The IR is split into focused submodules for maintainability:
-/// - `constants`: IrConst, ConstHashKey, float encoding utilities
-/// - `ops`: IrBinOp, IrCmpOp, IrUnaryOp, AtomicRmwOp, AtomicOrdering
-/// - `intrinsics`: IntrinsicOp (SIMD, crypto, math builtins)
-/// - `instruction`: Instruction, Terminator, BasicBlock, BlockId, Value, Operand, CallInfo
-/// - `module`: IrModule, IrFunction, IrParam, IrGlobal, GlobalInit
-///
-/// All types are re-exported here so existing `use crate::ir::ir::*` imports
-/// continue to work unchanged.
-
-// Re-export everything from submodules so consumers don't need to change imports.
+// Re-export hub for all IR types.
+//
+// The IR is split into focused submodules for maintainability:
+// - constants: IrConst, ConstHashKey, float encoding utilities
+// - ops: IrBinOp, IrCmpOp, IrUnaryOp, AtomicRmwOp, AtomicOrdering
+// - intrinsics: IntrinsicOp (SIMD, crypto, math builtins)
+// - instruction: Instruction, Terminator, BasicBlock, BlockId, Value, Operand, CallInfo
+// - module: IrModule, IrFunction, IrParam, IrGlobal, GlobalInit
+//
+// All types are re-exported here so existing `use crate::ir::ir::*` imports
+// continue to work unchanged.
 pub use super::constants::*;
 pub use super::ops::*;
 pub use super::intrinsics::*;

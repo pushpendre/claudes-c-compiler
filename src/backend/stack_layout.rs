@@ -1288,10 +1288,10 @@ fn classify_instructions(
                             if matches!(ty, IrType::I128 | IrType::U128) {
                                 state.i128_values.insert(dest.0);
                             }
-                            if crate::common::types::target_is_32bit() {
-                                if matches!(ty, IrType::F64 | IrType::I64 | IrType::U64) {
-                                    state.wide_values.insert(dest.0);
-                                }
+                            if crate::common::types::target_is_32bit()
+                                && matches!(ty, IrType::F64 | IrType::I64 | IrType::U64)
+                            {
+                                state.wide_values.insert(dest.0);
                             }
                             continue;
                         }
@@ -1615,19 +1615,17 @@ fn assign_tier3_block_local_slots(
         // greedy slot coloring reuses it and the Call dereferences garbage.
         for inst in &block.instructions {
             if let Instruction::Load { dest, ptr, ty, .. } = inst {
-                if *ty == IrType::F128 {
-                    if block_local_set.contains(&ptr.0) {
-                        if let Some(&dest_last) = last_use.get(&dest.0) {
-                            let ptr_last = last_use.get(&ptr.0).copied().unwrap_or(0);
-                            if dest_last > ptr_last {
-                                last_use.insert(ptr.0, dest_last);
-                            }
-                            if let Some(&root) = ctx.copy_alias.get(&ptr.0) {
-                                if block_local_set.contains(&root) {
-                                    let root_last = last_use.get(&root).copied().unwrap_or(0);
-                                    if dest_last > root_last {
-                                        last_use.insert(root, dest_last);
-                                    }
+                if *ty == IrType::F128 && block_local_set.contains(&ptr.0) {
+                    if let Some(&dest_last) = last_use.get(&dest.0) {
+                        let ptr_last = last_use.get(&ptr.0).copied().unwrap_or(0);
+                        if dest_last > ptr_last {
+                            last_use.insert(ptr.0, dest_last);
+                        }
+                        if let Some(&root) = ctx.copy_alias.get(&ptr.0) {
+                            if block_local_set.contains(&root) {
+                                let root_last = last_use.get(&root).copied().unwrap_or(0);
+                                if dest_last > root_last {
+                                    last_use.insert(root, dest_last);
                                 }
                             }
                         }

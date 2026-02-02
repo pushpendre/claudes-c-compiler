@@ -73,8 +73,8 @@ fn detect_include_guard(source: &str) -> Option<String> {
             break;
         }
 
-        if trimmed.starts_with('#') {
-            let after_hash = trimmed[1..].trim_start();
+        if let Some(after_hash_raw) = trimmed.strip_prefix('#') {
+            let after_hash = after_hash_raw.trim_start();
 
             // Handle line continuations in directives
             let after_hash = if after_hash.ends_with('\\') {
@@ -104,7 +104,7 @@ fn detect_include_guard(source: &str) -> Option<String> {
             } else if !found_define && found_ifndef && if_depth == 1 {
                 // Second directive should be #define with the same macro
                 if after_hash.starts_with("define") {
-                    let rest = after_hash["define".len()..].trim();
+                    let rest = after_hash.strip_prefix("define").unwrap().trim();
                     let macro_name = extract_identifier(rest)?;
                     if let Some(ref guard) = guard_macro {
                         if macro_name == *guard {

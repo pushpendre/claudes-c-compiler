@@ -1029,7 +1029,6 @@ impl ArmCodegen {
                 } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
                     // Value has no slot or register but is in the accumulator cache
                     // (skip-slot optimization: immediately-consumed values stay in x0).
-                    return;
                 } else {
                     self.state.emit("    mov x0, #0");
                     self.state.reg_cache.invalidate_acc();

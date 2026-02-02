@@ -1,7 +1,7 @@
-/// IR operation enums: binary, unary, comparison, and atomic operations.
-///
-/// Each enum carries its own evaluation methods (eval_i64, eval_i128, eval_f64)
-/// for use by constant folding and simplification passes.
+//! IR operation enums: binary, unary, comparison, and atomic operations.
+//!
+//! Each enum carries its own evaluation methods (eval_i64, eval_i128, eval_f64)
+//! for use by constant folding and simplification passes.
 
 /// Atomic read-modify-write operations.
 #[derive(Debug, Clone, Copy)]

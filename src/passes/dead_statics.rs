@@ -46,8 +46,8 @@ pub(crate) fn eliminate_dead_static_functions(module: &mut IrModule) {
 
 /// Phase 1: Assign compact integer IDs to all function and global names.
 /// Returns (name_to_id, next_id, id_func_idx, id_global_idx, func_id, global_id).
-fn build_symbol_index<'a>(module: &'a IrModule) -> (
-    FxHashMap<&'a str, u32>, u32,
+fn build_symbol_index(module: &IrModule) -> (
+    FxHashMap<&str, u32>, u32,
     Vec<Option<usize>>, Vec<Option<usize>>,
     Vec<u32>, Vec<u32>,
 ) {

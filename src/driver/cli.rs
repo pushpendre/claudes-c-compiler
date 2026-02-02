@@ -1,14 +1,14 @@
-/// CLI argument parsing for GCC-compatible command-line flags.
-///
-/// Handles the full range of GCC flags that build systems like the Linux kernel,
-/// Meson, and autoconf expect: optimization levels, debug info, preprocessor
-/// directives, linker flags, target-specific machine flags, and query flags
-/// like `--dumpmachine` and `--version`.
-///
-/// Design: The parser is a simple `while` loop with a flat `match` on each
-/// argument. No external parser library is used. Unknown flags are silently
-/// ignored (matching GCC's behavior for unrecognized `-f` and `-m` flags),
-/// which is critical for build system compatibility.
+//! CLI argument parsing for GCC-compatible command-line flags.
+//!
+//! Handles the full range of GCC flags that build systems like the Linux kernel,
+//! Meson, and autoconf expect: optimization levels, debug info, preprocessor
+//! directives, linker flags, target-specific machine flags, and query flags
+//! like `--dumpmachine` and `--version`.
+//!
+//! Design: The parser is a simple `while` loop with a flat `match` on each
+//! argument. No external parser library is used. Unknown flags are silently
+//! ignored (matching GCC's behavior for unrecognized `-f` and `-m` flags),
+//! which is critical for build system compatibility.
 
 use super::driver::{Driver, CompileMode, CliDefine};
 use crate::backend::Target;

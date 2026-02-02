@@ -97,14 +97,12 @@ impl RiscvCodegen {
                         self.state.emit("    fcvt.s.lu ft0, t0");
                         self.state.emit("    fmv.x.w t0, ft0");
                     }
+                } else if to_f64 {
+                    self.state.emit("    fcvt.d.wu ft0, t0");
+                    self.state.emit("    fmv.x.d t0, ft0");
                 } else {
-                    if to_f64 {
-                        self.state.emit("    fcvt.d.wu ft0, t0");
-                        self.state.emit("    fmv.x.d t0, ft0");
-                    } else {
-                        self.state.emit("    fcvt.s.wu ft0, t0");
-                        self.state.emit("    fmv.x.w t0, ft0");
-                    }
+                    self.state.emit("    fcvt.s.wu ft0, t0");
+                    self.state.emit("    fmv.x.w t0, ft0");
                 }
             }
 

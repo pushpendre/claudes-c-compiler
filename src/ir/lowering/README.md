@@ -167,7 +167,7 @@ separately, then merges them into a single `GlobalInit::Compound` vector. Key he
 
 **Conversion helpers** (in `global_init_helpers.rs`):
 - `push_bytes_as_elements(elements, bytes)` — Converts a byte buffer to I8 compound elements.
-  Used ~10 places in the compound path to convert byte-serialized data to GlobalInit elements.
+  Used throughout the compound path to convert byte-serialized data to GlobalInit elements.
 - `push_string_as_elements(elements, s, size)` — Converts a string literal to I8 elements
   with null terminator and zero padding for char array fields.
 

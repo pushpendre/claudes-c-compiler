@@ -43,9 +43,10 @@ use crate::common::source::{SourceManager, Span};
 /// Controls whether diagnostic output uses ANSI color escape codes.
 ///
 /// Matches GCC's `-fdiagnostics-color` flag with the same three modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
     /// Colorize output only when stderr is a terminal (default).
+    #[default]
     Auto,
     /// Always emit ANSI color codes.
     Always,
@@ -79,11 +80,6 @@ impl ColorMode {
     }
 }
 
-impl Default for ColorMode {
-    fn default() -> Self {
-        ColorMode::Auto
-    }
-}
 
 /// Categories of warnings, matching GCC's -W<name> flag names.
 ///

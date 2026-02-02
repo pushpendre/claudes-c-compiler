@@ -32,7 +32,7 @@ impl Lowerer {
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
             CType::Pointer(inner, _) | CType::Array(inner, _) => {
-                return self.struct_layout_from_ctype(inner);
+                self.struct_layout_from_ctype(inner)
             }
             _ => None,
         }

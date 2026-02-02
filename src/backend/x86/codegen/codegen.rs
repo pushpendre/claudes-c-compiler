@@ -116,11 +116,10 @@ fn constraint_to_callee_saved_x86(constraint: &str) -> Option<PhysReg> {
         };
     }
     // Check single-character constraint letters
+    // Note: 'a','c','d','S','D' are caller-saved, no save needed
     for ch in constraint.chars() {
-        match ch {
-            'b' => return Some(PhysReg(1)), // rbx
-            // Note: 'a','c','d','S','D' are caller-saved, no save needed
-            _ => {}
+        if ch == 'b' {
+            return Some(PhysReg(1)); // rbx
         }
     }
     None

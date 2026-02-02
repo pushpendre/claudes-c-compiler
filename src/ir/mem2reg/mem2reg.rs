@@ -489,7 +489,7 @@ fn rename_block(
     next_value: &mut u32,
     phi_dests: &[FxHashMap<usize, Value>],
     dom_children: &[Vec<usize>],
-    preds: &analysis::FlatAdj,
+    _preds: &analysis::FlatAdj,
     label_to_idx: &FxHashMap<BlockId, usize>,
 ) {
     // Record stack depths so we can pop on exit
@@ -642,7 +642,7 @@ fn rename_block(
                         .map(|(idx, _)| idx)
                     {
                         let current_val = if let Some(snapshot) = goto_snapshot {
-                            snapshot[alloca_idx].clone()
+                            snapshot[alloca_idx]
                         } else {
                             def_stacks[alloca_idx].last().cloned()
                                 .unwrap_or(Operand::Const(IrConst::zero(alloca_infos[alloca_idx].ty)))
@@ -678,7 +678,7 @@ fn rename_block(
             // values so that loads in the child block see the pre-goto defs.
             let child_depths: Vec<usize> = def_stacks.iter().map(|s| s.len()).collect();
             for (ai, snap_val) in snapshot.iter().enumerate() {
-                def_stacks[ai].push(snap_val.clone());
+                def_stacks[ai].push(*snap_val);
             }
             rename_block(
                 child,
@@ -689,7 +689,7 @@ fn rename_block(
                 next_value,
                 phi_dests,
                 dom_children,
-                preds,
+                _preds,
                 label_to_idx,
             );
             for (i, &depth) in child_depths.iter().enumerate() {
@@ -705,7 +705,7 @@ fn rename_block(
                 next_value,
                 phi_dests,
                 dom_children,
-                preds,
+                _preds,
                 label_to_idx,
             );
         }

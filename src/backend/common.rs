@@ -170,7 +170,7 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     // and gives a clear, actionable error message instead of the cryptic linker error
     // "Relocations in generic ELF (EM: XX)".
     validate_object_architectures(
-        object_files.iter().map(|s| *s).chain(user_args.iter().map(|s| s.as_str())),
+        object_files.iter().copied().chain(user_args.iter().map(|s| s.as_str())),
         config.expected_elf_machine,
         config.arch_name,
     )?;

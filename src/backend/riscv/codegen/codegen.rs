@@ -343,7 +343,6 @@ impl RiscvCodegen {
                     }
                     self.state.reg_cache.set_acc(v.0, is_alloca);
                 } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
-                    return;
                 } else {
                     self.state.emit("    li t0, 0");
                     self.state.reg_cache.invalidate_acc();
@@ -403,15 +402,13 @@ impl RiscvCodegen {
                         }
                         self.state.emit("    li t1, 0");
                     }
+                } else if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                    let reg_name = callee_saved_name(reg);
+                    self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                    self.state.emit("    li t1, 0");
                 } else {
-                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
-                        let reg_name = callee_saved_name(reg);
-                        self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
-                        self.state.emit("    li t1, 0");
-                    } else {
-                        self.state.emit("    li t0, 0");
-                        self.state.emit("    li t1, 0");
-                    }
+                    self.state.emit("    li t0, 0");
+                    self.state.emit("    li t1, 0");
                 }
             }
         }
