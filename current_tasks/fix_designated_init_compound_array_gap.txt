@@ -1,6 +1,6 @@
 Fix designated initializer gap handling in compound init path
 
-Status: in_progress
+Status: completed
 
 Problem:
 When a struct containing pointer fields (requiring compound init path with

@@ -1215,7 +1215,7 @@ impl Lowerer {
                 }
             }
             let byte_offset = current_idx * elem_size;
-            if byte_offset >= max_size { break; }
+            if byte_offset >= max_size { current_idx += 1; continue; }
             if let Initializer::Expr(ref e) = item.init {
                 if let Some(val) = self.eval_const_expr(e) {
                     let e_ty = self.get_expr_type(e);

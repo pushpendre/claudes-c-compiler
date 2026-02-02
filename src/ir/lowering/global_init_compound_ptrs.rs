@@ -758,8 +758,14 @@ impl Lowerer {
         let elem_size = self.resolve_ctype_size(elem_ty);
         let has_ptrs = h::type_has_pointer_elements(elem_ty, &*self.types.borrow_struct_layouts());
         let elem_ir_ty = IrType::from_ctype(elem_ty);
-        for (ai, item) in items.iter().enumerate() {
-            let elem_offset = base_offset + ai * elem_size;
+        let mut current_idx = 0usize;
+        for item in items.iter() {
+            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                    current_idx = idx;
+                }
+            }
+            let elem_offset = base_offset + current_idx * elem_size;
             if let Initializer::Expr(ref expr) = item.init {
                 if has_ptrs {
                     self.write_expr_to_bytes_or_ptrs(
@@ -769,6 +775,7 @@ impl Lowerer {
                     self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
                 }
             }
+            current_idx += 1;
         }
     }
 
