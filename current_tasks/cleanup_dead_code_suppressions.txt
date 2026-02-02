@@ -1,0 +1,11 @@
+Task: Remove unjustified #[allow(dead_code)] and fix stale dead_code comments
+
+Scope:
+- Remove #[allow(dead_code)] from IrFunction and IrParam (both are heavily used)
+- Remove #[allow(dead_code)] from StructMixedIntSseReg/StructMixedSseIntReg CallArgClass variants
+  (these ARE used by x86 and RISC-V backends, the comment is stale)
+- Fix stale "not yet consumed" comments on those variants
+- Review remaining #[allow(dead_code)] for correctness
+- Verify no regressions
+
+Status: in_progress
