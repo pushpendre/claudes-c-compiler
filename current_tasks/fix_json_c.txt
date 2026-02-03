@@ -1,1 +1,0 @@
-Fixing json-c project compilation/test failures across backends
