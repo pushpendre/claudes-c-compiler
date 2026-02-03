@@ -1,0 +1,11 @@
+Task: x86 assembler short jump relaxation
+
+The built-in x86 assembler (MY_ASM=builtin) currently always emits 6-byte near
+conditional jumps (0F 8x + disp32) and 5-byte unconditional jumps (E9 + disp32),
+even when the target is a local label that fits in a short 2-byte encoding
+(7x + disp8 for Jcc, EB + disp8 for JMP).
+
+This causes byte-level mismatches vs GCC's assembler output.
+
+Fix: implement a relaxation pass in the ELF object builder that converts long
+jumps to short jumps when the displacement fits in a signed byte.
