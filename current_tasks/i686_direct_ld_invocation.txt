@@ -1,3 +1,0 @@
-Implement direct ld invocation for i686 backend when MY_LD is set.
-Mirrors the x86-64 implementation: find CRT objects, add library paths,
-convert -Wl flags, set emulation to elf_i386, use /lib/ld-linux.so.2.

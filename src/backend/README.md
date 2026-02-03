@@ -961,8 +961,15 @@ assembler and linker commands respectively.
 **`MY_ASM`**: When set, its value is used as the assembler command instead
 of the target's default GCC toolchain command.
 
-**`MY_LD`** (x86-64, i686, and RISC-V 64): When set, the linker is invoked
-directly (ld-style) instead of going through GCC. The compiler automatically:
+**`MY_LD`** (x86-64, i686, AArch64, and RISC-V 64): When set, the linker is
+invoked directly (ld-style) instead of going through GCC. The value can be:
+- A boolean flag (`1`, `true`, `yes`, `on`) to auto-detect the correct ld
+  for the target architecture (e.g., `ld` for x86-64, `aarch64-linux-gnu-ld`
+  for AArch64)
+- A command name (`ld`, `ld.bfd`, `riscv64-linux-gnu-ld`)
+- A full path (`/usr/bin/ld`)
+
+The compiler automatically:
 - Discovers and adds CRT startup/finalization objects (crt1.o, crti.o,
   crtbegin.o, crtend.o, crtn.o) from standard system paths
 - Adds library search paths for GCC and system libraries
@@ -983,26 +990,30 @@ For RISC-V cross-compilation, CRT discovery probes both `gcc-cross` paths
 (Debian/Ubuntu) and native GCC paths, with the dynamic linker set to
 `/lib/ld-linux-riscv64-lp64d.so.1`.
 
-For other targets (ARM), `MY_LD` falls back to using the specified command
-as a GCC-style driver (same flags as the default path).
-
 Usage examples:
 
 ```bash
-# Use system ld directly for x86-64
+# Auto-detect ld for each architecture (boolean flag)
+MY_LD=1 ccc-x86 file.c -o file
+MY_LD=1 ccc-i686 file.c -o file
+MY_LD=1 ccc-arm file.c -o file
+MY_LD=1 ccc-riscv file.c -o file
+
+# Use a specific ld command name
 MY_LD=ld ccc-x86 file.c -o file
+MY_LD=ld.bfd ccc-x86 file.c -o file
+
+# Use a full path
+MY_LD=/usr/bin/ld ccc-x86 file.c -o file
 
 # Use ld with static linking
-MY_LD=ld ccc-x86 -static file.c -o file
+MY_LD=1 ccc-x86 -static file.c -o file
 
 # Use ld with shared library
-MY_LD=ld ccc-x86 -fPIC -shared file.c -o file.so
+MY_LD=1 ccc-x86 -fPIC -shared file.c -o file.so
 
 # Use ld with kernel-style -nostdlib
-MY_LD=ld ccc-x86 -nostdlib file.o -o file -lgcc
-
-# Use system ld directly for i686
-MY_LD=ld ccc-i686 file.c -o file
+MY_LD=1 ccc-x86 -nostdlib file.o -o file -lgcc
 
 # Use RISC-V cross-linker directly
 MY_LD=riscv64-linux-gnu-ld ccc-riscv file.c -o file

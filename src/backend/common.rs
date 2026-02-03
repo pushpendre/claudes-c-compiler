@@ -170,6 +170,56 @@ pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> 
     link_with_args(config, object_files, output_path, &[])
 }
 
+/// Resolve the ld binary path from MY_LD's value.
+///
+/// If `ld_val` looks like a path or command name (contains `/` or is an executable in PATH),
+/// return it as-is. If it's a boolean-like flag ("1", "true", "yes"), auto-detect the
+/// correct ld for the target architecture's ELF machine type.
+fn resolve_ld_path(ld_val: &str, elf_machine: u16) -> Result<String, String> {
+    // If the value contains a '/' it's an explicit path — use it directly
+    if ld_val.contains('/') {
+        return Ok(ld_val.to_string());
+    }
+
+    // If it looks like a real command name (not a boolean flag), use it as-is
+    // Boolean-like values: "1", "true", "yes", "on", "TRUE", "YES", etc.
+    let lower = ld_val.to_lowercase();
+    let is_boolean = matches!(lower.as_str(), "1" | "true" | "yes" | "on");
+
+    if !is_boolean {
+        // It's something like "ld" or "ld.bfd" or "riscv64-linux-gnu-ld" — use as command name
+        return Ok(ld_val.to_string());
+    }
+
+    // Auto-resolve the correct ld binary for the target architecture
+    let candidates: &[&str] = match elf_machine {
+        62 => &["ld"],   // EM_X86_64: native ld
+        3 => &["i686-linux-gnu-ld", "i386-linux-gnu-ld", "ld"],   // EM_386
+        183 => &["aarch64-linux-gnu-ld", "ld"],   // EM_AARCH64
+        243 => &["riscv64-linux-gnu-ld", "ld"],   // EM_RISCV
+        _ => &["ld"],
+    };
+
+    for candidate in candidates {
+        // Check if the candidate exists in PATH
+        if let Ok(output) = Command::new("which").arg(candidate).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "MY_LD=1: could not find a suitable ld binary for ELF machine {}. \
+         Tried: {}. Set MY_LD to the full path of your ld binary instead.",
+        elf_machine,
+        candidates.join(", ")
+    ))
+}
+
 /// Link object files into an executable (or shared library), with additional user-provided linker args.
 ///
 /// If the `MY_LD` environment variable is set, its value is used as the
@@ -196,44 +246,57 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     let is_static = user_args.iter().any(|a| a == "-static");
 
     // Check MY_LD env var to allow overriding the linker command.
+    // MY_LD can be either a path to the ld binary (e.g., "/usr/bin/ld") or a boolean
+    // flag (e.g., "1") to auto-resolve the correct ld for the target architecture.
     let custom_ld = std::env::var("MY_LD").ok();
 
     // When MY_LD is set, invoke ld directly instead of going through GCC.
     // This requires us to do everything GCC normally does: find CRT objects,
     // add library search paths, convert -Wl, flags, etc.
-    if let Some(ref ld_path) = custom_ld {
-        if config.expected_elf_machine == 62 {
-            // EM_X86_64: use direct ld invocation
-            return link_direct_ld(
-                ld_path, config, object_files, output_path, user_args,
-                is_shared, is_nostdlib, is_relocatable, is_static,
-            );
-        }
-        if config.expected_elf_machine == 243 {
-            // EM_RISCV: use direct ld invocation
-            return link_direct_ld_riscv64(
-                ld_path, config, object_files, output_path, user_args,
-                is_shared, is_nostdlib, is_relocatable, is_static,
-            );
-        }
-        if config.expected_elf_machine == 3 {
-            // EM_386: use direct ld invocation for i686
-            return link_direct_ld_i686(
-                ld_path, config, object_files, output_path, user_args,
-                is_shared, is_nostdlib, is_relocatable, is_static,
-            );
-        }
-        if config.expected_elf_machine == 183 {
-            // EM_AARCH64: use direct ld invocation
-            return link_direct_ld_aarch64(
-                ld_path, config, object_files, output_path, user_args,
-                is_shared, is_nostdlib, is_relocatable, is_static,
-            );
+    // MY_LD=0/false/no/off/empty are treated as "not set" (fall through to GCC).
+    if let Some(ref ld_val) = custom_ld {
+        let lower = ld_val.to_lowercase();
+        let is_disabled = matches!(lower.as_str(), "0" | "false" | "no" | "off" | "");
+
+        if !is_disabled {
+            // Resolve the actual ld binary path. If the value is a boolean-like flag
+            // ("1", "true", "yes"), auto-detect the correct ld for the target arch.
+            // Otherwise use the provided value as the ld binary path.
+            let ld_path = resolve_ld_path(ld_val, config.expected_elf_machine)?;
+
+            if config.expected_elf_machine == 62 {
+                // EM_X86_64: use direct ld invocation
+                return link_direct_ld(
+                    &ld_path, config, object_files, output_path, user_args,
+                    is_shared, is_nostdlib, is_relocatable, is_static,
+                );
+            }
+            if config.expected_elf_machine == 243 {
+                // EM_RISCV: use direct ld invocation
+                return link_direct_ld_riscv64(
+                    &ld_path, config, object_files, output_path, user_args,
+                    is_shared, is_nostdlib, is_relocatable, is_static,
+                );
+            }
+            if config.expected_elf_machine == 3 {
+                // EM_386: use direct ld invocation for i686
+                return link_direct_ld_i686(
+                    &ld_path, config, object_files, output_path, user_args,
+                    is_shared, is_nostdlib, is_relocatable, is_static,
+                );
+            }
+            if config.expected_elf_machine == 183 {
+                // EM_AARCH64: use direct ld invocation
+                return link_direct_ld_aarch64(
+                    &ld_path, config, object_files, output_path, user_args,
+                    is_shared, is_nostdlib, is_relocatable, is_static,
+                );
+            }
         }
     }
 
-    // Default path: invoke GCC as the linker driver (or MY_LD for non-x86-64 targets)
-    let ld_command = custom_ld.as_deref().unwrap_or(config.command);
+    // Default path: invoke GCC as the linker driver
+    let ld_command = config.command;
 
     let mut cmd = Command::new(ld_command);
     // Skip flags that conflict with -shared or -r:
