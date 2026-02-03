@@ -1,0 +1,1 @@
+Fix sizeof on incomplete/unknown struct/union types so that configure correctly detects that union wait is not available. This fixes the alpine email client build.
