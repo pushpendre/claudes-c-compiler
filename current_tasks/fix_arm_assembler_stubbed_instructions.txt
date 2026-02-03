@@ -1,0 +1,11 @@
+Task: Fix ARM assembler stubbed instruction encodings
+Status: in_progress
+Description: The native AArch64 assembler has several instructions that emit NOP
+placeholders instead of correct encodings. This task fixes:
+- fcvtzs/fcvtzu (float-to-int conversion)
+- scvtf/ucvtf (int-to-float conversion)
+- fcvt (precision conversion)
+- cnt (NEON popcount)
+- uaddlv (NEON horizontal add)
+- fmov with float immediates
+- Any other encoding bugs found via compare_asm.py
