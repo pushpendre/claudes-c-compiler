@@ -1,0 +1,2 @@
+Fix all clippy::if_same_then_else warnings and remove crate-level suppression.
+Status: in_progress
