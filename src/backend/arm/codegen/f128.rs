@@ -181,12 +181,12 @@ impl F128SoftFloat for ArmCodegen {
         use crate::backend::cast::F128CmpKind;
         self.state.emit("    cmp w0, #0");
         let cond = match kind {
-            F128CmpKind::EqZero => "eq",
-            F128CmpKind::NeZero => "ne",
-            F128CmpKind::LtZero => "lt",
-            F128CmpKind::LeZero => "le",
-            F128CmpKind::GtZero => "gt",
-            F128CmpKind::GeZero => "ge",
+            F128CmpKind::Eq => "eq",
+            F128CmpKind::Ne => "ne",
+            F128CmpKind::Lt => "lt",
+            F128CmpKind::Le => "le",
+            F128CmpKind::Gt => "gt",
+            F128CmpKind::Ge => "ge",
         };
         self.state.emit_fmt(format_args!("    cset x0, {}", cond));
     }

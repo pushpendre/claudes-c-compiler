@@ -10,8 +10,6 @@
 // Complex return types arise naturally in compiler data structures; type aliases
 // would just move the complexity elsewhere.
 #![allow(clippy::type_complexity)]
-// Enum variant naming follows C/compiler conventions where repetition aids grep-ability.
-#![allow(clippy::enum_variant_names)]
 // Peephole passes use index-based iteration over instruction arrays where the loop
 // variable is used as both an index and for bounds arithmetic. Converting to iterators
 // would obscure the sliding-window logic.

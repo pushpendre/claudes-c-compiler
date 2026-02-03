@@ -177,19 +177,19 @@ impl F128SoftFloat for RiscvCodegen {
     fn f128_cmp_result_to_bool(&mut self, kind: crate::backend::cast::F128CmpKind) {
         use crate::backend::cast::F128CmpKind;
         match kind {
-            F128CmpKind::EqZero => self.state.emit("    seqz t0, a0"),
-            F128CmpKind::NeZero => self.state.emit("    snez t0, a0"),
-            F128CmpKind::LtZero => self.state.emit("    slti t0, a0, 0"),
-            F128CmpKind::LeZero => {
+            F128CmpKind::Eq => self.state.emit("    seqz t0, a0"),
+            F128CmpKind::Ne => self.state.emit("    snez t0, a0"),
+            F128CmpKind::Lt => self.state.emit("    slti t0, a0, 0"),
+            F128CmpKind::Le => {
                 // t0 = (a0 <= 0) = (a0 < 1)
                 self.state.emit("    slti t0, a0, 1");
             }
-            F128CmpKind::GtZero => {
+            F128CmpKind::Gt => {
                 // t0 = (a0 > 0): 0 < a0
                 self.state.emit("    li t0, 0");
                 self.state.emit("    slt t0, t0, a0");
             }
-            F128CmpKind::GeZero => {
+            F128CmpKind::Ge => {
                 // t0 = (a0 >= 0) = !(a0 < 0)
                 self.state.emit("    slti t0, a0, 0");
                 self.state.emit("    xori t0, t0, 1");

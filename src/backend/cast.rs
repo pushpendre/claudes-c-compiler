@@ -221,29 +221,29 @@ pub fn classify_float_binop(op: IrBinOp) -> Option<FloatOp> {
 /// How to interpret an F128 comparison libcall result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum F128CmpKind {
-    /// Result == 0 means true (Eq)
-    EqZero,
-    /// Result != 0 means true (Ne)
-    NeZero,
-    /// Result < 0 means true (Lt)
-    LtZero,
-    /// Result <= 0 means true (Le)
-    LeZero,
-    /// Result > 0 means true (Gt)
-    GtZero,
-    /// Result >= 0 means true (Ge)
-    GeZero,
+    /// Result == 0 means true (equality)
+    Eq,
+    /// Result != 0 means true (inequality)
+    Ne,
+    /// Result < 0 means true (less than)
+    Lt,
+    /// Result <= 0 means true (less or equal)
+    Le,
+    /// Result > 0 means true (greater than)
+    Gt,
+    /// Result >= 0 means true (greater or equal)
+    Ge,
 }
 
 /// Map a comparison operation to the F128 soft-float libcall and result interpretation.
 pub fn f128_cmp_libcall(op: IrCmpOp) -> (&'static str, F128CmpKind) {
     match op {
-        IrCmpOp::Eq => ("__eqtf2", F128CmpKind::EqZero),
-        IrCmpOp::Ne => ("__eqtf2", F128CmpKind::NeZero),
-        IrCmpOp::Slt | IrCmpOp::Ult => ("__lttf2", F128CmpKind::LtZero),
-        IrCmpOp::Sle | IrCmpOp::Ule => ("__letf2", F128CmpKind::LeZero),
-        IrCmpOp::Sgt | IrCmpOp::Ugt => ("__gttf2", F128CmpKind::GtZero),
-        IrCmpOp::Sge | IrCmpOp::Uge => ("__getf2", F128CmpKind::GeZero),
+        IrCmpOp::Eq => ("__eqtf2", F128CmpKind::Eq),
+        IrCmpOp::Ne => ("__eqtf2", F128CmpKind::Ne),
+        IrCmpOp::Slt | IrCmpOp::Ult => ("__lttf2", F128CmpKind::Lt),
+        IrCmpOp::Sle | IrCmpOp::Ule => ("__letf2", F128CmpKind::Le),
+        IrCmpOp::Sgt | IrCmpOp::Ugt => ("__gttf2", F128CmpKind::Gt),
+        IrCmpOp::Sge | IrCmpOp::Uge => ("__getf2", F128CmpKind::Ge),
     }
 }
 

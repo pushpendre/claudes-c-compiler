@@ -656,6 +656,10 @@ impl ExprId {
 }
 
 /// Expressions.
+// Variant names like StmtExpr, AlignofExpr, GnuAlignofExpr use the "Expr" suffix
+// to follow established compiler terminology (e.g. "statement expression") and to
+// distinguish type-taking vs expression-taking forms (Alignof vs AlignofExpr).
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum Expr {
     IntLiteral(i64, Span),
