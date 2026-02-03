@@ -1,6 +1,0 @@
-Comprehensive documentation overhaul:
-- Remove project list from README (external test harness artifacts)
-- Remove all /verify and testing pipeline references
-- Rewrite README and subsystem READMEs as high-quality design docs
-- Add architecture diagrams showing how components fit together
-- Ensure all docs match the actual code
