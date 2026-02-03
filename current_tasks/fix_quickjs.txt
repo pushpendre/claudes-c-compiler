@@ -1,0 +1,3 @@
+Fixing QuickJS x86 compilation - the project compiles but test_bigint.js fails.
+The pi computation produces wrong results, suggesting a codegen bug in arithmetic operations.
+Investigating and fixing the issue.
