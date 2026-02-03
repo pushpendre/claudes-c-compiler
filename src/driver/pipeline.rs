@@ -104,6 +104,15 @@ pub struct Driver {
     /// any SSE/SSE2/AVX instructions (movdqu, movss, movsd, etc.).
     /// The Linux kernel uses -mno-sse to avoid FPU state in kernel code.
     pub(super) no_sse: bool,
+    /// Explicit SIMD feature flags from -msse3, -msse4.1, -mavx, -mavx2, etc.
+    /// When set, the corresponding __SSE3__, __AVX__, __AVX2__ macros are defined.
+    /// These flags enable projects like blosc to compile SIMD-optimized code paths.
+    pub(super) enable_sse3: bool,
+    pub(super) enable_ssse3: bool,
+    pub(super) enable_sse4_1: bool,
+    pub(super) enable_sse4_2: bool,
+    pub(super) enable_avx: bool,
+    pub(super) enable_avx2: bool,
     /// Whether to use only general-purpose registers (-mgeneral-regs-only).
     /// On AArch64, this prevents FP/SIMD register usage. The Linux kernel uses
     /// this to avoid touching NEON/FP state. When set, variadic function prologues
@@ -248,6 +257,12 @@ impl Driver {
             patchable_function_entry: None,
             cf_protection_branch: false,
             no_sse: false,
+            enable_sse3: false,
+            enable_ssse3: false,
+            enable_sse4_1: false,
+            enable_sse4_2: false,
+            enable_avx: false,
+            enable_avx2: false,
             general_regs_only: false,
             code_model_kernel: false,
             no_jump_tables: false,
@@ -703,6 +718,18 @@ impl Driver {
         // Our i686 backend also uses SSE2, so we define them for i686 as well.
         // Projects like stb_image, minimp3, dr_libs use #ifdef __SSE2__ to enable SIMD paths.
         preprocessor.set_sse_macros(self.no_sse);
+        // Define extended SIMD feature macros (__SSE3__, __AVX__, __AVX2__, etc.)
+        // when the corresponding -msse3, -mavx, -mavx2 flags are passed.
+        if !self.no_sse {
+            preprocessor.set_extended_simd_macros(
+                self.enable_sse3,
+                self.enable_ssse3,
+                self.enable_sse4_1,
+                self.enable_sse4_2,
+                self.enable_avx,
+                self.enable_avx2,
+            );
+        }
         for def in &self.defines {
             preprocessor.define_macro(&def.name, &def.value);
         }

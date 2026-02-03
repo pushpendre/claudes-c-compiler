@@ -371,6 +371,44 @@ impl Preprocessor {
         }
     }
 
+    /// Define extended SIMD feature macros (__SSE3__, __AVX__, __AVX2__, etc.)
+    /// when the corresponding -msse3, -mavx, -mavx2 flags are passed.
+    /// Projects like blosc use #ifdef __AVX2__ to select optimized code paths.
+    /// Must be called after set_sse_macros().
+    pub fn set_extended_simd_macros(
+        &mut self,
+        sse3: bool,
+        ssse3: bool,
+        sse4_1: bool,
+        sse4_2: bool,
+        avx: bool,
+        avx2: bool,
+    ) {
+        // Only define SSE/AVX macros for x86 targets.
+        let is_x86 = self.macros.is_defined("__x86_64__") || self.macros.is_defined("__i386__");
+        if !is_x86 {
+            return;
+        }
+        if sse3 {
+            self.define_simple_macro("__SSE3__", "1");
+        }
+        if ssse3 {
+            self.define_simple_macro("__SSSE3__", "1");
+        }
+        if sse4_1 {
+            self.define_simple_macro("__SSE4_1__", "1");
+        }
+        if sse4_2 {
+            self.define_simple_macro("__SSE4_2__", "1");
+        }
+        if avx {
+            self.define_simple_macro("__AVX__", "1");
+        }
+        if avx2 {
+            self.define_simple_macro("__AVX2__", "1");
+        }
+    }
+
     /// Set the target architecture, updating predefined macros and include paths.
     pub fn set_target(&mut self, target: &str) {
         match target {

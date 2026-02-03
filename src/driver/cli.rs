@@ -428,6 +428,42 @@ impl Driver {
                 | "-mno-avx2" | "-mno-avx512f" | "-mno-3dnow" => {
                     self.no_sse = true;
                 }
+                // Positive SIMD feature flags: define corresponding macros.
+                // -mavx2 implies -mavx implies -msse4.2 implies -msse4.1 implies
+                // -mssse3 implies -msse3 (matching GCC's implication chain).
+                "-mavx2" => {
+                    self.enable_avx2 = true;
+                    self.enable_avx = true;
+                    self.enable_sse4_2 = true;
+                    self.enable_sse4_1 = true;
+                    self.enable_ssse3 = true;
+                    self.enable_sse3 = true;
+                }
+                "-mavx" => {
+                    self.enable_avx = true;
+                    self.enable_sse4_2 = true;
+                    self.enable_sse4_1 = true;
+                    self.enable_ssse3 = true;
+                    self.enable_sse3 = true;
+                }
+                "-msse4.2" => {
+                    self.enable_sse4_2 = true;
+                    self.enable_sse4_1 = true;
+                    self.enable_ssse3 = true;
+                    self.enable_sse3 = true;
+                }
+                "-msse4.1" | "-msse4" => {
+                    self.enable_sse4_1 = true;
+                    self.enable_ssse3 = true;
+                    self.enable_sse3 = true;
+                }
+                "-mssse3" => {
+                    self.enable_ssse3 = true;
+                    self.enable_sse3 = true;
+                }
+                "-msse3" => {
+                    self.enable_sse3 = true;
+                }
                 "-mgeneral-regs-only" => self.general_regs_only = true,
                 "-mcmodel=kernel" => self.code_model_kernel = true,
                 "-mcmodel=small" | "-mcmodel=medlow" | "-mcmodel=medium" | "-mcmodel=medany" | "-mcmodel=large" => {

@@ -1,1 +1,0 @@
-Fixing sqlite compilation to pass all architectures (x86, i686, arm, riscv)

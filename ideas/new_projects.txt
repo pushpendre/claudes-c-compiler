@@ -2,3 +2,6 @@
 # Format: project_name: PASS/FAIL (notes)
 
 json-c: PASS (all 4 backends: x86, i686, arm, riscv)
+coreutils_GNU: PASS (all 4 backends: x86, i686, arm, riscv) - fixed by adding struct member access validation in sema
+sqlite: PASS (all 4 backends: x86, i686, arm, riscv)
+blosc: PASS (all 4 backends: x86 1630/1630 tests, i686, arm, riscv)

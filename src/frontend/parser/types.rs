@@ -894,12 +894,13 @@ impl Parser {
                 match paren_decl {
                     ParenAbstractDecl::Simple { ptr_depth, array_dims: inner_array_dims } => {
                         if matches!(self.peek(), TokenKind::LParen) {
-                            // Function pointer cast: (*)(params)
+                            // Function pointer cast: (*)(params) or (**)(params)
                             let (params, variadic) = self.parse_param_list();
+                            result_type = TypeSpecifier::FunctionPointer(Box::new(result_type), params, variadic);
+                            // Extra pointer levels for multi-indirection (e.g., ** means ptr-to-func-ptr)
                             for _ in 0..ptr_depth.saturating_sub(1) {
                                 result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                             }
-                            result_type = TypeSpecifier::FunctionPointer(Box::new(result_type), params, variadic);
                             // Wrap with inner array dims (for array of function pointers)
                             for dim in inner_array_dims.into_iter().rev() {
                                 result_type = TypeSpecifier::Array(Box::new(result_type), dim);

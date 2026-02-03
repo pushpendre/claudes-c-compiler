@@ -16,6 +16,7 @@
 //! information for the lowerer. Full type checking is TODO.
 
 use crate::common::error::DiagnosticEngine;
+use crate::common::source::Span;
 use crate::common::symbol_table::{Symbol, SymbolTable};
 use crate::common::type_builder;
 use crate::common::types::{AddressSpace, CType, FunctionType, StructLayout};
@@ -1347,11 +1348,13 @@ impl SemanticAnalyzer {
                 self.analyze_expr(arr);
                 self.analyze_expr(idx);
             }
-            Expr::MemberAccess(obj, _, _) => {
+            Expr::MemberAccess(obj, field_name, span) => {
                 self.analyze_expr(obj);
+                self.check_member_exists(obj, field_name, *span, false);
             }
-            Expr::PointerMemberAccess(obj, _, _) => {
+            Expr::PointerMemberAccess(obj, field_name, span) => {
                 self.analyze_expr(obj);
+                self.check_member_exists(obj, field_name, *span, true);
             }
             Expr::Cast(_, inner, _) => {
                 self.analyze_expr(inner);
@@ -1453,6 +1456,54 @@ impl SemanticAnalyzer {
         };
         if let Some(val) = evaluator.eval_const_expr(expr) {
             self.result.const_values.insert(expr.id(), val);
+        }
+    }
+
+    /// Check that a struct/union member access refers to an existing field.
+    /// Emits an error if the base type is a known struct/union with a complete layout
+    /// and the field name is not found.
+    fn check_member_exists(&self, base_expr: &Expr, field_name: &str, span: Span, is_pointer: bool) {
+        let checker = super::type_checker::ExprTypeChecker {
+            symbols: &self.symbol_table,
+            types: &self.result.type_context,
+            functions: &self.result.functions,
+            expr_types: Some(&self.result.expr_types),
+        };
+
+        // Get the base type, dereferencing for pointer member access (->)
+        let base_ctype = if is_pointer {
+            match checker.infer_expr_ctype(base_expr) {
+                Some(CType::Pointer(inner, _)) => Some(*inner),
+                Some(CType::Array(inner, _)) => Some(*inner),
+                _ => None,
+            }
+        } else {
+            checker.infer_expr_ctype(base_expr)
+        };
+
+        let base_ctype = match base_ctype {
+            Some(ct) => ct,
+            None => return, // Can't determine base type; skip check
+        };
+
+        let key = match &base_ctype {
+            CType::Struct(key) | CType::Union(key) => key.clone(),
+            _ => return, // Not a struct/union; skip check
+        };
+
+        let layouts = self.result.type_context.borrow_struct_layouts();
+        let layout = match layouts.get(key.as_ref()) {
+            Some(l) => l,
+            None => return, // Incomplete type (forward declaration); skip check
+        };
+
+        // Check if the field exists (including anonymous struct/union members)
+        if layout.field_offset(field_name, &*layouts).is_none() {
+            let type_name = format!("{}", base_ctype);
+            self.diagnostics.borrow_mut().error(
+                format!("'{}' has no member named '{}'", type_name, field_name),
+                span,
+            );
         }
     }
 

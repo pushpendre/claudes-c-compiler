@@ -320,6 +320,11 @@ fn for_each_hoistable_operand(inst: &Instruction, mut f: impl FnMut(u32)) {
 struct LoopMemoryInfo {
     /// Alloca value IDs that have stores targeting them within the loop.
     stored_allocas: FxHashSet<u32>,
+    /// Base alloca IDs that are modified (directly or through GEP-derived
+    /// pointers) within the loop. This resolves GEP chains so that stores
+    /// through `gep(alloca, offset1)` are recognized as modifying the same
+    /// base alloca that an intrinsic reads through `gep(alloca, offset2)`.
+    modified_base_allocas: FxHashSet<u32>,
     /// Whether the loop body contains any function calls (Call, CallIndirect,
     /// or InlineAsm with clobbers). Calls can modify any global variable,
     /// so loads from globals cannot be hoisted past calls.
@@ -332,6 +337,50 @@ struct LoopMemoryInfo {
     has_global_derived_stores: bool,
 }
 
+impl LoopMemoryInfo {
+    /// Whether the loop has any store operations at all (to any target).
+    fn has_any_stores(&self) -> bool {
+        !self.stored_allocas.is_empty() || self.has_global_derived_stores
+    }
+}
+
+/// Build a mapping from GEP/Copy result values to their ultimate base alloca.
+/// Follows chains like `gep(gep(alloca, off1), off2)` → alloca.
+fn build_value_to_base_alloca(func: &IrFunction, alloca_info: &AllocaAnalysis) -> FxHashMap<u32, u32> {
+    let mut map: FxHashMap<u32, u32> = FxHashMap::default();
+    // Seed: every alloca maps to itself
+    for &alloca_id in &alloca_info.alloca_values {
+        map.insert(alloca_id, alloca_id);
+    }
+    // Propagate through GEP and Copy chains (fixpoint)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    Instruction::GetElementPtr { dest, base, .. } => {
+                        if let Some(&base_alloca) = map.get(&base.0) {
+                            if map.insert(dest.0, base_alloca) != Some(base_alloca) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    Instruction::Copy { dest, src: Operand::Value(src_val) } => {
+                        if let Some(&base_alloca) = map.get(&src_val.0) {
+                            if map.insert(dest.0, base_alloca) != Some(base_alloca) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Scan a loop body to determine which allocas are modified and what
 /// memory side effects the loop has (calls, stores to unknown pointers).
 fn analyze_loop_memory(
@@ -339,6 +388,7 @@ fn analyze_loop_memory(
     loop_body: &FxHashSet<usize>,
     alloca_info: &AllocaAnalysis,
     _global_addr_values: &FxHashSet<u32>,
+    value_to_base_alloca: &FxHashMap<u32, u32>,
 ) -> LoopMemoryInfo {
     let mut stored_allocas = FxHashSet::default();
     let mut has_calls = false;
@@ -430,7 +480,17 @@ fn analyze_loop_memory(
         }
     }
 
-    LoopMemoryInfo { stored_allocas, has_calls, has_global_derived_stores }
+    // Resolve stored pointers to their base allocas so that stores through
+    // gep(alloca, off1) are recognized as modifying the same base alloca
+    // that an intrinsic might read through gep(alloca, off2).
+    let mut modified_base_allocas = FxHashSet::default();
+    for &stored_id in &stored_allocas {
+        if let Some(&base) = value_to_base_alloca.get(&stored_id) {
+            modified_base_allocas.insert(base);
+        }
+    }
+
+    LoopMemoryInfo { stored_allocas, modified_base_allocas, has_calls, has_global_derived_stores }
 }
 
 /// Check if a Load instruction is safe to hoist from a loop.
@@ -585,8 +645,11 @@ fn hoist_loop_invariants(
         }
     }
 
+    // Build a mapping from values to their base alloca (following GEP chains).
+    let value_to_base_alloca = build_value_to_base_alloca(func, alloca_info);
+
     // Analyze loop memory for load hoisting.
-    let loop_mem = analyze_loop_memory(func, &natural_loop.body, alloca_info, &global_addr_values);
+    let loop_mem = analyze_loop_memory(func, &natural_loop.body, alloca_info, &global_addr_values, &value_to_base_alloca);
 
     // Iteratively identify loop-invariant instructions.
     // An instruction is loop-invariant if:
@@ -630,15 +693,54 @@ fn hoist_loop_invariants(
                     // from allocas that are modified inside the loop. The pointer
                     // value itself may be loop-invariant (e.g., an alloca defined
                     // in the entry block), but the data at that pointer can change.
+                    //
+                    // Three checks are applied:
+                    // 1. Direct: arg IS an alloca that's directly stored to in the loop
+                    // 2. GEP-derived: arg resolves through GEP chains to a base alloca
+                    //    that's modified (directly or through GEPs) in the loop
+                    // 3. Address-taken: arg IS an address-taken alloca (its data can
+                    //    be modified through derived pointers like GEPs whose stores
+                    //    may not be directly attributed to the base alloca)
                     if all_invariant {
                         if let Instruction::Intrinsic { args, .. } = inst {
                             for arg in args {
                                 if let Operand::Value(v) = arg {
+                                    // Direct alloca check (original)
                                     if alloca_info.alloca_values.contains(&v.0)
                                         && loop_mem.stored_allocas.contains(&v.0)
                                     {
                                         all_invariant = false;
                                         break;
+                                    }
+                                    // Address-taken alloca check: if the arg is an alloca
+                                    // whose address is taken (used in GEP, passed to calls),
+                                    // the data it points to can be modified through derived
+                                    // pointers. We must check if ANY store in the loop
+                                    // could potentially modify this alloca's data.
+                                    if alloca_info.alloca_values.contains(&v.0)
+                                        && alloca_info.address_taken.contains(&v.0)
+                                        && loop_mem.has_any_stores()
+                                    {
+                                        all_invariant = false;
+                                        break;
+                                    }
+                                    // GEP-derived pointer check: resolve to base alloca
+                                    // and check if that base alloca is modified in the loop
+                                    // (including through other GEP-derived pointers)
+                                    if let Some(&base) = value_to_base_alloca.get(&v.0) {
+                                        if loop_mem.modified_base_allocas.contains(&base) {
+                                            all_invariant = false;
+                                            break;
+                                        }
+                                        // Also check if the base alloca is address-taken
+                                        // and the loop has stores (which could go through
+                                        // derived pointers not tracked by stored_allocas)
+                                        if alloca_info.address_taken.contains(&base)
+                                            && loop_mem.has_any_stores()
+                                        {
+                                            all_invariant = false;
+                                            break;
+                                        }
                                     }
                                 }
                             }

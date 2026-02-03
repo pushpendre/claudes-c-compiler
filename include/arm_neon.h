@@ -1697,4 +1697,101 @@ vst1_u32(unsigned int *__p, uint32x2_t __a)
     __builtin_memcpy(__p, &__a, 8);
 }
 
+/* === Store 8x8 (64-bit / D-register) === */
+
+/* vst1_u8: store 8 x u8 (64-bit) */
+static __inline__ void __attribute__((__always_inline__))
+vst1_u8(unsigned char *__p, uint8x8_t __a)
+{
+    __builtin_memcpy(__p, &__a, 8);
+}
+
+/* === Reinterpret casts === */
+
+/* vreinterpret_u64_u8: reinterpret uint8x8_t as uint64x1_t (no code) */
+static __inline__ uint64x1_t __attribute__((__always_inline__))
+vreinterpret_u64_u8(uint8x8_t __a)
+{
+    uint64x1_t __ret;
+    __builtin_memcpy(&__ret, &__a, 8);
+    return __ret;
+}
+
+/* === Get lane === */
+
+/* vget_lane_u64: extract lane from uint64x1_t */
+static __inline__ unsigned long long __attribute__((__always_inline__))
+vget_lane_u64(uint64x1_t __a, int __lane)
+{
+    (void)__lane;
+    return __a.__val[0];
+}
+
+/* === Narrowing shifts === */
+
+/* vshrn_n_u16: shift right narrow (u16 -> u8) */
+static __inline__ uint8x8_t __attribute__((__always_inline__))
+vshrn_n_u16(uint16x8_t __a, int __n)
+{
+    uint8x8_t __ret;
+    for (int __i = 0; __i < 8; __i++) {
+        __ret.__val[__i] = (unsigned char)(__a.__val[__i] >> __n);
+    }
+    return __ret;
+}
+
+/* === Shift and insert === */
+
+/* vsli_n_u8: shift left and insert (64-bit, per-byte) */
+static __inline__ uint8x8_t __attribute__((__always_inline__))
+vsli_n_u8(uint8x8_t __a, uint8x8_t __b, int __n)
+{
+    uint8x8_t __ret;
+    unsigned char __mask = (unsigned char)((0xFF << __n) & 0xFF);
+    for (int __i = 0; __i < 8; __i++) {
+        __ret.__val[__i] = (__a.__val[__i] & ~__mask) | ((unsigned char)(__b.__val[__i] << __n) & __mask);
+    }
+    return __ret;
+}
+
+/* vsriq_n_u8: shift right and insert (128-bit, per-byte) */
+static __inline__ uint8x16_t __attribute__((__always_inline__))
+vsriq_n_u8(uint8x16_t __a, uint8x16_t __b, int __n)
+{
+    uint8x16_t __ret;
+    unsigned char __mask = (unsigned char)(0xFF >> __n);
+    for (int __i = 0; __i < 16; __i++) {
+        __ret.__val[__i] = (__a.__val[__i] & ~__mask) | ((__b.__val[__i] >> __n) & __mask);
+    }
+    return __ret;
+}
+
+/* === Multi-element structure loads === */
+
+/* vld2q_u16: load 2-element interleaved u16 (128-bit x 2) */
+static __inline__ uint16x8x2_t __attribute__((__always_inline__))
+vld2q_u16(unsigned short const *__p)
+{
+    uint16x8x2_t __ret;
+    for (int __i = 0; __i < 8; __i++) {
+        __ret.val[0].__val[__i] = __p[__i * 2];
+        __ret.val[1].__val[__i] = __p[__i * 2 + 1];
+    }
+    return __ret;
+}
+
+/* vld4q_u8: load 4-element interleaved u8 (128-bit x 4) */
+static __inline__ uint8x16x4_t __attribute__((__always_inline__))
+vld4q_u8(unsigned char const *__p)
+{
+    uint8x16x4_t __ret;
+    for (int __i = 0; __i < 16; __i++) {
+        __ret.val[0].__val[__i] = __p[__i * 4];
+        __ret.val[1].__val[__i] = __p[__i * 4 + 1];
+        __ret.val[2].__val[__i] = __p[__i * 4 + 2];
+        __ret.val[3].__val[__i] = __p[__i * 4 + 3];
+    }
+    return __ret;
+}
+
 #endif /* _ARM_NEON_H_INCLUDED */

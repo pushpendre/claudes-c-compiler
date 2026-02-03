@@ -1,1 +1,0 @@
-Fix coreutils_GNU to compile and pass tests on all 4 backends (x86, i686, arm, riscv).
