@@ -53,17 +53,9 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
     use crate::common::temp_files::TempFile;
 
     // Check MY_ASM env var to allow overriding the assembler command.
+    // Note: MY_ASM=builtin is handled at a higher level in Target::assemble_with_extra()
+    // (mod.rs), so by the time we reach here, custom_asm is either a path or unset.
     let custom_asm = std::env::var("MY_ASM").ok();
-
-    // If MY_ASM=builtin, use the built-in x86-64 assembler (when available for this target).
-    if custom_asm.as_deref() == Some("builtin") {
-        if config.command == "gcc" {
-            // x86-64: use native assembler
-            return assemble_builtin_x86(asm_text, output_path);
-        }
-        // For other architectures, fall through to external assembler
-        // TODO: Add built-in assembler support for other architectures
-    }
 
     let keep_asm = std::env::var("CCC_KEEP_ASM").is_ok();
 
@@ -105,14 +97,6 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
         return Err(format!("Assembly failed ({}): {}", asm_command, stderr));
     }
 
-    Ok(())
-}
-
-/// Assemble x86-64 assembly text using the built-in native assembler.
-fn assemble_builtin_x86(asm_text: &str, output_path: &str) -> Result<(), String> {
-    let elf_bytes = crate::backend::x86::assembler::assemble(asm_text)?;
-    std::fs::write(output_path, &elf_bytes)
-        .map_err(|e| format!("Failed to write object file: {}", e))?;
     Ok(())
 }
 

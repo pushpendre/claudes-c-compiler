@@ -263,6 +263,12 @@ impl Target {
                     Target::Aarch64 => {
                         return arm::assembler::assemble(asm_text, output_path);
                     }
+                    Target::X86_64 => {
+                        let elf_bytes = x86::assembler::assemble(asm_text)?;
+                        std::fs::write(output_path, &elf_bytes)
+                            .map_err(|e| format!("Failed to write object file: {}", e))?;
+                        return Ok(());
+                    }
                     // TODO: add builtin assembler for other targets
                     _ => {
                         return Err(format!(
