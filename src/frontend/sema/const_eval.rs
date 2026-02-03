@@ -1072,6 +1072,7 @@ impl<'a> SemaConstEval<'a> {
                 ty,
                 bit_width,
                 alignment: field_alignment,
+                is_packed: f.is_packed,
             }
         }).collect()
     }

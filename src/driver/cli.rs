@@ -496,6 +496,8 @@ impl Driver {
                 }
                 "-fomit-frame-pointer" => self.omit_frame_pointer = true,
                 "-fno-omit-frame-pointer" => self.omit_frame_pointer = false,
+                "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables" => self.no_unwind_tables = true,
+                "-fasynchronous-unwind-tables" | "-funwind-tables" => self.no_unwind_tables = false,
                 "-fno-jump-tables" => self.no_jump_tables = true,
                 "-ffunction-sections" => self.function_sections = true,
                 "-fno-function-sections" => self.function_sections = false,
@@ -524,6 +526,7 @@ impl Driver {
                 // Linker flags
                 "-static" => self.static_link = true,
                 "-shared" => self.shared_lib = true,
+                "-r" | "-relocatable" => self.relocatable = true,
                 "-no-pie" | "-pie" => {}
                 "-nostdlib" => self.nostdlib = true,
                 "-nostdinc" => self.nostdinc = true,

@@ -147,6 +147,7 @@ impl I686Codegen {
         self.set_no_jump_tables(opts.no_jump_tables);
         self.regparm = opts.regparm;
         self.omit_frame_pointer = opts.omit_frame_pointer;
+        self.state.emit_cfi = opts.emit_cfi;
     }
 
     // --- i686 helper methods ---

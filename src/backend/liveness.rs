@@ -21,6 +21,7 @@ use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::IrType;
 use crate::ir::reexports::{
     Instruction,
+    IrBinOp,
     IrConst,
     IrFunction,
     Operand,
@@ -329,6 +330,25 @@ fn assign_program_points(
                 | Instruction::VaStart { .. }
                 | Instruction::VaCopy { .. }
                 | Instruction::VaArgStruct { .. } => {
+                    call_points.push(point);
+                }
+                // i128 div/rem emit implicit calls to __divti3/__udivti3/__modti3/__umodti3.
+                // These are BinOp instructions at the IR level but generate `call` at the
+                // assembly level, clobbering all caller-saved registers. We must treat them
+                // as call points so the register allocator doesn't assign caller-saved
+                // registers to values whose live ranges span these operations.
+                Instruction::BinOp { op, ty, .. }
+                    if matches!(ty, IrType::I128 | IrType::U128)
+                        && matches!(op, IrBinOp::SDiv | IrBinOp::UDiv | IrBinOp::SRem | IrBinOp::URem) =>
+                {
+                    call_points.push(point);
+                }
+                // i128 <-> float casts emit implicit calls to compiler-rt helpers
+                // (__floattidf/__fixdfti/etc.). Same reasoning as i128 div/rem above.
+                Instruction::Cast { from_ty, to_ty, .. }
+                    if (matches!(from_ty, IrType::I128 | IrType::U128) && to_ty.is_float())
+                        || (from_ty.is_float() && matches!(to_ty, IrType::I128 | IrType::U128)) =>
+                {
                     call_points.push(point);
                 }
                 _ => {}

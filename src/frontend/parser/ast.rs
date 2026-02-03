@@ -537,6 +537,8 @@ pub struct StructFieldDecl {
     pub derived: Vec<DerivedDeclarator>,
     /// Per-field alignment from _Alignas(N) or __attribute__((aligned(N))).
     pub alignment: Option<usize>,
+    /// Per-field __attribute__((packed)) - forces this field's alignment to 1.
+    pub is_packed: bool,
 }
 
 /// An enum variant.

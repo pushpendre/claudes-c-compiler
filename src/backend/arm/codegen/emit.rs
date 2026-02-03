@@ -213,6 +213,7 @@ impl ArmCodegen {
         self.set_pic(opts.pic);
         self.set_no_jump_tables(opts.no_jump_tables);
         self.set_general_regs_only(opts.general_regs_only);
+        self.state.emit_cfi = opts.emit_cfi;
     }
 
     /// Get the physical register assigned to an operand (if it's a Value with a register).
@@ -935,6 +936,11 @@ impl ArmCodegen {
         const PAGE_SIZE: i64 = 4096;
         if frame_size > 0 && frame_size <= 504 {
             self.state.emit_fmt(format_args!("    stp x29, x30, [sp, #-{}]!", frame_size));
+            if self.state.emit_cfi {
+                self.state.emit_fmt(format_args!("    .cfi_def_cfa_offset {}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x29, -{}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x30, -{}", frame_size - 8));
+            }
         } else if frame_size > PAGE_SIZE {
             // Stack probing: for large frames, touch each page so the kernel
             // can grow the stack mapping. Without this, a single large sub
@@ -950,11 +956,24 @@ impl ArmCodegen {
             self.state.emit("    sub sp, sp, x17");
             self.state.emit("    str xzr, [sp]");
             self.state.emit("    stp x29, x30, [sp]");
+            if self.state.emit_cfi {
+                self.state.emit_fmt(format_args!("    .cfi_def_cfa_offset {}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x29, -{}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x30, -{}", frame_size - 8));
+            }
         } else {
             self.emit_sub_sp(frame_size);
             self.state.emit("    stp x29, x30, [sp]");
+            if self.state.emit_cfi {
+                self.state.emit_fmt(format_args!("    .cfi_def_cfa_offset {}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x29, -{}", frame_size));
+                self.state.emit_fmt(format_args!("    .cfi_offset x30, -{}", frame_size - 8));
+            }
         }
         self.state.emit("    mov x29, sp");
+        if self.state.emit_cfi {
+            self.state.emit("    .cfi_def_cfa_register x29");
+        }
     }
 
     /// Emit function epilogue: restore fp/lr and deallocate stack.

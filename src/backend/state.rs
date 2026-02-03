@@ -197,6 +197,9 @@ pub struct CodegenState {
     /// When true, the i686 backend emits weak implementations of these functions
     /// so that standalone builds (without libgcc) can link successfully.
     pub needs_divdi3_helpers: bool,
+    /// Whether to emit CFI directives (.cfi_startproc, .cfi_endproc, etc.)
+    /// for generating .eh_frame unwind tables. Enabled by default (like GCC).
+    pub emit_cfi: bool,
 }
 
 impl CodegenState {
@@ -238,6 +241,7 @@ impl CodegenState {
             function_sections: false,
             data_sections: false,
             needs_divdi3_helpers: false,
+            emit_cfi: true,
         }
     }
 

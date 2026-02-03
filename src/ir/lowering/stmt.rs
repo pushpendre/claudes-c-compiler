@@ -332,9 +332,22 @@ impl Lowerer {
     }
 
     fn track_fptr_sig(&mut self, declarator: &InitDeclarator, type_spec: &TypeSpecifier) {
-        for d in &declarator.derived {
+        for (i, d) in declarator.derived.iter().enumerate() {
             if let DerivedDeclarator::FunctionPointer(params, _) = d {
-                let ret_ty = self.type_spec_to_ir(type_spec);
+                // The derived layout is: [return_type_pointers..., syntax_marker_Pointer,
+                // FunctionPointer, ...]. Pointers before the FunctionPointer include the
+                // syntax marker (1) plus any return-type pointer indirections.
+                // If there are return-type pointers, the return type is a pointer.
+                let ptr_count_before = declarator.derived[..i].iter()
+                    .filter(|d| matches!(d, DerivedDeclarator::Pointer | DerivedDeclarator::Array(_)))
+                    .count();
+                // Subtract 1 for the syntax marker pointer
+                let return_type_ptrs = if ptr_count_before > 1 { ptr_count_before - 1 } else { 0 };
+                let ret_ty = if return_type_ptrs > 0 {
+                    IrType::Ptr
+                } else {
+                    self.type_spec_to_ir(type_spec)
+                };
                 let param_tys: Vec<IrType> = params.iter().map(|p| {
                     self.type_spec_to_ir(&p.type_spec)
                 }).collect();
@@ -484,9 +497,17 @@ impl Lowerer {
         // Track function pointer return and param types for static locals too,
         // so that calls through static function pointers apply correct argument
         // promotions (e.g. float->double for unprototyped `float (*sfp)()`).
-        for d in &declarator.derived {
+        for (i, d) in declarator.derived.iter().enumerate() {
             if let DerivedDeclarator::FunctionPointer(params, _) = d {
-                let ret_ty = self.type_spec_to_ir(type_spec);
+                let ptr_count_before = declarator.derived[..i].iter()
+                    .filter(|d| matches!(d, DerivedDeclarator::Pointer | DerivedDeclarator::Array(_)))
+                    .count();
+                let return_type_ptrs = if ptr_count_before > 1 { ptr_count_before - 1 } else { 0 };
+                let ret_ty = if return_type_ptrs > 0 {
+                    IrType::Ptr
+                } else {
+                    self.type_spec_to_ir(type_spec)
+                };
                 let param_tys: Vec<IrType> = params.iter().map(|p| {
                     self.type_spec_to_ir(&p.type_spec)
                 }).collect();

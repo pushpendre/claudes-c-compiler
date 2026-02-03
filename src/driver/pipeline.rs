@@ -84,6 +84,8 @@ pub struct Driver {
     pub(super) shared_lib: bool,
     /// Whether to omit standard library linking (-nostdlib)
     pub(super) nostdlib: bool,
+    /// Whether to produce a relocatable object file (-r / -relocatable)
+    pub(super) relocatable: bool,
     /// Whether to generate position-independent code (-fPIC/-fpic)
     pub(super) pic: bool,
     /// Files to force-include before the main source (-include flag)
@@ -221,6 +223,9 @@ pub struct Driver {
     pub(super) regparm: u8,
     /// Whether to omit the frame pointer (-fomit-frame-pointer).
     pub(super) omit_frame_pointer: bool,
+    /// Whether to suppress .eh_frame unwind table generation
+    /// (-fno-asynchronous-unwind-tables / -fno-unwind-tables).
+    pub(super) no_unwind_tables: bool,
     /// Raw CLI arguments (excluding argv[0], -o, output path, and input files).
     /// Used for GCC -m16 passthrough: we forward all flags directly to GCC
     /// rather than trying to reconstruct them from parsed state.
@@ -250,6 +255,7 @@ impl Driver {
             static_link: false,
             shared_lib: false,
             nostdlib: false,
+            relocatable: false,
             pic: false,
             force_includes: Vec::new(),
             function_return_thunk: false,
@@ -289,6 +295,7 @@ impl Driver {
             fcommon: false,
             regparm: 0,
             omit_frame_pointer: false,
+            no_unwind_tables: false,
             raw_args: Vec::new(),
         }
     }
@@ -1008,6 +1015,7 @@ impl Driver {
             code16gcc: self.code16gcc,
             regparm: self.regparm,
             omit_frame_pointer: self.omit_frame_pointer,
+            emit_cfi: !self.no_unwind_tables,
         };
         let asm = self.target.generate_assembly_with_opts_and_debug(
             &module, &opts, source_manager.as_ref(),

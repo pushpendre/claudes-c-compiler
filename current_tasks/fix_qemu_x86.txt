@@ -1,3 +1,0 @@
-Fix QEMU project compilation on x86.
-Diagnosing build failures and fixing compiler issues to make QEMU build and pass unit tests.
-Status: in_progress

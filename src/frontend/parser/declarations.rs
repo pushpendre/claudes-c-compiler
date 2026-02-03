@@ -136,7 +136,7 @@ impl Parser {
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
         self.consume_post_type_qualifiers();
 
-        let (name, derived, decl_mode, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
+        let (name, derived, decl_mode, decl_common, decl_aligned, _) = self.parse_declarator_with_attrs();
         let (post_ctor, post_dtor, post_mode, post_common, post_aligned, first_asm_reg) = self.parse_asm_and_attributes();
         let mode_kind = decl_mode.or(post_mode);
         let is_common = decl_common || post_common;
@@ -685,7 +685,7 @@ impl Parser {
         let mut mode_kind: Option<ModeKind> = None;
         let mut alignment: Option<usize> = None;
         loop {
-            let (name, derived, decl_mode, _, decl_aligned) = self.parse_declarator_with_attrs();
+            let (name, derived, decl_mode, _, decl_aligned, _) = self.parse_declarator_with_attrs();
             let (skip_mode, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
             let local_cleanup_fn = self.attrs.parsing_cleanup_fn.take();
             let local_section = self.attrs.parsing_section.take();

@@ -207,6 +207,12 @@ impl Driver {
     /// the archive they affect.
     pub(super) fn build_linker_args(&self) -> Vec<String> {
         let mut args = Vec::new();
+        if self.relocatable {
+            // Relocatable link: merge .o files into a single .o without final linking.
+            // -nostdlib prevents CRT startup files, -r tells ld to produce a .o.
+            args.push("-nostdlib".to_string());
+            args.push("-r".to_string());
+        }
         if self.shared_lib {
             args.push("-shared".to_string());
         }

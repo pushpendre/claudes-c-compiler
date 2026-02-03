@@ -115,7 +115,14 @@ impl X86Codegen {
             self.state.emit("    endbr64");
         }
         self.state.emit("    pushq %rbp");
+        if self.state.emit_cfi {
+            self.state.emit("    .cfi_def_cfa_offset 16");
+            self.state.emit("    .cfi_offset %rbp, -16");
+        }
         self.state.emit("    movq %rsp, %rbp");
+        if self.state.emit_cfi {
+            self.state.emit("    .cfi_def_cfa_register %rbp");
+        }
         if frame_size > 0 {
             const PAGE_SIZE: i64 = 4096;
             if frame_size > PAGE_SIZE {

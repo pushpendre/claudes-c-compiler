@@ -255,6 +255,7 @@ impl X86Codegen {
         self.set_no_sse(opts.no_sse);
         self.set_code_model_kernel(opts.code_model_kernel);
         self.set_no_jump_tables(opts.no_jump_tables);
+        self.state.emit_cfi = opts.emit_cfi;
     }
 
     // --- x86 helper methods ---

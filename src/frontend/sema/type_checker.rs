@@ -720,6 +720,7 @@ impl<'a> ExprTypeChecker<'a> {
                     self.eval_const_expr(bw).map(|v| v as u32)
                 }),
                 alignment: f.alignment,
+                is_packed: f.is_packed,
             }
         }).collect();
 

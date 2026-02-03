@@ -236,6 +236,8 @@ pub struct StructField {
     /// Per-field alignment override from _Alignas(N) or __attribute__((aligned(N))).
     /// When set, this overrides the natural alignment of the field's type.
     pub alignment: Option<usize>,
+    /// Per-field __attribute__((packed)) - forces this field's alignment to 1.
+    pub is_packed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -334,14 +336,14 @@ impl StructLayoutBuilder {
     fn compute_field_alignment(&mut self, field: &StructField, max_field_align: Option<usize>,
                                ctx: &dyn StructLayoutProvider) -> (usize, usize) {
         let natural_align = field.ty.align_ctx(ctx);
-        let overridden_align = if let Some(explicit) = field.alignment {
+        let field_align = if field.is_packed {
+            // Per-field __attribute__((packed)) forces alignment to 1
+            1
+        } else if let Some(explicit) = field.alignment {
+            // Explicit _Alignas/aligned raises alignment, overrides struct-level packing
             natural_align.max(explicit)
-        } else {
-            natural_align
-        };
-        let field_align = if field.alignment.is_some() {
-            overridden_align
         } else if let Some(max_a) = max_field_align {
+            // Struct-level packed or #pragma pack caps alignment
             natural_align.min(max_a)
         } else {
             natural_align
@@ -629,8 +631,11 @@ impl StructLayout {
 
         for field in fields {
             let natural_align = field.ty.align_ctx(ctx);
-            // Per-field alignment override from _Alignas(N) or __attribute__((aligned(N)))
-            let field_align = if let Some(explicit) = field.alignment {
+            // Per-field alignment handling
+            let field_align = if field.is_packed {
+                // Per-field __attribute__((packed)) forces alignment to 1
+                1
+            } else if let Some(explicit) = field.alignment {
                 // Explicit alignment attribute overrides packing
                 natural_align.max(explicit)
             } else if let Some(max_a) = max_field_align {

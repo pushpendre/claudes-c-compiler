@@ -617,7 +617,7 @@ impl Parser {
                 if matches!(self.peek(), TokenKind::Semicolon) {
                     // Anonymous field (e.g., anonymous struct/union)
                     let alignment = self.attrs.parsed_alignas.take();
-                    fields.push(StructFieldDecl { type_spec, name: None, bit_width: None, derived: Vec::new(), alignment });
+                    fields.push(StructFieldDecl { type_spec, name: None, bit_width: None, derived: Vec::new(), alignment, is_packed: false });
                 } else {
                     self.parse_struct_field_declarators(&type_spec, &mut fields);
                 }
@@ -660,6 +660,7 @@ impl Parser {
                     bit_width,
                     derived: Vec::new(),
                     alignment: alignas_from_type,
+                    is_packed: false,
                 });
                 if !self.consume_if(&TokenKind::Comma) { break; }
                 continue;
@@ -670,7 +671,7 @@ impl Parser {
             // pointer declarators of arbitrary depth.
             // parse_declarator_with_attrs also consumes trailing __attribute__ and
             // returns the aligned value from __attribute__((aligned(N))).
-            let (name, derived, _, _, decl_aligned) = self.parse_declarator_with_attrs();
+            let (name, derived, _, _, decl_aligned, decl_packed) = self.parse_declarator_with_attrs();
 
             // Parse optional bitfield width (constant-expression, not full expr with comma)
             let bit_width = if self.consume_if(&TokenKind::Colon) {
@@ -680,11 +681,12 @@ impl Parser {
             };
 
             // Parse any additional trailing GCC __attribute__ (e.g., after bitfield width)
-            let (_, extra_aligned, _, _) = self.parse_gcc_attributes();
+            let (extra_packed, extra_aligned, _, _) = self.parse_gcc_attributes();
 
             // Combine alignment sources: explicit attribute on declarator,
             // extra attribute after bitfield, or _Alignas from type specifier
             let alignment = decl_aligned.or(extra_aligned).or(alignas_from_type);
+            let is_packed = decl_packed || extra_packed;
 
             // For backward compatibility with downstream code that reads type_spec
             // directly, fold simple derived declarators (pointers, arrays) into
@@ -698,6 +700,7 @@ impl Parser {
                 bit_width,
                 derived: field_derived,
                 alignment,
+                is_packed,
             });
 
             if !self.consume_if(&TokenKind::Comma) { break; }

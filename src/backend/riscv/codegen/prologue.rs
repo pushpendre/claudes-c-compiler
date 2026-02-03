@@ -595,6 +595,11 @@ impl RiscvCodegen {
             self.state.emit_fmt(format_args!("    sd ra, {}(sp)", frame_size - 8));
             self.state.emit_fmt(format_args!("    sd s0, {}(sp)", frame_size - 16));
             self.state.emit_fmt(format_args!("    addi s0, sp, {}", frame_size));
+            if self.state.emit_cfi {
+                self.state.emit_fmt(format_args!("    .cfi_def_cfa s0, 0"));
+                self.state.emit("    .cfi_offset ra, -8");
+                self.state.emit("    .cfi_offset s0, -16");
+            }
         } else if total_alloc > PAGE_SIZE {
             // Stack probing: for large frames, touch each page so the kernel
             // can grow the stack mapping. Without this, a single large sub
@@ -616,6 +621,11 @@ impl RiscvCodegen {
             self.state.emit("    sd ra, -8(t0)");
             self.state.emit("    sd s0, -16(t0)");
             self.state.emit("    mv s0, t0");
+            if self.state.emit_cfi {
+                self.state.emit("    .cfi_def_cfa s0, 0");
+                self.state.emit("    .cfi_offset ra, -8");
+                self.state.emit("    .cfi_offset s0, -16");
+            }
         } else {
             // Large frame: use t0 for offsets
             self.state.emit_fmt(format_args!("    li t0, {}", total_alloc));
@@ -627,6 +637,11 @@ impl RiscvCodegen {
             self.state.emit("    sd ra, -8(t0)");
             self.state.emit("    sd s0, -16(t0)");
             self.state.emit("    mv s0, t0");
+            if self.state.emit_cfi {
+                self.state.emit("    .cfi_def_cfa s0, 0");
+                self.state.emit("    .cfi_offset ra, -8");
+                self.state.emit("    .cfi_offset s0, -16");
+            }
         }
     }
 

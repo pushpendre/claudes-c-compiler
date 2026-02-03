@@ -101,6 +101,12 @@ pub(crate) struct CodegenOptions {
     /// as a general register and saving prologue/epilogue instructions.
     /// Used by the Linux kernel boot code to reduce code size.
     pub(crate) omit_frame_pointer: bool,
+    /// Whether to emit CFI directives (.cfi_startproc, .cfi_endproc, etc.)
+    /// for generating .eh_frame unwind tables. Enabled by default (like GCC).
+    /// Disabled by -fno-asynchronous-unwind-tables or -fno-unwind-tables.
+    /// Many programs (LuaJIT, libunwind users) require .eh_frame for exception
+    /// handling and stack unwinding.
+    pub(crate) emit_cfi: bool,
 }
 
 /// Target architecture.

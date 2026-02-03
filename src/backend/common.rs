@@ -177,22 +177,27 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
 
     let is_shared = user_args.iter().any(|a| a == "-shared");
     let is_nostdlib = user_args.iter().any(|a| a == "-nostdlib");
+    let is_relocatable = user_args.iter().any(|a| a == "-r");
 
     let mut cmd = Command::new(config.command);
-    // Skip flags that conflict with -shared when building shared libraries:
-    // -no-pie/-pie conflict with -shared, and -static causes the linker to
+    // Skip flags that conflict with -shared or -r:
+    // -no-pie/-pie conflict with -shared and -r, and -static causes the linker to
     // use static CRT objects (e.g. crtbeginT.o) whose absolute relocations
     // (R_RISCV_HI20, R_AARCH64_ADR_PREL_PG_HI21) are incompatible with PIC.
+    let skip_extra = is_shared || is_relocatable;
     for arg in config.extra_args {
-        if is_shared && (*arg == "-no-pie" || *arg == "-pie" || *arg == "-static") {
+        if skip_extra && (*arg == "-no-pie" || *arg == "-pie" || *arg == "-static") {
             continue;
         }
         cmd.arg(arg);
     }
     cmd.arg("-o").arg(output_path);
     // Tell linker not to require .note.GNU-stack section (suppresses warnings from
-    // hand-written .S files like musl's __set_thread_area.S that lack this section)
-    cmd.arg("-Wl,-z,noexecstack");
+    // hand-written .S files like musl's __set_thread_area.S that lack this section).
+    // Skip for relocatable links as this is an executable/shared-lib-only flag.
+    if !is_relocatable {
+        cmd.arg("-Wl,-z,noexecstack");
+    }
 
     for obj in object_files {
         cmd.arg(obj);

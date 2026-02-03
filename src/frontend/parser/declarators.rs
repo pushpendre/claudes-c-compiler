@@ -34,17 +34,19 @@ pub(super) enum ParenAbstractDecl {
 
 impl Parser {
     pub(super) fn parse_declarator(&mut self) -> (Option<String>, Vec<DerivedDeclarator>) {
-        let (name, derived, _, _, _) = self.parse_declarator_with_attrs();
+        let (name, derived, _, _, _, _) = self.parse_declarator_with_attrs();
         (name, derived)
     }
 
     /// Parse a declarator, also returning attribute info:
-    /// (name, derived, mode_kind, has_common, aligned_value)
-    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, Option<ModeKind>, bool, Option<usize>) {
+    /// (name, derived, mode_kind, has_common, aligned_value, is_packed)
+    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, Option<ModeKind>, bool, Option<usize>, bool) {
         let mut derived = Vec::new();
 
         let mut pre_aligned: Option<usize> = None;
-        let (_, pre_align, _, _) = self.parse_gcc_attributes();
+        let mut is_packed = false;
+        let (pre_packed, pre_align, _, _) = self.parse_gcc_attributes();
+        is_packed = is_packed || pre_packed;
         if let Some(a) = pre_align {
             pre_aligned = Some(pre_aligned.map_or(a, |prev: usize| prev.max(a)));
         }
@@ -111,7 +113,8 @@ impl Parser {
         // Combine using inside-out rule
         let combined = self.combine_declarator_parts(derived, inner_derived, outer_suffixes);
 
-        let (_, post_aligned, mode_kind, has_common) = self.parse_gcc_attributes();
+        let (post_packed, post_aligned, mode_kind, has_common) = self.parse_gcc_attributes();
+        is_packed = is_packed || post_packed;
         let aligned = match (pre_aligned, post_aligned) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
@@ -119,7 +122,7 @@ impl Parser {
             (None, None) => None,
         };
 
-        (name, combined, mode_kind, has_common, aligned)
+        (name, combined, mode_kind, has_common, aligned, is_packed)
     }
 
     /// Determine if a '(' starts a parenthesized declarator vs. a parameter list.

@@ -131,9 +131,22 @@ impl I686Codegen {
         if self.omit_frame_pointer {
             // No frame pointer setup; use ESP-relative addressing.
             // frame_base_offset and esp_adjust will be set after callee-saved pushes.
+            // TODO: Emit ESP-relative CFI directives (.cfi_def_cfa_offset after each
+            // push/sub) for proper unwinding when frame pointer is omitted. Currently
+            // the default .cfi_startproc CFA (ESP+4) is used, which is only valid at
+            // function entry. This is acceptable for now since -fomit-frame-pointer on
+            // i686 is primarily used by the Linux kernel boot code, which disables
+            // unwind tables via -fno-asynchronous-unwind-tables.
         } else {
             self.state.emit("    pushl %ebp");
+            if self.state.emit_cfi {
+                self.state.emit("    .cfi_def_cfa_offset 8");
+                self.state.emit("    .cfi_offset %ebp, -8");
+            }
             self.state.emit("    movl %esp, %ebp");
+            if self.state.emit_cfi {
+                self.state.emit("    .cfi_def_cfa_register %ebp");
+            }
         }
 
         for &reg in self.used_callee_saved.iter() {

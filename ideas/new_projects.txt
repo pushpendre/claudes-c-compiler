@@ -5,3 +5,7 @@ json-c: PASS (all 4 backends: x86, i686, arm, riscv)
 coreutils_GNU: PASS (all 4 backends: x86, i686, arm, riscv) - fixed by adding struct member access validation in sema
 sqlite: PASS (all 4 backends: x86, i686, arm, riscv)
 blosc: PASS (all 4 backends: x86 1630/1630 tests, i686, arm, riscv)
+tcpdump: PASS (all 4 backends: x86, i686, arm, riscv)
+busybox: PASS (all 4 backends: x86, i686, arm, riscv)
+QEMU: PASS (x86 only - only check_x86.sh exists)
+LuaJIT: PASS (x86 - fixed by adding .eh_frame/CFI generation)

@@ -296,6 +296,7 @@ impl Lowerer {
                     ty,
                     bit_width,
                     alignment: f.alignment,
+                    is_packed: f.is_packed,
                 }
             }).collect();
             let mut layout = if is_union {

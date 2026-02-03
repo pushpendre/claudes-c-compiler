@@ -146,6 +146,7 @@ impl RiscvCodegen {
         self.set_pic(opts.pic);
         self.set_no_jump_tables(opts.no_jump_tables);
         self.set_no_relax(opts.no_relax);
+        self.state.emit_cfi = opts.emit_cfi;
     }
 
     /// Emit `.option norelax` if -mno-relax is set.

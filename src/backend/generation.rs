@@ -843,6 +843,10 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
 
     cg.state().emit_fmt(format_args!(".type {}, {}", func.name, type_dir));
     cg.state().emit_fmt(format_args!("{}:", func.name));
+    let emit_cfi = cg.state().emit_cfi;
+    if emit_cfi {
+        cg.state().emit(".cfi_startproc");
+    }
 
     // Emit (N-M) NOPs after the function entry point for patchable function entry
     if emit_patchable {
@@ -862,6 +866,9 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
                     cg.emit_raw_inline_asm(template);
                 }
             }
+        }
+        if emit_cfi {
+            cg.state().emit(".cfi_endproc");
         }
         cg.state().emit_fmt(format_args!(".size {}, .-{}", func.name, func.name));
         cg.state().emit("");
@@ -981,6 +988,9 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
         }
     }
 
+    if emit_cfi {
+        cg.state().emit(".cfi_endproc");
+    }
     cg.state().emit_fmt(format_args!(".size {}, .-{}", func.name, func.name));
     cg.state().emit("");
 }

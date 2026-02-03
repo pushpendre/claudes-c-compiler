@@ -342,6 +342,7 @@ impl Lowerer {
                 ty,
                 bit_width,
                 alignment: field_alignment,
+                is_packed: f.is_packed,
             }
         }).collect();
         if is_union {

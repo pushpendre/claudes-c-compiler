@@ -1,3 +1,0 @@
-Fixing LuaJIT compilation with ccc-x86 (and other architectures if applicable).
-Investigating build/test failures and fixing compiler bugs as needed.
-Started: 2026-02-03
