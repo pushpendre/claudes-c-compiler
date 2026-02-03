@@ -1,0 +1,11 @@
+Adding missing SSE/SSE2 instruction encodings to the x86 native assembler.
+
+Key instructions to add:
+1. movq with XMM registers (GP<->XMM 64-bit, mem<->XMM 64-bit)
+2. pcmpeqb, pcmpeqd - packed byte/dword compare equal
+3. pand, por, pxor - packed bitwise operations
+4. psubusb, psubsb - packed unsigned/signed byte subtract
+5. crc32b/w/l/q - CRC32 intrinsic instructions
+
+These are all emitted by the codegen but not yet handled by the encoder,
+causing assembler failures when MY_ASM=builtin is set.
