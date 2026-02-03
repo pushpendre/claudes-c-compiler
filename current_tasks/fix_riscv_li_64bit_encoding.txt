@@ -1,0 +1,13 @@
+Fix RISC-V assembler li pseudo-instruction encoding for 64-bit immediates.
+
+Current bug: The li encoding for values that don't fit in 32 bits uses `ori` to add
+lower bits after a 32-bit left shift. This is incorrect because `ori` sign-extends
+its 12-bit immediate, which corrupts the upper bits when the immediate is negative.
+
+Example: li t0, 0x123456789ABCDEF0 produces wrong machine code.
+
+Fix: Implement the standard GCC/LLVM approach of decomposing 64-bit values into
+a sequence of lui + addiw + slli + addi instructions with optimally-sized shifts.
+
+Also fix: TlsGotHi20 relocation type incorrectly maps to 23 (same as PcrelHi20)
+instead of the correct value 21 (R_RISCV_TLS_GOT_HI20).
