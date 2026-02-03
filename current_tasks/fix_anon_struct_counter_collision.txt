@@ -1,0 +1,11 @@
+Fix anonymous struct/union type ID collision between sema's declaration
+processing and expression type inference paths.
+
+Two independent counters both generated keys in the format "__anon_struct_{N}"
+starting from 0, causing compound literals with anonymous unions (e.g.,
+((union{double _f; uint64_t _i;}){x})._i) to overwrite the layout of
+previously-parsed anonymous structs in struct_layouts.
+
+Fix: unify both counters to use TypeContext::next_anon_struct_id().
+
+This fixes musl build failures (log.c, log2.c, logb.c) on x86, ARM, and RISC-V.
