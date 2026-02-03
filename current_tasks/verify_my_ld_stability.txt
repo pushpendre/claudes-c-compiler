@@ -1,0 +1,3 @@
+Verifying MY_LD=1 stability across all 4 backends (x86, i686, arm, riscv).
+Running full verification suite, kernel defconfig, and other_deps projects with MY_LD=1.
+Goal: determine if GCC can be removed as the default linker in favor of direct ld invocation.
