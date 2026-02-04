@@ -39,3 +39,5 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | stb_image | PASS | TODO | TODO | TODO | Passes x86 |
 | xxhash  | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | yyjson  | PASS | PASS | PASS | PASS | Fixed i686: incl/decl peephole broke carry flag for 64-bit negation (addl $1 before adcl) |
+| smaz    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| heatshrink | PASS | PASS | PASS | PASS | Fixed i686: linker rejected .os/.od archive members and input files (extension-based filters) |

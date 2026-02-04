@@ -343,9 +343,9 @@ fn parse_archive(data: &[u8], _filename: &str) -> Result<Vec<(String, Vec<u8>)>,
     let mut members = Vec::new();
     for (name, offset, size) in raw_members {
         let content = &data[offset..offset + size];
-        // Accept .o and .oS (e.g. libc_nonshared.a has .oS members)
-        let is_obj = name.ends_with(".o") || name.ends_with(".oS");
-        if is_obj && content.len() >= 4 && content[0..4] == ELF_MAGIC {
+        // Accept any member that looks like an ELF object (by magic number).
+        // Archive members can have various extensions (.o, .oS, .os, .od, etc.)
+        if content.len() >= 4 && content[0..4] == ELF_MAGIC {
             members.push((name, content.to_vec()));
         }
     }
@@ -648,7 +648,9 @@ pub fn link_builtin(
                     _rdynamic = true;
                 }
             }
-        } else if arg.ends_with(".o") || arg.ends_with(".a") {
+        } else if !arg.starts_with('-') && Path::new(arg.as_str()).exists() {
+            // Bare file path: .o object file, .a static archive, or other input file
+            // (e.g., .os, .od extensions used by heatshrink build system)
             extra_objects.push(arg.clone());
         }
         i += 1;
