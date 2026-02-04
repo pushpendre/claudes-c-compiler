@@ -1,8 +1,0 @@
-Fix x86/i686 assembler: jump relaxation symbol values, SymbolDiff relocations, SymbolPlusOffset displacement
-
-Three bugs being fixed:
-1. Jump relaxation was not updating symbol values/sizes after shrinking code
-2. SymbolDiff (.long a - b) cross-section relocations had wrong addends
-3. symbol+offset memory displacements were not parsed/encoded correctly
-
-This improves MY_ASM=builtin x86 pass rate from ~44% to ~86%.
