@@ -1,0 +1,11 @@
+Fix ARM builtin assembler: Q register (128-bit SIMD) LDR/STR encoding
+
+Problem: The builtin ARM assembler incorrectly encodes LDR/STR with Q registers.
+For Q registers (size=00), the opc field needs special values:
+- LDR Qt: opc=11 (not 01)
+- STR Qt: opc=10 (not 00)
+Also, the offset shift should be 4 (16-byte aligned) and :lo12: relocation
+should use Ldst128AbsLo12 instead of Ldst8AbsLo12.
+
+This causes 500+ test failures when MY_ASM=builtin because 128-bit loads/stores
+are encoded as 8-bit (byte) loads/stores, breaking long double and SIMD operations.
