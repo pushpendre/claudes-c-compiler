@@ -1,1 +1,0 @@
-Load+copy fusion: eliminate accumulator roundtrips in load+copy chains
