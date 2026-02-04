@@ -1191,6 +1191,18 @@ impl ArmCodegen {
         }
     }
 
+    /// Like arm_parse_load but returns the w/x variant of the given register number
+    /// instead of hardcoded x0/w0. Used when x0 must not be clobbered.
+    pub(super) fn arm_parse_load_to_reg(instr: &'static str, xreg: &'static str, wreg: &'static str) -> (&'static str, &'static str) {
+        match instr {
+            "ldr32" => ("ldr", wreg),
+            "ldr64" => ("ldr", xreg),
+            "ldrb" | "ldrh" => (instr, wreg),
+            // ldrsb, ldrsh, ldrsw all sign-extend into the x-width register
+            _ => (instr, xreg),
+        }
+    }
+
     // --- Intrinsic helpers (NEON) ---
 
     /// Load the address represented by a pointer Value into the given register.
@@ -1648,6 +1660,9 @@ impl ArmCodegen {
     }
 
     /// Phase 3: Store stack-passed params to alloca slots.
+    /// Uses x9/w9 as scratch instead of x0/w0 to avoid clobbering GP argument
+    /// registers (x0-x7) that may not have been spilled yet (e.g. when mem2reg
+    /// promoted their allocas and emit_param_ref will read them later).
     pub(super) fn emit_store_stack_params(&mut self, func: &IrFunction, param_classes: &[ParamClass]) {
         let frame_size = self.current_frame_size;
         for (i, _) in func.params.iter().enumerate() {
@@ -1664,41 +1679,42 @@ impl ArmCodegen {
                     let caller_offset = frame_size + offset;
                     for qi in 0..size.div_ceil(8) {
                         let off = qi as i64 * 8;
-                        self.emit_load_from_sp("x0", caller_offset + off, "ldr");
-                        self.emit_store_to_sp("x0", slot.0 + off, "str");
+                        self.emit_load_from_sp("x9", caller_offset + off, "ldr");
+                        self.emit_store_to_sp("x9", slot.0 + off, "str");
                     }
                 }
                 ParamClass::F128Stack { offset } => {
                     let caller_offset = frame_size + offset;
-                    self.emit_load_from_sp("x0", caller_offset, "ldr");
-                    self.emit_store_to_sp("x0", slot.0, "str");
-                    self.emit_load_from_sp("x0", caller_offset + 8, "ldr");
-                    self.emit_store_to_sp("x0", slot.0 + 8, "str");
+                    self.emit_load_from_sp("x9", caller_offset, "ldr");
+                    self.emit_store_to_sp("x9", slot.0, "str");
+                    self.emit_load_from_sp("x9", caller_offset + 8, "ldr");
+                    self.emit_store_to_sp("x9", slot.0 + 8, "str");
                     self.state.track_f128_self(dest_val.0);
                 }
                 ParamClass::I128Stack { offset } => {
                     let caller_offset = frame_size + offset;
-                    self.emit_load_from_sp("x0", caller_offset, "ldr");
-                    self.emit_store_to_sp("x0", slot.0, "str");
-                    self.emit_load_from_sp("x0", caller_offset + 8, "ldr");
-                    self.emit_store_to_sp("x0", slot.0 + 8, "str");
+                    self.emit_load_from_sp("x9", caller_offset, "ldr");
+                    self.emit_store_to_sp("x9", slot.0, "str");
+                    self.emit_load_from_sp("x9", caller_offset + 8, "ldr");
+                    self.emit_store_to_sp("x9", slot.0 + 8, "str");
                 }
                 ParamClass::StackScalar { offset } => {
                     let caller_offset = frame_size + offset;
                     // Load from caller stack with extending load, then store
                     // full 64 bits so the slot is valid for any later ldr.
+                    // Use x9/w9 to avoid clobbering GP argument registers.
                     let load_instr = self.load_instr_for_type_impl(ty);
-                    let (arm_load, dest_reg) = Self::arm_parse_load(load_instr);
+                    let (arm_load, dest_reg) = Self::arm_parse_load_to_reg(load_instr, "x9", "w9");
                     self.emit_load_from_sp(dest_reg, caller_offset, arm_load);
-                    self.emit_store_to_sp("x0", slot.0, "str");
+                    self.emit_store_to_sp("x9", slot.0, "str");
                 }
                 ParamClass::LargeStructByRefStack { offset, size } => {
                     let caller_offset = frame_size + offset;
-                    self.emit_load_from_sp("x0", caller_offset, "ldr");
+                    self.emit_load_from_sp("x9", caller_offset, "ldr");
                     for qi in 0..size.div_ceil(8) {
                         let off = (qi * 8) as i64;
-                        self.emit_load_from_reg("x1", "x0", off, "ldr");
-                        self.emit_store_to_sp("x1", slot.0 + off, "str");
+                        self.emit_load_from_reg("x10", "x9", off, "ldr");
+                        self.emit_store_to_sp("x10", slot.0 + off, "str");
                     }
                 }
                 _ => {}

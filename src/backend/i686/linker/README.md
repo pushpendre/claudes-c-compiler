@@ -270,7 +270,7 @@ and lays out four LOAD segments with page alignment:
 
 ```
   Segment 0 (RO):  ELF header + program headers + .interp + .note +
-                   .hash + .dynsym + .dynstr + .gnu.version +
+                   .gnu.hash + .dynsym + .dynstr + .gnu.version +
                    .gnu.version_r + .rel.dyn + .rel.plt
 
   Segment 1 (RX):  .init + .plt + .text + .fini
@@ -350,7 +350,7 @@ The GOT base address follows the i386 convention: it points to the start of
 **`.dynamic` section** entries (each 8 bytes: `d_tag` + `d_val`):
 
 - `DT_NEEDED` for each shared library (libc.so.6, libm.so.6, etc.)
-- `DT_HASH`, `DT_STRTAB`, `DT_SYMTAB`, `DT_STRSZ`, `DT_SYMENT`
+- `DT_GNU_HASH`, `DT_STRTAB`, `DT_SYMTAB`, `DT_STRSZ`, `DT_SYMENT`
 - `DT_INIT` / `DT_FINI` (if `.init` / `.fini` sections exist)
 - `DT_INIT_ARRAY` / `DT_INIT_ARRAYSZ` / `DT_FINI_ARRAY` / `DT_FINI_ARRAYSZ`
 - `DT_PLTGOT`, `DT_PLTRELSZ`, `DT_PLTREL` (= 17, DT_REL), `DT_JMPREL`
@@ -358,8 +358,10 @@ The GOT base address follows the i386 convention: it points to the start of
 - `DT_VERNEED`, `DT_VERNEEDNUM`, `DT_VERSYM` (if versions are present)
 - `DT_DEBUG`, `DT_NULL`
 
-**`.hash` section** uses the SysV hash algorithm (`elf_hash`), not GNU hash.
-This is simpler to implement and universally supported by all dynamic linkers.
+**`.gnu.hash` section** uses the GNU hash algorithm, consistent with the x86-64
+and RISC-V linkers. Uses 32-bit bloom filter words (ELF32 word size). Copy-reloc
+symbols (defined in this executable) are placed in the hashed portion so the
+dynamic linker can find them for symbol interposition.
 
 **Symbol versioning:**
 
@@ -378,7 +380,7 @@ The final ELF32 executable is written as a flat byte array:
 1. ELF32 header (52 bytes) with `ET_EXEC`, `EM_386`, entry point
 2. Program headers (32 bytes each)
 3. Segment data in file-offset order:
-   - Read-only: `.interp`, `.note`, `.hash`, `.dynsym`, `.dynstr`,
+   - Read-only: `.interp`, `.note`, `.gnu.hash`, `.dynsym`, `.dynstr`,
      `.gnu.version`, `.gnu.version_r`, `.rel.dyn`, `.rel.plt`
    - Text: `.init`, `.plt`, `.text`, `.fini`
    - Read-only data: `.rodata`, `.eh_frame`
@@ -399,11 +401,11 @@ headers matter) and reduces file size.
    relocation offset.  This matches the convention established by the assembler
    and is compatible with all i386 object files produced by GCC and LLVM.
 
-2. **SysV hash table**.  The linker emits a `.hash` section using the classic
-   SysV hash algorithm rather than the more complex GNU hash (`.gnu.hash`).
-   SysV hash is universally supported by all glibc versions and is simpler to
-   implement.  The performance difference is negligible for executables with
-   small numbers of dynamic symbols.
+2. **GNU hash table**.  The linker emits a `.gnu.hash` section using the GNU
+   hash algorithm with 32-bit bloom filter words (matching ELF32 word size).
+   This is consistent with the x86-64 and RISC-V linkers.  The dynsym table
+   is ordered with unhashed (undefined import) symbols first, followed by
+   hashed (defined copy-reloc) symbols sorted by bucket.
 
 3. **No section headers in output**.  The executable omits section headers
    entirely.  The kernel and dynamic linker only need program headers to load
@@ -458,4 +460,4 @@ headers matter) and reduces file size.
 |              |       | archive extraction, shared library symbol scanning,         |
 |              |       | section merging, symbol resolution, PLT/GOT construction,   |
 |              |       | layout, relocation application, version tables, output      |
-|              |       | emission, SysV hash table builder, string table builder     |
+|              |       | emission, GNU hash table builder, string table builder      |

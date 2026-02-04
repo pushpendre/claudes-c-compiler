@@ -37,7 +37,6 @@ use crate::backend::elf::{
 // These either differ in type (i32 vs i64 for DT_*) or aren't in the shared module.
 
 // Section header types not in shared module
-const SHT_HASH: u32 = 5;
 const SHT_NOTE: u32 = 7;
 const SHT_GNU_HASH: u32 = 0x6ffffff6;
 const SHT_GNU_VERSYM: u32 = 0x6fffffff;
@@ -77,7 +76,6 @@ const R_386_GOT32X: u32 = 43;
 const DT_NULL: i32 = 0;
 const DT_NEEDED: i32 = 1;
 const DT_PLTGOT: i32 = 3;
-const DT_HASH: i32 = 4;
 const DT_STRTAB: i32 = 5;
 const DT_SYMTAB: i32 = 6;
 const DT_STRSZ: i32 = 10;
@@ -1372,7 +1370,7 @@ pub fn link_builtin(
     let phdrs_total_size = num_phdrs * phdr_size;
 
     // Now lay out the file. We use a simple approach:
-    // Segment 0 (RO): ELF header + PHDRs + INTERP + .hash + .dynsym + .dynstr + .rel.dyn + .rel.plt
+    // Segment 0 (RO): ELF header + PHDRs + INTERP + .gnu.hash + .dynsym + .dynstr + .rel.dyn + .rel.plt
     // Segment 1 (RX): .init + .plt + .text + .fini
     // Segment 2 (RO): .rodata + .eh_frame + .note
     // Segment 3 (RW): .init_array + .fini_array + .dynamic + .got + .got.plt + .data + .bss
@@ -1394,7 +1392,7 @@ pub fn link_builtin(
         }
     }
 
-    // Build .dynsym, .dynstr, .hash, .rel.plt, .rel.dyn, .gnu.version, .gnu.version_r
+    // Build .dynsym, .dynstr, .gnu.hash, .rel.plt, .rel.dyn, .gnu.version, .gnu.version_r
     let mut dynstr = DynStrTab::new();
     let _ = dynstr.add(""); // null entry
 
@@ -1405,6 +1403,8 @@ pub fn link_builtin(
     }
 
     // Build dynsym entries
+    // For .gnu.hash, unhashed (undefined) symbols must come before hashed (defined) ones.
+    // Order: [null] [PLT imports] [GOT-only imports] [copy-reloc defined symbols]
     let mut dynsym_entries: Vec<Elf32Sym> = Vec::new();
     // Entry 0: null symbol
     dynsym_entries.push(Elf32Sym {
@@ -1415,7 +1415,7 @@ pub fn link_builtin(
     let mut dynsym_map: HashMap<String, usize> = HashMap::new();
     let mut dynsym_names: Vec<String> = Vec::new();
 
-    // Add PLT symbols to dynsym
+    // Add PLT symbols to dynsym (unhashed: undefined imports)
     for name in &plt_symbols {
         let idx = dynsym_entries.len();
         let name_off = dynstr.add(name);
@@ -1431,7 +1431,28 @@ pub fn link_builtin(
         dynsym_names.push(name.clone());
     }
 
-    // Add copy-reloc symbols to dynsym (data symbols from shared libs)
+    // Add GOT-only symbols to dynsym (unhashed: undefined imports)
+    for name in &got_symbols {
+        let idx = dynsym_entries.len();
+        let name_off = dynstr.add(name);
+        let sym = &global_symbols[name];
+        dynsym_entries.push(Elf32Sym {
+            name: name_off,
+            value: 0,
+            size: sym.size,
+            info: (sym.binding << 4) | sym.sym_type,
+            other: 0,
+            shndx: if sym.is_dynamic { SHN_UNDEF } else { 1 }, // placeholder
+        });
+        dynsym_map.insert(name.clone(), idx);
+        dynsym_names.push(name.clone());
+    }
+
+    // symoffset = index of first hashed symbol (copy-reloc symbols are defined and
+    // must be findable through .gnu.hash so the dynamic linker can redirect references)
+    let gnu_hash_symoffset = dynsym_entries.len();
+
+    // Add copy-reloc symbols to dynsym (hashed: defined in this executable)
     let mut copy_syms_for_dynsym: Vec<String> = global_symbols.iter()
         .filter(|(_, s)| s.needs_copy && s.is_dynamic)
         .map(|(n, _)| n.clone())
@@ -1453,27 +1474,35 @@ pub fn link_builtin(
         dynsym_names.push(name.clone());
     }
 
-    // Add GOT-only symbols to dynsym
-    for name in &got_symbols {
-        let idx = dynsym_entries.len();
-        let name_off = dynstr.add(name);
-        let sym = &global_symbols[name];
-        dynsym_entries.push(Elf32Sym {
-            name: name_off,
-            value: 0,
-            size: sym.size,
-            info: (sym.binding << 4) | sym.sym_type,
-            other: 0,
-            shndx: if sym.is_dynamic { SHN_UNDEF } else { 1 }, // placeholder
-        });
-        dynsym_map.insert(name.clone(), idx);
-        dynsym_names.push(name.clone());
+    drop(dynstr); // dynstr will be rebuilt as dynstr2 with version strings
+
+    // Build .gnu.hash section (consistent with x86-64 and RISC-V linkers)
+    let (gnu_hash_data, sorted_indices) = build_gnu_hash_32(&copy_syms_for_dynsym, gnu_hash_symoffset as u32);
+
+    // Reorder the hashed portion of dynsym to match .gnu.hash bucket sort order
+    if !sorted_indices.is_empty() {
+        let hashed_start = gnu_hash_symoffset; // index in dynsym_entries (1-based due to null)
+        let hashed_names_start = hashed_start - 1; // index in dynsym_names (0-based)
+
+        // Save original hashed entries/names
+        let orig_entries: Vec<Elf32Sym> = (0..sorted_indices.len())
+            .map(|i| dynsym_entries[hashed_start + i].clone())
+            .collect();
+        let orig_names: Vec<String> = (0..sorted_indices.len())
+            .map(|i| dynsym_names[hashed_names_start + i].clone())
+            .collect();
+
+        // Apply sorted order
+        for (new_pos, &orig_idx) in sorted_indices.iter().enumerate() {
+            dynsym_entries[hashed_start + new_pos] = orig_entries[orig_idx].clone();
+            dynsym_names[hashed_names_start + new_pos] = orig_names[orig_idx].clone();
+        }
+
+        // Rebuild dynsym_map for the reordered hashed symbols
+        for (i, name) in dynsym_names[hashed_names_start..].iter().enumerate() {
+            dynsym_map.insert(name.clone(), hashed_start + i);
+        }
     }
-
-    let dynstr_data = dynstr.finish();
-
-    // Build .hash section (SysV hash, simpler than GNU hash)
-    let hash_data = build_sysv_hash(&dynsym_entries, &dynstr_data);
 
     // Collect all unique version strings needed by dynamic symbols, grouped by library.
     // Maps: library soname -> set of version strings
@@ -1518,10 +1547,10 @@ pub fn link_builtin(
     for name in &plt_symbols {
         dynstr2.add(name);
     }
-    for name in &copy_syms_for_dynsym {
+    for name in &got_symbols {
         dynstr2.add(name);
     }
-    for name in &got_symbols {
+    for name in &copy_syms_for_dynsym {
         dynstr2.add(name);
     }
     // Add all version strings to dynstr
@@ -1646,13 +1675,13 @@ pub fn link_builtin(
     file_offset = align_up(file_offset, 4);
     vaddr = align_up(vaddr, 4);
 
-    // .hash
-    let hash_offset = file_offset;
-    let hash_vaddr = vaddr;
-    let hash_size = hash_data.len() as u32;
+    // .gnu.hash (consistent with x86-64 and RISC-V linkers)
+    let gnu_hash_offset = file_offset;
+    let gnu_hash_vaddr = vaddr;
+    let gnu_hash_size = gnu_hash_data.len() as u32;
     if !is_static {
-        file_offset += hash_size;
-        vaddr += hash_size;
+        file_offset += gnu_hash_size;
+        vaddr += gnu_hash_size;
     }
 
     // .dynsym
@@ -1925,7 +1954,7 @@ pub fn link_builtin(
     // Each entry is 8 bytes (tag + value)
     let mut num_dynamic_entries: u32 = 0;
     num_dynamic_entries += needed_libs.len() as u32; // DT_NEEDED
-    num_dynamic_entries += 1; // DT_HASH
+    num_dynamic_entries += 1; // DT_GNU_HASH
     num_dynamic_entries += 1; // DT_STRTAB
     num_dynamic_entries += 1; // DT_SYMTAB
     num_dynamic_entries += 1; // DT_STRSZ
@@ -2622,7 +2651,7 @@ pub fn link_builtin(
         for &off in &needed_offsets {
             push_dyn(&mut dynamic_data, DT_NEEDED, off);
         }
-        push_dyn(&mut dynamic_data, DT_HASH, hash_vaddr);
+        push_dyn(&mut dynamic_data, DT_GNU_HASH, gnu_hash_vaddr);
         push_dyn(&mut dynamic_data, DT_STRTAB, dynstr_vaddr);
         push_dyn(&mut dynamic_data, DT_SYMTAB, dynsym_vaddr);
         push_dyn(&mut dynamic_data, DT_STRSZ, dynstr_size);
@@ -2815,10 +2844,10 @@ pub fn link_builtin(
             .copy_from_slice(&interp_data);
     }
 
-    // Write .hash
+    // Write .gnu.hash
     if !is_static {
-        output[hash_offset as usize..hash_offset as usize + hash_data.len()]
-            .copy_from_slice(&hash_data);
+        output[gnu_hash_offset as usize..gnu_hash_offset as usize + gnu_hash_data.len()]
+            .copy_from_slice(&gnu_hash_data);
     }
 
     // Write .dynsym
@@ -2964,7 +2993,7 @@ impl DynStrTab {
     }
 }
 
-/// SysV hash function for ELF (delegates to shared implementation).
+/// SysV hash function for ELF (used by .gnu.version_r entries).
 fn elf_hash(name: &[u8]) -> u32 {
     crate::backend::linker_common::sysv_hash(name)
 }
@@ -2973,33 +3002,82 @@ fn elf_hash_str(name: &str) -> u32 {
     elf_hash(name.as_bytes())
 }
 
-/// Build a SysV .hash section.
-fn build_sysv_hash(syms: &[Elf32Sym], strtab: &[u8]) -> Vec<u8> {
-    let nsyms = syms.len();
-    let nbuckets = if nsyms < 3 { 1 } else { nsyms }; // Simple heuristic
-    let mut buckets = vec![0u32; nbuckets];
-    let mut chains = vec![0u32; nsyms];
+/// Build a .gnu.hash section for ELF32.
+///
+/// Uses 32-bit bloom filter words (ELF32 word size) and the GNU hash algorithm.
+/// This matches the .gnu.hash format used by x86-64 and RISC-V linkers, adapted
+/// for 32-bit ELF. The hashed symbols are copy-reloc and exported symbols that
+/// need to be findable by the dynamic linker.
+///
+/// `hashed_names`: names of symbols that go into the hash (at indices >= symoffset)
+/// `symoffset`: first hashed symbol's index in .dynsym
+///
+/// Returns `(hash_data, sorted_indices)` where `sorted_indices` maps new position
+/// to original index in `hashed_names`, so the caller can reorder dynsym entries
+/// to match the hash table's expected order.
+fn build_gnu_hash_32(hashed_names: &[String], symoffset: u32) -> (Vec<u8>, Vec<usize>) {
+    let num_hashed = hashed_names.len();
+    let nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
+    let bloom_size: u32 = 1; // Single 32-bit bloom word for ELF32
+    let bloom_shift: u32 = 5; // Shift for second bloom bit (< 32 for 32-bit words)
 
-    for i in 1..nsyms {
-        let name_off = syms[i].name as usize;
-        if name_off >= strtab.len() { continue; }
-        let end = strtab[name_off..].iter().position(|&b| b == 0)
-            .map(|p| name_off + p).unwrap_or(strtab.len());
-        let name = &strtab[name_off..end];
-        let hash = elf_hash(name);
-        let bucket = (hash as usize) % nbuckets;
-        chains[i] = buckets[bucket];
-        buckets[bucket] = i as u32;
+    // Compute hashes for all hashed symbols
+    let orig_hashes: Vec<u32> = hashed_names.iter()
+        .map(|name| crate::backend::linker_common::gnu_hash(name.as_bytes()))
+        .collect();
+
+    // Sort hashed symbols by bucket for proper chain grouping
+    let mut indices: Vec<usize> = (0..num_hashed).collect();
+    indices.sort_by_key(|&i| orig_hashes[i] % nbuckets);
+    let sym_hashes: Vec<u32> = indices.iter().map(|&i| orig_hashes[i]).collect();
+
+    // Build bloom filter (single 32-bit word for ELF32)
+    let mut bloom_word: u32 = 0;
+    for &h in &sym_hashes {
+        let bit1 = h % 32;
+        let bit2 = (h >> bloom_shift) % 32;
+        bloom_word |= 1u32 << bit1;
+        bloom_word |= 1u32 << bit2;
     }
 
+    // Build buckets and chains
+    let mut buckets = vec![0u32; nbuckets as usize];
+    let mut chains = vec![0u32; num_hashed];
+    for (i, &h) in sym_hashes.iter().enumerate() {
+        let bucket = (h % nbuckets) as usize;
+        if buckets[bucket] == 0 {
+            buckets[bucket] = symoffset + i as u32;
+        }
+        // Chain value = hash with bit 0 cleared (will set for last in chain)
+        chains[i] = h & !1;
+    }
+    // Mark the last symbol in each bucket chain with bit 0 set
+    for bucket_idx in 0..nbuckets as usize {
+        if buckets[bucket_idx] == 0 { continue; }
+        let mut last_in_bucket = 0;
+        for (i, &h) in sym_hashes.iter().enumerate() {
+            if (h % nbuckets) as usize == bucket_idx {
+                last_in_bucket = i;
+            }
+        }
+        chains[last_in_bucket] |= 1; // end-of-chain bit
+    }
+
+    // Serialize: header(16) + bloom(bloom_size*4) + buckets(nbuckets*4) + chains(num_hashed*4)
     let mut data = Vec::new();
-    data.extend_from_slice(&(nbuckets as u32).to_le_bytes());
-    data.extend_from_slice(&(nsyms as u32).to_le_bytes());
+    data.extend_from_slice(&nbuckets.to_le_bytes());
+    data.extend_from_slice(&symoffset.to_le_bytes());
+    data.extend_from_slice(&bloom_size.to_le_bytes());
+    data.extend_from_slice(&bloom_shift.to_le_bytes());
+    // Bloom filter (32-bit words for ELF32)
+    data.extend_from_slice(&bloom_word.to_le_bytes());
+    // Buckets
     for &b in &buckets {
         data.extend_from_slice(&b.to_le_bytes());
     }
+    // Chains
     for &c in &chains {
         data.extend_from_slice(&c.to_le_bytes());
     }
-    data
+    (data, indices)
 }

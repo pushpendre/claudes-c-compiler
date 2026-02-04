@@ -62,3 +62,6 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | cwalk   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | linenoise | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | log.c   | PASS | PASS | PASS | PASS | Fixed i686: missing libgcc.a (demand-driven archive extraction), TLS relocs, R_386_TLS_LE/TPOFF32 formula swap (exit crash) |
+| picohttpparser | PASS | PASS | PASS | PASS | Fixed ARM: stack-passed params in callee prologue clobbered x0 (emit_store_stack_params used x0 as scratch) |
+| http-parser | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| tiny-regex-c | PASS | PASS | PASS | PASS | All architectures pass out of the box |
