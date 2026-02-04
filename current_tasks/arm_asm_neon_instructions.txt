@@ -1,0 +1,22 @@
+Task: Add missing NEON/SIMD instruction encoding to ARM assembler
+
+The ARM assembler encoder is missing many NEON instructions that are needed
+for inline assembly tests. Adding these will fix ~40+ test failures.
+
+Instructions to add:
+- ld1, st1 (vector load/store)
+- movi (move immediate to vector)
+- tbl (table lookup)
+- bic (bitwise clear vector)
+- bsl (bitwise select)
+- rev64 (reverse elements in doubleword)
+- eor3 (three-way XOR, SHA3)
+- not (vector NOT)
+- shl (shift left immediate)
+- sshr (signed shift right immediate)
+- ins (insert element)
+- uzp1/uzp2 (unzip)
+- sli (shift left and insert)
+- bics (vector bitwise clear)
+- pmull (polynomial multiply long)
+- aesd, aese, aesmc, aesimc (AES crypto)
