@@ -8,6 +8,7 @@
 //! - Binary read/write helpers for little-endian ELF fields
 //! - `write_shdr64` / `write_shdr32` for section header emission
 //! - `parse_archive_members` for reading `.a` static archives
+//! - `parse_thin_archive_members` for reading GNU thin archives
 //! - `parse_linker_script` for handling linker script GROUP directives
 //! - `ElfWriterBase` for shared assembler ELF writer state (ARM/RISC-V)
 
@@ -429,6 +430,90 @@ pub fn write_rel32(buf: &mut Vec<u8>, r_offset: u32, r_sym: u32, r_type: u8) {
 }
 
 // ── Archive (.a) parsing ─────────────────────────────────────────────────────
+
+/// Returns true if `data` starts with the thin archive magic `!<thin>\n`.
+pub fn is_thin_archive(data: &[u8]) -> bool {
+    data.len() >= 8 && &data[0..8] == b"!<thin>\n"
+}
+
+/// Parse a GNU thin archive (.a file with `!<thin>\n` magic), returning member
+/// filenames (relative to the archive directory). In thin archives, member data
+/// is NOT stored inline — the archive only contains headers and a name table.
+/// The caller must read each file from disk.
+pub fn parse_thin_archive_members(data: &[u8]) -> Result<Vec<String>, String> {
+    if data.len() < 8 || &data[0..8] != b"!<thin>\n" {
+        return Err("not a thin archive file".to_string());
+    }
+
+    let mut members = Vec::new();
+    let mut pos = 8;
+    let mut extended_names: Option<&[u8]> = None;
+
+    while pos + 60 <= data.len() {
+        let name_raw = &data[pos..pos + 16];
+        let size_str = std::str::from_utf8(&data[pos + 48..pos + 58])
+            .unwrap_or("")
+            .trim();
+        let magic = &data[pos + 58..pos + 60];
+        if magic != b"`\n" {
+            break;
+        }
+
+        let size: usize = size_str.parse().unwrap_or(0);
+        let data_start = pos + 60;
+        let name_str = std::str::from_utf8(name_raw).unwrap_or("").trim_end();
+
+        if name_str == "/" || name_str == "/SYM64/" {
+            // Symbol table — data is stored inline even in thin archives
+            pos = data_start + size;
+            if pos % 2 != 0 { pos += 1; }
+            continue;
+        } else if name_str == "//" {
+            // Extended name table — also stored inline in thin archives
+            extended_names = Some(&data[data_start..(data_start + size).min(data.len())]);
+            pos = data_start + size;
+            if pos % 2 != 0 { pos += 1; }
+            continue;
+        }
+
+        // Regular member — in thin archives, data is NOT inline
+        let member_name = if let Some(rest) = name_str.strip_prefix('/') {
+            if let Some(ext) = extended_names {
+                // The name field is like "/23607" or "/23607/" — extract just the digits
+                let num_str = rest.trim_end_matches('/').trim();
+                let name_off: usize = num_str.parse().unwrap_or(0);
+                if name_off < ext.len() {
+                    // In thin archives, names can contain '/' (path separators),
+                    // so the terminator is the two-byte sequence "/\n", not just '/'.
+                    let slice = &ext[name_off..];
+                    let end = slice.windows(2)
+                        .position(|w| w == b"/\n")
+                        .unwrap_or_else(|| {
+                            // Fall back to null byte or end of table
+                            slice.iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(slice.len())
+                        });
+                    String::from_utf8_lossy(&ext[name_off..name_off + end]).to_string()
+                } else {
+                    name_str.to_string()
+                }
+            } else {
+                name_str.to_string()
+            }
+        } else {
+            name_str.trim_end_matches('/').to_string()
+        };
+
+        members.push(member_name);
+
+        // In thin archives, member headers are consecutive (no inline data)
+        pos = data_start;
+        if pos % 2 != 0 { pos += 1; }
+    }
+
+    Ok(members)
+}
 
 /// Parse a GNU-format static archive (.a file), returning member entries as
 /// `(name, data_offset, data_size)` tuples. The offsets are into the original

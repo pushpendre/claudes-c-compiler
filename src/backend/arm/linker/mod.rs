@@ -244,6 +244,11 @@ fn load_file(
         return load_archive(&data, path, objects, globals, lib_paths);
     }
 
+    // Thin archive?
+    if is_thin_archive(&data) {
+        return load_thin_archive(&data, path, objects, globals, lib_paths);
+    }
+
     // Not ELF? Try linker script
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
@@ -298,6 +303,53 @@ fn load_archive(
     }
 
     // Pull in members that resolve undefined symbols, iterating until stable
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < member_objects.len() {
+            if member_resolves_undefined(&member_objects[i], globals) {
+                let obj = member_objects.remove(i);
+                let obj_idx = objects.len();
+                register_symbols(obj_idx, &obj, globals);
+                objects.push(obj);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load a GNU thin archive. Member data lives in external files.
+fn load_thin_archive(
+    data: &[u8], archive_path: &str, objects: &mut Vec<ElfObject>,
+    globals: &mut HashMap<String, GlobalSymbol>, _lib_paths: &[String],
+) -> Result<(), String> {
+    let member_names = parse_thin_archive_members(data)?;
+    let archive_dir = Path::new(archive_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut member_objects: Vec<ElfObject> = Vec::new();
+    for name in &member_names {
+        let member_path = archive_dir.join(name);
+        let member_data = std::fs::read(&member_path).map_err(|e| {
+            format!("thin archive {}: failed to read member '{}': {}",
+                    archive_path, member_path.display(), e)
+        })?;
+        if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC { continue; }
+        if member_data.len() >= 20 {
+            let e_machine = read_u16(&member_data, 18);
+            if e_machine != EM_AARCH64 { continue; }
+        }
+        let full_name = format!("{}({})", archive_path, name);
+        if let Ok(obj) = parse_object(&member_data, &full_name) {
+            member_objects.push(obj);
+        }
+    }
+
     let mut changed = true;
     while changed {
         changed = false;

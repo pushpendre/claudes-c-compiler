@@ -1,9 +1,0 @@
-Task: Fix QEMU x86_64-softmmu build with ccc-x86
-
-Goal: Make QEMU compile and link with ccc-x86 for x86_64-softmmu target.
-
-Current issues:
-1. xgetbv inline asm instruction not handled in x86 backend
-2. Possibly more compilation errors after this is fixed
-
-Status: IN PROGRESS

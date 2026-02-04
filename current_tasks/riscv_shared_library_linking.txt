@@ -1,4 +1,0 @@
-Implement shared library (.so) output support for the RISC-V linker.
-This is needed for PostgreSQL which builds .so plugin modules.
-Will port the x86-64 link_shared()/emit_shared_library() implementation to RISC-V,
-handling RISC-V-specific relocations and GOT/PLT entries.

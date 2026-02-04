@@ -1562,6 +1562,8 @@ impl InstructionEncoder {
             // System instructions
             "rdmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x32]); Ok(()) }
             "wrmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x30]); Ok(()) }
+            "xgetbv" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xD0]); Ok(()) }
+            "xsetbv" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xD1]); Ok(()) }
 
             _ if mnemonic.starts_with("set") => {
                 // Handle setXXb forms (e.g., setcb = setc with byte suffix)

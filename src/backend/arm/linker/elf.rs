@@ -18,7 +18,7 @@ pub use crate::backend::elf::{
     PF_X, PF_W, PF_R,
     read_u16, read_u32,
     w16, w32, w64, write_bytes,
-    parse_archive_members, parse_linker_script,
+    parse_archive_members, parse_thin_archive_members, is_thin_archive, parse_linker_script,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 

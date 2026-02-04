@@ -13,3 +13,4 @@ mod elf_read;
 mod link;
 
 pub use link::link_builtin;
+pub use link::link_shared;

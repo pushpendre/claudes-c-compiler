@@ -29,7 +29,7 @@ use crate::backend::elf::{
     PF_X, PF_W, PF_R,
     // Read helpers
     read_u16, read_u32, read_cstr, read_i32,
-    parse_archive_members,
+    parse_archive_members, parse_thin_archive_members, is_thin_archive,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
@@ -348,6 +348,26 @@ fn parse_archive(data: &[u8], _filename: &str) -> Result<Vec<(String, Vec<u8>)>,
         // Archive members can have various extensions (.o, .oS, .os, .od, etc.)
         if content.len() >= 4 && content[0..4] == ELF_MAGIC {
             members.push((name, content.to_vec()));
+        }
+    }
+    Ok(members)
+}
+
+/// Parse a GNU thin archive, reading member data from external files.
+fn parse_thin_archive_i686(data: &[u8], archive_path: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let member_names = parse_thin_archive_members(data)?;
+    let archive_dir = std::path::Path::new(archive_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut members = Vec::new();
+    for name in member_names {
+        let member_path = archive_dir.join(&name);
+        let content = std::fs::read(&member_path).map_err(|e| {
+            format!("thin archive {}: failed to read member '{}': {}",
+                    archive_path, member_path.display(), e)
+        })?;
+        if content.len() >= 4 && content[0..4] == ELF_MAGIC {
+            members.push((name, content));
         }
     }
     Ok(members)
@@ -851,6 +871,15 @@ pub fn link_builtin(
         if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
             // Archive file - parse members into the pool
             let members = parse_archive(&data, obj_path)?;
+            for (name, mdata) in members {
+                let member_name = format!("{}({})", obj_path, name);
+                if let Ok(obj) = parse_elf32(&mdata, &member_name) {
+                    archive_pool.push(obj);
+                }
+            }
+        } else if is_thin_archive(&data) {
+            // Thin archive - read member files from disk
+            let members = parse_thin_archive_i686(&data, obj_path)?;
             for (name, mdata) in members {
                 let member_name = format!("{}({})", obj_path, name);
                 if let Ok(obj) = parse_elf32(&mdata, &member_name) {

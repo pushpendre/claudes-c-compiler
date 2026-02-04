@@ -6,7 +6,7 @@ use super::elf_read::*;
 // ── ELF executable constants ────────────────────────────────────────────────
 // Standard ELF constants imported from the shared module.
 use crate::backend::elf::{
-    ET_EXEC, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_TLS,
+    ET_EXEC, ET_DYN, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_TLS,
     PT_GNU_STACK, PT_GNU_RELRO,
     PF_X, PF_W, PF_R,
     DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_STRTAB,
@@ -15,6 +15,7 @@ use crate::backend::elf::{
     DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ,
     DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ,
     DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
+    ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EM_RISCV as EM_RISCV_ELF,
 };
 
 // RISC-V specific
@@ -209,6 +210,11 @@ pub fn link_builtin(
             let members = parse_archive(&data)
                 .map_err(|e| format!("{}: {}", path, e))?;
             input_objs.extend(members);
+        } else if is_thin_archive(&data) {
+            // Thin archive: member data in external files
+            let members = parse_thin_archive(&data, path)
+                .map_err(|e| format!("{}: {}", path, e))?;
+            input_objs.extend(members);
         } else if data.len() >= 4 && &data[0..4] == b"\x7fELF" {
             let obj = parse_object(&data, path)
                 .map_err(|e| format!("{}: {}", path, e))?;
@@ -295,6 +301,13 @@ pub fn link_builtin(
                                                     &mut defined_syms, &mut undefined_syms,
                                                 );
                                             }
+                                        } else if is_thin_archive(&archive_data) {
+                                            if let Ok(members) = parse_thin_archive(&archive_data, &actual_path) {
+                                                resolve_archive_members(
+                                                    members, &mut input_objs,
+                                                    &mut defined_syms, &mut undefined_syms,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -368,6 +381,13 @@ pub fn link_builtin(
             };
             if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
                 if let Ok(members) = parse_archive(&data) {
+                    resolve_archive_members(
+                        members, &mut input_objs,
+                        &mut defined_syms, &mut undefined_syms,
+                    );
+                }
+            } else if is_thin_archive(&data) {
+                if let Ok(members) = parse_thin_archive(&data, path) {
                     resolve_archive_members(
                         members, &mut input_objs,
                         &mut defined_syms, &mut undefined_syms,
@@ -2509,6 +2529,1579 @@ pub fn link_builtin(
     }
 
     Ok(())
+}
+
+// ── Shared library linking ─────────────────────────────────────────────
+
+/// Link object files into a RISC-V shared library (.so).
+///
+/// Produces an ET_DYN ELF with base address 0 (position-independent).
+/// All defined global symbols are exported to .dynsym.
+/// R_RISCV_RELATIVE dynamic relocations are emitted for internal absolute addresses.
+pub fn link_shared(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    lib_paths: &[&str],
+) -> Result<(), String> {
+    use crate::backend::linker_common::{self, DynStrTab};
+
+    const R_RISCV_RELATIVE: u64 = 3;
+    const DT_SONAME: u64 = 14;
+    const DT_RELACOUNT: u64 = 0x6ffffff9;
+    const SHT_DYNAMIC: u32 = 6;
+    const SHT_DYNSYM: u32 = 11;
+
+    let lib_path_strings: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
+
+    // Parse user args for -L, -l, -Wl,-soname=, bare .o/.a files
+    let mut extra_lib_paths: Vec<String> = Vec::new();
+    let mut libs_to_load: Vec<String> = Vec::new();
+    let mut extra_object_files: Vec<String> = Vec::new();
+    let mut soname: Option<String> = None;
+    let mut i = 0;
+    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
+    while i < args.len() {
+        let arg = args[i];
+        if let Some(path) = arg.strip_prefix("-L") {
+            let p = if path.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { path };
+            extra_lib_paths.push(p.to_string());
+        } else if let Some(lib) = arg.strip_prefix("-l") {
+            let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
+            libs_to_load.push(l.to_string());
+        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            let parts: Vec<&str> = wl_arg.split(',').collect();
+            for j in 0..parts.len() {
+                if let Some(sn) = parts[j].strip_prefix("-soname=") {
+                    soname = Some(sn.to_string());
+                } else if parts[j] == "-soname" && j + 1 < parts.len() {
+                    soname = Some(parts[j + 1].to_string());
+                } else if let Some(lpath) = parts[j].strip_prefix("-L") {
+                    extra_lib_paths.push(lpath.to_string());
+                } else if let Some(lib) = parts[j].strip_prefix("-l") {
+                    libs_to_load.push(lib.to_string());
+                }
+            }
+        } else if arg == "-shared" || arg == "-nostdlib" || arg == "-o" {
+            if arg == "-o" { i += 1; } // skip output path
+        } else if !arg.starts_with('-') && std::path::Path::new(arg).exists() {
+            extra_object_files.push(arg.to_string());
+        }
+        i += 1;
+    }
+
+    // ── Phase 1: Load input objects ──────────────────────────────────
+    let mut input_objs: Vec<(String, ElfObject)> = Vec::new();
+    let mut defined_syms: HashSet<String> = HashSet::new();
+    let mut undefined_syms: HashSet<String> = HashSet::new();
+    let mut needed_sonames: Vec<String> = Vec::new();
+
+    let load_obj_file = |path: &str, input_objs: &mut Vec<(String, ElfObject)>,
+                         defined_syms: &mut HashSet<String>,
+                         undefined_syms: &mut HashSet<String>| -> Result<(), String> {
+        let data = std::fs::read(path)
+            .map_err(|e| format!("failed to read '{}': {}", path, e))?;
+        if data.len() < 4 { return Ok(()); }
+        if data.starts_with(b"!<arch>") {
+            // Archive
+            let members = parse_archive(&data)?;
+            for (name, obj) in members {
+                for sym in &obj.symbols {
+                    if sym.shndx != SHN_UNDEF && sym.binding() != STB_LOCAL && !sym.name.is_empty() {
+                        defined_syms.insert(sym.name.clone());
+                        undefined_syms.remove(&sym.name);
+                    }
+                }
+                for sym in &obj.symbols {
+                    if sym.shndx == SHN_UNDEF && !sym.name.is_empty() && sym.binding() != STB_LOCAL
+                        && !defined_syms.contains(&sym.name) {
+                        undefined_syms.insert(sym.name.clone());
+                    }
+                }
+                input_objs.push((format!("{}({})", path, name), obj));
+            }
+        } else if data.starts_with(&[0x7f, b'E', b'L', b'F']) {
+            let obj = parse_object(&data, path)?;
+            for sym in &obj.symbols {
+                if sym.shndx != SHN_UNDEF && sym.binding() != STB_LOCAL && !sym.name.is_empty() {
+                    defined_syms.insert(sym.name.clone());
+                    undefined_syms.remove(&sym.name);
+                }
+            }
+            for sym in &obj.symbols {
+                if sym.shndx == SHN_UNDEF && !sym.name.is_empty() && sym.binding() != STB_LOCAL
+                    && !defined_syms.contains(&sym.name) {
+                    undefined_syms.insert(sym.name.clone());
+                }
+            }
+            input_objs.push((path.to_string(), obj));
+        }
+        Ok(())
+    };
+
+    // Load user object files
+    for path in object_files {
+        load_obj_file(path, &mut input_objs, &mut defined_syms, &mut undefined_syms)?;
+    }
+    for path in &extra_object_files {
+        load_obj_file(path, &mut input_objs, &mut defined_syms, &mut undefined_syms)?;
+    }
+
+    // Resolve -l libraries
+    let mut all_lib_paths: Vec<String> = extra_lib_paths;
+    all_lib_paths.extend(lib_path_strings.iter().cloned());
+
+    for lib_name in &libs_to_load {
+        if let Some(lib_path) = linker_common::resolve_lib(lib_name, &all_lib_paths, false) {
+            let data = match std::fs::read(&lib_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if data.starts_with(b"!<arch>") {
+                // Static archive - load members that resolve undefined symbols
+                if let Ok(members) = parse_archive(&data) {
+                    resolve_archive_members(members, &mut input_objs, &mut defined_syms, &mut undefined_syms);
+                }
+            } else if data.starts_with(&[0x7f, b'E', b'L', b'F']) {
+                // Check if it's a shared library
+                if data.len() >= 18 {
+                    let e_type = u16::from_le_bytes([data[16], data[17]]);
+                    if e_type == 3 {
+                        // ET_DYN - shared library, record as NEEDED
+                        if let Some(sn) = linker_common::parse_soname(&data) {
+                            if !needed_sonames.contains(&sn) {
+                                needed_sonames.push(sn);
+                            }
+                        } else {
+                            let base = std::path::Path::new(&lib_path)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| lib_name.clone());
+                            if !needed_sonames.contains(&base) {
+                                needed_sonames.push(base);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                // Relocatable object
+                load_obj_file(&lib_path, &mut input_objs, &mut defined_syms, &mut undefined_syms)?;
+            } else if data.starts_with(b"/* GNU ld script") || data.starts_with(b"GROUP") || data.starts_with(b"INPUT") {
+                // Linker script - skip for shared library linking
+                continue;
+            }
+        }
+    }
+
+    if input_objs.is_empty() {
+        return Err("No input files for shared library".to_string());
+    }
+
+    // ── Phase 2: Merge sections ─────────────────────────────────────
+    let mut merged_sections: Vec<MergedSection> = Vec::new();
+    let mut merged_map: HashMap<String, usize> = HashMap::new();
+
+    struct SharedInputRef {
+        obj_idx: usize,
+        sec_idx: usize,
+        merged_sec_idx: usize,
+        offset_in_merged: u64,
+    }
+    let mut input_sec_refs: Vec<SharedInputRef> = Vec::new();
+
+    fn so_output_section_name(name: &str, sh_type: u32, sh_flags: u64) -> Option<String> {
+        if sh_flags & SHF_ALLOC == 0 && sh_type != SHT_RISCV_ATTRIBUTES {
+            return None;
+        }
+        if sh_type == SHT_GROUP { return None; }
+
+        if name.starts_with(".text.") { return Some(".text".into()); }
+        if name.starts_with(".rodata.") { return Some(".rodata".into()); }
+        if name.starts_with(".data.rel.ro") { return Some(".data".into()); }
+        if name.starts_with(".data.") { return Some(".data".into()); }
+        if name.starts_with(".bss.") { return Some(".bss".into()); }
+        if name.starts_with(".tdata.") { return Some(".tdata".into()); }
+        if name.starts_with(".tbss.") { return Some(".tbss".into()); }
+        if name.starts_with(".sdata.") { return Some(".sdata".into()); }
+        if name.starts_with(".sbss.") { return Some(".sbss".into()); }
+        if name == ".init_array" || name.starts_with(".init_array.") { return Some(".init_array".into()); }
+        if name == ".fini_array" || name.starts_with(".fini_array.") { return Some(".fini_array".into()); }
+        Some(name.to_string())
+    }
+
+    for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+        for (sec_idx, sec) in obj.sections.iter().enumerate() {
+            if sec.name.is_empty() || sec.sh_type == SHT_SYMTAB || sec.sh_type == SHT_STRTAB
+                || sec.sh_type == SHT_RELA || sec.sh_type == SHT_GROUP { continue; }
+
+            let out_name = match so_output_section_name(&sec.name, sec.sh_type, sec.flags) {
+                Some(n) => n,
+                None => continue,
+            };
+            if out_name == ".note.GNU-stack" { continue; }
+
+            let sec_data = &obj.section_data[sec_idx];
+
+            // Handle .riscv.attributes - keep first one
+            if out_name == ".riscv.attributes" || out_name.starts_with(".note.") {
+                if !merged_map.contains_key(&out_name) {
+                    let idx = merged_sections.len();
+                    merged_map.insert(out_name.clone(), idx);
+                    merged_sections.push(MergedSection {
+                        name: out_name.clone(),
+                        sh_type: sec.sh_type,
+                        sh_flags: sec.flags,
+                        data: sec_data.clone(),
+                        vaddr: 0,
+                        align: sec.addralign.max(1),
+                    });
+                    input_sec_refs.push(SharedInputRef {
+                        obj_idx, sec_idx,
+                        merged_sec_idx: idx,
+                        offset_in_merged: 0,
+                    });
+                }
+                continue;
+            }
+
+            let merged_idx = if let Some(&idx) = merged_map.get(&out_name) {
+                idx
+            } else {
+                let idx = merged_sections.len();
+                let is_bss = sec.sh_type == SHT_NOBITS || out_name == ".bss" || out_name == ".sbss";
+                merged_map.insert(out_name.clone(), idx);
+                merged_sections.push(MergedSection {
+                    name: out_name.clone(),
+                    sh_type: if is_bss { SHT_NOBITS } else { sec.sh_type },
+                    sh_flags: sec.flags,
+                    data: Vec::new(),
+                    vaddr: 0,
+                    align: sec.addralign.max(1),
+                });
+                idx
+            };
+
+            let ms = &mut merged_sections[merged_idx];
+            ms.sh_flags |= sec.flags & (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR | SHF_TLS);
+            ms.align = ms.align.max(sec.addralign.max(1));
+
+            let align = sec.addralign.max(1) as usize;
+            let cur_len = ms.data.len();
+            let aligned = (cur_len + align - 1) & !(align - 1);
+            if aligned > cur_len { ms.data.resize(aligned, 0); }
+            let offset_in_merged = ms.data.len() as u64;
+
+            if sec.sh_type == SHT_NOBITS {
+                ms.data.resize(ms.data.len() + sec.size as usize, 0);
+            } else {
+                ms.data.extend_from_slice(sec_data);
+            }
+
+            input_sec_refs.push(SharedInputRef {
+                obj_idx, sec_idx,
+                merged_sec_idx: merged_idx,
+                offset_in_merged,
+            });
+        }
+    }
+
+    // ── Phase 3: Build global symbol table ───────────────────────────
+    let mut sec_mapping: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
+    for r in &input_sec_refs {
+        sec_mapping.insert((r.obj_idx, r.sec_idx), (r.merged_sec_idx, r.offset_in_merged));
+    }
+
+    let mut global_syms: HashMap<String, GlobalSym> = HashMap::new();
+    for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+        for sym in &obj.symbols {
+            if sym.name.is_empty() || sym.binding() == STB_LOCAL { continue; }
+            if sym.shndx == SHN_UNDEF {
+                global_syms.entry(sym.name.clone()).or_insert_with(|| GlobalSym {
+                    value: 0, size: 0, binding: sym.binding(), sym_type: sym.sym_type(),
+                    visibility: sym.visibility(), defined: false, needs_plt: false,
+                    plt_idx: 0, got_offset: None, section_idx: None,
+                });
+                continue;
+            }
+            if sym.shndx == SHN_ABS {
+                let entry = global_syms.entry(sym.name.clone()).or_insert_with(|| GlobalSym {
+                    value: sym.value, size: sym.size, binding: sym.binding(),
+                    sym_type: sym.sym_type(), visibility: sym.visibility(),
+                    defined: true, needs_plt: false, plt_idx: 0, got_offset: None,
+                    section_idx: None,
+                });
+                if !entry.defined || (entry.binding == STB_WEAK && sym.binding() == STB_GLOBAL) {
+                    entry.value = sym.value; entry.size = sym.size;
+                    entry.binding = sym.binding(); entry.defined = true;
+                }
+                continue;
+            }
+            if sym.shndx == SHN_COMMON {
+                let bss_idx = *merged_map.entry(".bss".into()).or_insert_with(|| {
+                    let idx = merged_sections.len();
+                    merged_sections.push(MergedSection {
+                        name: ".bss".into(), sh_type: SHT_NOBITS,
+                        sh_flags: SHF_ALLOC | SHF_WRITE, data: Vec::new(), vaddr: 0, align: 8,
+                    });
+                    idx
+                });
+                let ms = &mut merged_sections[bss_idx];
+                let a = sym.value.max(1) as usize;
+                let cur = ms.data.len();
+                let aligned_off = (cur + a - 1) & !(a - 1);
+                ms.data.resize(aligned_off, 0);
+                let off = ms.data.len() as u64;
+                ms.data.resize(ms.data.len() + sym.size as usize, 0);
+                ms.align = ms.align.max(a as u64);
+
+                let entry = global_syms.entry(sym.name.clone()).or_insert_with(|| GlobalSym {
+                    value: off, size: sym.size, binding: sym.binding(),
+                    sym_type: STT_OBJECT, visibility: sym.visibility(),
+                    defined: true, needs_plt: false, plt_idx: 0,
+                    got_offset: None, section_idx: Some(bss_idx),
+                });
+                if !entry.defined || (entry.binding == STB_WEAK && sym.binding() == STB_GLOBAL) {
+                    entry.value = off; entry.size = sym.size.max(entry.size);
+                    entry.binding = sym.binding(); entry.defined = true;
+                    entry.section_idx = Some(bss_idx);
+                }
+                continue;
+            }
+            let sec_idx = sym.shndx as usize;
+            let (merged_idx, offset) = match sec_mapping.get(&(obj_idx, sec_idx)) {
+                Some(&v) => v,
+                None => continue,
+            };
+            let entry = global_syms.entry(sym.name.clone()).or_insert_with(|| GlobalSym {
+                value: 0, size: sym.size, binding: sym.binding(),
+                sym_type: sym.sym_type(), visibility: sym.visibility(),
+                defined: false, needs_plt: false, plt_idx: 0,
+                got_offset: None, section_idx: None,
+            });
+            if !entry.defined || (entry.binding == STB_WEAK && sym.binding() == STB_GLOBAL) {
+                entry.value = sym.value + offset;
+                entry.size = sym.size;
+                entry.binding = sym.binding();
+                entry.sym_type = sym.sym_type();
+                entry.defined = true;
+                entry.section_idx = Some(merged_idx);
+            }
+        }
+    }
+
+    // Compute local symbol vaddrs (will be filled after layout)
+    let mut local_sym_vaddrs: Vec<Vec<u64>> = Vec::with_capacity(input_objs.len());
+    for (_, obj) in &input_objs {
+        local_sym_vaddrs.push(vec![0u64; obj.symbols.len()]);
+    }
+
+    // ── Phase 3b: Identify GOT entries needed ───────────────────────
+    let mut got_symbols: Vec<String> = Vec::new();
+    {
+        let mut got_set: HashSet<String> = HashSet::new();
+        for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+            for relocs in &obj.relocations {
+                for reloc in relocs {
+                    if reloc.rela_type == R_RISCV_GOT_HI20
+                        || reloc.rela_type == R_RISCV_TLS_GOT_HI20
+                        || reloc.rela_type == R_RISCV_TLS_GD_HI20
+                    {
+                        let sym = &obj.symbols[reloc.sym_idx as usize];
+                        let (name, _) = got_sym_key(obj_idx, sym, reloc.addend);
+                        if !name.is_empty() && !got_set.contains(&name) {
+                            got_set.insert(name.clone());
+                            got_symbols.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Phase 4: Layout sections ────────────────────────────────────
+    // Sort sections by canonical order
+    let section_order = |name: &str, flags: u64| -> u64 {
+        match name {
+            ".text" => 100,
+            ".rodata" => 200,
+            ".eh_frame_hdr" => 250,
+            ".eh_frame" => 260,
+            ".init_array" => 510,
+            ".fini_array" => 520,
+            ".data" => 600,
+            ".sdata" => 650,
+            ".bss" | ".sbss" => 700,
+            _ if flags & SHF_EXECINSTR != 0 => 150,
+            _ if flags & SHF_WRITE == 0 => 300,
+            _ => 600,
+        }
+    };
+
+    let mut sec_indices: Vec<usize> = (0..merged_sections.len()).collect();
+    sec_indices.sort_by_key(|&i| {
+        let ms = &merged_sections[i];
+        section_order(&ms.name, ms.sh_flags)
+    });
+
+    // Count dynamic relocations needed and GOT size
+    let got_size = got_symbols.len() as u64 * 8;
+
+    // Estimate max R_RISCV_RELATIVE entries: each R_RISCV_64 + init/fini array entries
+    let mut max_rela_count: usize = 0;
+    for (_, obj) in input_objs.iter() {
+        for sec_relas in &obj.relocations {
+            for rela in sec_relas {
+                if rela.rela_type == R_RISCV_64 {
+                    max_rela_count += 1;
+                }
+            }
+        }
+    }
+    // Also init_array/fini_array entries are pointers
+    for ms in merged_sections.iter() {
+        if ms.name == ".init_array" || ms.name == ".fini_array" {
+            max_rela_count += (ms.data.len() / 8) as usize;
+        }
+    }
+    // GOT entries for local symbols also need RELATIVE relocs
+    max_rela_count += got_symbols.len();
+
+    let has_init_array = merged_sections.iter().any(|ms| ms.name == ".init_array" && !ms.data.is_empty());
+    let has_fini_array = merged_sections.iter().any(|ms| ms.name == ".fini_array" && !ms.data.is_empty());
+    let has_tls = merged_sections.iter().any(|ms| ms.sh_flags & SHF_TLS != 0);
+
+    let mut dyn_count: u64 = needed_sonames.len() as u64 + 10; // DT_STRTAB, DT_SYMTAB, etc + DT_NULL
+    if soname.is_some() { dyn_count += 1; }
+    if has_init_array { dyn_count += 2; }
+    if has_fini_array { dyn_count += 2; }
+    let dynamic_size = dyn_count * 16;
+
+    // phdrs: PHDR, LOAD(ro), LOAD(text), LOAD(rodata), LOAD(rw), DYNAMIC, GNU_STACK, [TLS], [RISCV_ATTR]
+    let has_riscv_attrs = merged_sections.iter().any(|ms| ms.name == ".riscv.attributes");
+    let mut phdr_count: u64 = 7; // PHDR, LOAD(ro), LOAD(text), LOAD(rodata), LOAD(rw), DYNAMIC, GNU_STACK
+    if has_tls { phdr_count += 1; }
+    if has_riscv_attrs { phdr_count += 1; }
+    let phdr_total_size = phdr_count * 56;
+
+    // ── Layout ──
+    let base_addr: u64 = 0;
+    let mut offset = 64 + phdr_total_size;
+
+    // Collect exported symbol names for .dynsym
+    let mut dyn_sym_names: Vec<String> = Vec::new();
+    let mut exported: Vec<String> = global_syms.iter()
+        .filter(|(_, g)| g.defined && g.binding != STB_LOCAL)
+        .map(|(n, _)| n.clone())
+        .collect();
+    exported.sort();
+    for name in exported { dyn_sym_names.push(name); }
+    // Also add undefined dynamic symbols
+    // TODO: Emit R_RISCV_GLOB_DAT dynamic relocations for GOT entries of
+    // undefined symbols to enable proper runtime resolution by ld.so
+    for (name, gsym) in global_syms.iter() {
+        if !gsym.defined && !dyn_sym_names.contains(name) {
+            dyn_sym_names.push(name.clone());
+        }
+    }
+
+    // Build dynamic string table
+    let mut dynstr = DynStrTab::new();
+    for lib in &needed_sonames { dynstr.add(lib); }
+    if let Some(ref sn) = soname { dynstr.add(sn); }
+    for name in &dyn_sym_names { dynstr.add(name); }
+
+    let dynsym_count = 1 + dyn_sym_names.len();
+    let dynsym_size = dynsym_count as u64 * 24;
+    let dynstr_bytes = dynstr.as_bytes();
+    let dynstr_size = dynstr_bytes.len() as u64;
+
+    // Build .gnu.hash
+    let num_hashed = dyn_sym_names.len();
+    let gnu_hash_nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
+    let gnu_hash_bloom_size: u32 = 1;
+    let gnu_hash_bloom_shift: u32 = 6;
+    let gnu_hash_symoffset: usize = 1;
+
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names.iter()
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
+        .collect();
+
+    let mut bloom_word: u64 = 0;
+    for &h in &hashed_sym_hashes {
+        bloom_word |= 1u64 << (h as u64 % 64);
+        bloom_word |= 1u64 << ((h >> gnu_hash_bloom_shift) as u64 % 64);
+    }
+
+    // Sort hashed symbols by bucket
+    if num_hashed > 0 {
+        let mut hashed_with_hash: Vec<(String, u32)> = dyn_sym_names.iter()
+            .zip(hashed_sym_hashes.iter())
+            .map(|(n, &h)| (n.clone(), h))
+            .collect();
+        hashed_with_hash.sort_by_key(|(_, h)| h % gnu_hash_nbuckets);
+        for (i_idx, (name, _)) in hashed_with_hash.iter().enumerate() {
+            dyn_sym_names[i_idx] = name.clone();
+        }
+    }
+
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names.iter()
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
+        .collect();
+
+    let mut gnu_hash_buckets = vec![0u32; gnu_hash_nbuckets as usize];
+    let mut gnu_hash_chains = vec![0u32; num_hashed];
+    for (i_idx, &h) in hashed_sym_hashes.iter().enumerate() {
+        let bucket = (h % gnu_hash_nbuckets) as usize;
+        if gnu_hash_buckets[bucket] == 0 {
+            gnu_hash_buckets[bucket] = (gnu_hash_symoffset + i_idx) as u32;
+        }
+        gnu_hash_chains[i_idx] = h & !1;
+    }
+    for bucket_idx in 0..gnu_hash_nbuckets as usize {
+        if gnu_hash_buckets[bucket_idx] == 0 { continue; }
+        let mut last_in_bucket = 0;
+        for (i_idx, &h) in hashed_sym_hashes.iter().enumerate() {
+            if (h % gnu_hash_nbuckets) as usize == bucket_idx {
+                last_in_bucket = i_idx;
+            }
+        }
+        gnu_hash_chains[last_in_bucket] |= 1;
+    }
+
+    let gnu_hash_size: u64 = 16 + (gnu_hash_bloom_size as u64 * 8)
+        + (gnu_hash_nbuckets as u64 * 4) + (num_hashed as u64 * 4);
+
+    // RO segment: ELF header + phdrs + .gnu.hash + .dynsym + .dynstr
+    offset = align_up(offset, 8);
+    let gnu_hash_offset = offset;
+    let gnu_hash_addr = base_addr + offset;
+    offset += gnu_hash_size;
+    offset = align_up(offset, 8);
+    let dynsym_offset = offset;
+    let dynsym_addr = base_addr + offset;
+    offset += dynsym_size;
+    let dynstr_offset = offset;
+    let dynstr_addr = base_addr + offset;
+    offset += dynstr_size;
+    let ro_seg_end = offset;
+
+    // Text segment (RX)
+    offset = align_up(offset, PAGE_SIZE);
+    let text_page_offset = offset;
+    let text_page_addr = base_addr + offset;
+    for &si in &sec_indices {
+        let flags = merged_sections[si].sh_flags;
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if flags & SHF_EXECINSTR != 0 && flags & SHF_ALLOC != 0 {
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            offset += dlen;
+        }
+    }
+    let text_total_size = offset - text_page_offset;
+
+    // Rodata segment (RO, non-exec)
+    offset = align_up(offset, PAGE_SIZE);
+    let rodata_page_offset = offset;
+    let rodata_page_addr = base_addr + offset;
+    for &si in &sec_indices {
+        let flags = merged_sections[si].sh_flags;
+        let sh_type = merged_sections[si].sh_type;
+        let is_riscv_attr = merged_sections[si].name == ".riscv.attributes";
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if flags & SHF_ALLOC != 0 && flags & SHF_EXECINSTR == 0
+            && flags & SHF_WRITE == 0 && sh_type != SHT_NOBITS
+            && !is_riscv_attr
+        {
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            offset += dlen;
+        }
+    }
+    let rodata_total_size = offset - rodata_page_offset;
+
+    // RW segment
+    offset = align_up(offset, PAGE_SIZE);
+    let rw_page_offset = offset;
+    let rw_page_addr = base_addr + offset;
+
+    let mut init_array_addr = 0u64;
+    let mut init_array_size = 0u64;
+    let mut fini_array_addr = 0u64;
+    let mut fini_array_size = 0u64;
+
+    for &si in &sec_indices {
+        if merged_sections[si].name == ".init_array" {
+            let a = merged_sections[si].align.max(8);
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            init_array_addr = merged_sections[si].vaddr;
+            init_array_size = merged_sections[si].data.len() as u64;
+            offset += merged_sections[si].data.len() as u64;
+        }
+    }
+    for &si in &sec_indices {
+        if merged_sections[si].name == ".fini_array" {
+            let a = merged_sections[si].align.max(8);
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            fini_array_addr = merged_sections[si].vaddr;
+            fini_array_size = merged_sections[si].data.len() as u64;
+            offset += merged_sections[si].data.len() as u64;
+        }
+    }
+
+    // .rela.dyn
+    offset = align_up(offset, 8);
+    let rela_dyn_offset = offset;
+    let rela_dyn_addr = base_addr + offset;
+    let rela_dyn_max_size = max_rela_count as u64 * 24;
+    offset += rela_dyn_max_size;
+
+    // .dynamic
+    offset = align_up(offset, 8);
+    let dynamic_offset = offset;
+    let dynamic_addr = base_addr + offset;
+    offset += dynamic_size;
+
+    // GOT
+    offset = align_up(offset, 8);
+    let got_offset = offset;
+    let got_vaddr = base_addr + offset;
+    offset += got_size;
+
+    // Writable data sections
+    for &si in &sec_indices {
+        let flags = merged_sections[si].sh_flags;
+        let sh_type = merged_sections[si].sh_type;
+        let is_init = merged_sections[si].name == ".init_array";
+        let is_fini = merged_sections[si].name == ".fini_array";
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if flags & SHF_ALLOC != 0 && flags & SHF_WRITE != 0
+            && sh_type != SHT_NOBITS && !is_init && !is_fini
+            && flags & SHF_TLS == 0
+        {
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            offset += dlen;
+        }
+    }
+
+    // TLS sections
+    let mut tls_vaddr = 0u64;
+    let mut tls_file_offset = 0u64;
+    let mut tls_file_size = 0u64;
+    let mut tls_mem_size = 0u64;
+    let mut tls_align = 1u64;
+    for &si in &sec_indices {
+        let flags = merged_sections[si].sh_flags;
+        let sh_type = merged_sections[si].sh_type;
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if flags & SHF_TLS != 0 && flags & SHF_ALLOC != 0 && sh_type != SHT_NOBITS {
+            offset = align_up(offset, a);
+            merged_sections[si].vaddr = base_addr + offset;
+            if tls_vaddr == 0 { tls_vaddr = merged_sections[si].vaddr; tls_file_offset = offset; tls_align = a; }
+            tls_file_size += dlen;
+            tls_mem_size += dlen;
+            offset += dlen;
+        }
+    }
+    if tls_vaddr == 0 && has_tls {
+        tls_vaddr = base_addr + offset;
+        tls_file_offset = offset;
+    }
+    for &si in &sec_indices {
+        let flags = merged_sections[si].sh_flags;
+        let sh_type = merged_sections[si].sh_type;
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if flags & SHF_TLS != 0 && sh_type == SHT_NOBITS {
+            let aligned = align_up(tls_mem_size, a);
+            merged_sections[si].vaddr = tls_vaddr + aligned;
+            tls_mem_size = aligned + dlen;
+            if a > tls_align { tls_align = a; }
+        }
+    }
+    tls_mem_size = align_up(tls_mem_size, tls_align);
+
+    // BSS
+    let bss_addr = base_addr + offset;
+    let mut bss_size = 0u64;
+    for &si in &sec_indices {
+        let sh_type = merged_sections[si].sh_type;
+        let flags = merged_sections[si].sh_flags;
+        let a = merged_sections[si].align.max(1);
+        let dlen = merged_sections[si].data.len() as u64;
+        if sh_type == SHT_NOBITS && flags & SHF_ALLOC != 0 && flags & SHF_TLS == 0 {
+            let aligned = align_up(bss_addr + bss_size, a);
+            bss_size = aligned - bss_addr + dlen;
+            merged_sections[si].vaddr = aligned;
+        }
+    }
+
+    // ── Update global symbol addresses ──────────────────────────────
+    let section_vaddrs: Vec<u64> = merged_sections.iter().map(|ms| ms.vaddr).collect();
+    for (_, gsym) in global_syms.iter_mut() {
+        if gsym.defined {
+            if let Some(si) = gsym.section_idx {
+                gsym.value += section_vaddrs[si];
+            }
+        }
+    }
+
+    // Compute local symbol virtual addresses
+    for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+        for (sym_idx, sym) in obj.symbols.iter().enumerate() {
+            if sym.shndx == SHN_UNDEF || sym.shndx == SHN_ABS || sym.shndx == SHN_COMMON {
+                if sym.shndx == SHN_ABS {
+                    local_sym_vaddrs[obj_idx][sym_idx] = sym.value;
+                }
+                continue;
+            }
+            let sec_idx = sym.shndx as usize;
+            if let Some(&(mi, mo)) = sec_mapping.get(&(obj_idx, sec_idx)) {
+                local_sym_vaddrs[obj_idx][sym_idx] = section_vaddrs[mi] + mo + sym.value;
+            }
+        }
+    }
+
+    // Assign GOT offsets to symbols that need them
+    let mut got_sym_offsets: HashMap<String, u64> = HashMap::new();
+    for (gi, name) in got_symbols.iter().enumerate() {
+        let got_off = gi as u64 * 8;
+        got_sym_offsets.insert(name.clone(), got_off);
+        if let Some(gsym) = global_syms.get_mut(name) {
+            gsym.got_offset = Some(got_off);
+        }
+    }
+
+    // ── Phase 5: Emit ELF ───────────────────────────────────────────
+    let file_size = offset as usize;
+    let mut elf = vec![0u8; file_size];
+
+    // ELF header
+    elf[0..4].copy_from_slice(&ELF_MAGIC);
+    elf[4] = ELFCLASS64; elf[5] = ELFDATA2LSB; elf[6] = 1; // EV_CURRENT
+    elf[7] = 0; // ELFOSABI_NONE
+    // e_type
+    elf[16..18].copy_from_slice(&(ET_DYN as u16).to_le_bytes());
+    // e_machine
+    elf[18..20].copy_from_slice(&EM_RISCV_ELF.to_le_bytes());
+    // e_version
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    // e_entry = 0
+    elf[24..32].copy_from_slice(&0u64.to_le_bytes());
+    // e_phoff = 64
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+    // e_shoff = 0 (no section headers for now; we'll add them at the end)
+    elf[40..48].copy_from_slice(&0u64.to_le_bytes());
+    // e_flags (RISC-V: float ABI double = 0x4, RVC = 0x1)
+    elf[48..52].copy_from_slice(&0x5u32.to_le_bytes());
+    // e_ehsize
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    // e_phentsize
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    // e_phnum
+    elf[56..58].copy_from_slice(&(phdr_count as u16).to_le_bytes());
+    // e_shentsize
+    elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+    // e_shnum, e_shstrndx - will be filled when adding section headers
+    elf[60..62].copy_from_slice(&0u16.to_le_bytes());
+    elf[62..64].copy_from_slice(&0u16.to_le_bytes());
+
+    // Program headers
+    let mut ph = 64usize;
+    // PT_PHDR
+    write_phdr_at(&mut elf, ph, 6 /*PT_PHDR*/, PF_R, 64, base_addr + 64, base_addr + 64, phdr_total_size, phdr_total_size, 8);
+    ph += 56;
+    // PT_LOAD (RO): ELF header + phdrs + .gnu.hash + .dynsym + .dynstr
+    write_phdr_at(&mut elf, ph, PT_LOAD, PF_R, 0, base_addr, base_addr, ro_seg_end, ro_seg_end, PAGE_SIZE);
+    ph += 56;
+    // PT_LOAD (text)
+    write_phdr_at(&mut elf, ph, PT_LOAD, PF_R | PF_X, text_page_offset, text_page_addr, text_page_addr,
+                  text_total_size, text_total_size, PAGE_SIZE);
+    ph += 56;
+    // PT_LOAD (rodata)
+    write_phdr_at(&mut elf, ph, PT_LOAD, PF_R, rodata_page_offset, rodata_page_addr, rodata_page_addr,
+                  rodata_total_size, rodata_total_size, PAGE_SIZE);
+    ph += 56;
+    // PT_LOAD (RW)
+    let rw_filesz = offset - rw_page_offset;
+    let rw_memsz = if bss_size > 0 { (bss_addr + bss_size) - rw_page_addr } else { rw_filesz };
+    write_phdr_at(&mut elf, ph, PT_LOAD, PF_R | PF_W, rw_page_offset, rw_page_addr, rw_page_addr,
+                  rw_filesz, rw_memsz, PAGE_SIZE);
+    ph += 56;
+    // PT_DYNAMIC
+    write_phdr_at(&mut elf, ph, PT_DYNAMIC, PF_R | PF_W, dynamic_offset, dynamic_addr, dynamic_addr,
+                  dynamic_size, dynamic_size, 8);
+    ph += 56;
+    // TODO: Add PT_GNU_RELRO segment to mark .dynamic/.got as read-only after relocation
+    // PT_GNU_STACK
+    write_phdr_at(&mut elf, ph, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0, 0x10);
+    ph += 56;
+    // PT_TLS (optional)
+    if has_tls {
+        write_phdr_at(&mut elf, ph, PT_TLS, PF_R, tls_file_offset, tls_vaddr, tls_vaddr,
+                      tls_file_size, tls_mem_size, tls_align);
+        ph += 56;
+    }
+    // PT_RISCV_ATTRIBUTES (optional)
+    if has_riscv_attrs {
+        // Find the attributes section
+        if let Some(ms) = merged_sections.iter().find(|ms| ms.name == ".riscv.attributes") {
+            // RISCV_ATTRIBUTES is non-loadable, file offset will be written later
+            write_phdr_at(&mut elf, ph, PT_RISCV_ATTRIBUTES, PF_R, 0, 0, 0, 0, 0, 1);
+            let _ = ms; // will fill in later
+        }
+        // ph += 56; // not needed since it's the last
+    }
+
+    // Write .gnu.hash
+    {
+        let gh = gnu_hash_offset as usize;
+        elf[gh..gh+4].copy_from_slice(&gnu_hash_nbuckets.to_le_bytes());
+        elf[gh+4..gh+8].copy_from_slice(&(gnu_hash_symoffset as u32).to_le_bytes());
+        elf[gh+8..gh+12].copy_from_slice(&gnu_hash_bloom_size.to_le_bytes());
+        elf[gh+12..gh+16].copy_from_slice(&gnu_hash_bloom_shift.to_le_bytes());
+        let bloom_off = gh + 16;
+        elf[bloom_off..bloom_off+8].copy_from_slice(&bloom_word.to_le_bytes());
+        let buckets_off = bloom_off + (gnu_hash_bloom_size as usize * 8);
+        for (bi, &b) in gnu_hash_buckets.iter().enumerate() {
+            let off_b = buckets_off + bi * 4;
+            elf[off_b..off_b+4].copy_from_slice(&b.to_le_bytes());
+        }
+        let chains_off = buckets_off + (gnu_hash_nbuckets as usize * 4);
+        for (ci, &c) in gnu_hash_chains.iter().enumerate() {
+            let off_c = chains_off + ci * 4;
+            elf[off_c..off_c+4].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+
+    // Write .dynsym
+    {
+        let mut ds = dynsym_offset as usize + 24; // skip null entry
+        for name in &dyn_sym_names {
+            let no = dynstr.get_offset(name) as u32;
+            elf[ds..ds+4].copy_from_slice(&no.to_le_bytes());
+            if let Some(gsym) = global_syms.get(name) {
+                if gsym.defined {
+                    let info = (gsym.binding << 4) | gsym.sym_type;
+                    elf[ds+4] = info;
+                    elf[ds+5] = 0; // st_other
+                    // TODO: Compute actual section index instead of hardcoding 1
+                    elf[ds+6..ds+8].copy_from_slice(&1u16.to_le_bytes()); // shndx=1 (defined)
+                    elf[ds+8..ds+16].copy_from_slice(&gsym.value.to_le_bytes());
+                    elf[ds+16..ds+24].copy_from_slice(&gsym.size.to_le_bytes());
+                } else {
+                    elf[ds+4] = (STB_GLOBAL << 4) | STT_FUNC;
+                    elf[ds+5] = 0;
+                    elf[ds+6..ds+8].copy_from_slice(&0u16.to_le_bytes()); // UNDEF
+                    elf[ds+8..ds+16].copy_from_slice(&0u64.to_le_bytes());
+                    elf[ds+16..ds+24].copy_from_slice(&0u64.to_le_bytes());
+                }
+            } else {
+                elf[ds+4] = (STB_GLOBAL << 4) | STT_FUNC;
+                elf[ds+5] = 0;
+                elf[ds+6..ds+8].copy_from_slice(&0u16.to_le_bytes());
+                elf[ds+8..ds+16].copy_from_slice(&0u64.to_le_bytes());
+                elf[ds+16..ds+24].copy_from_slice(&0u64.to_le_bytes());
+            }
+            ds += 24;
+        }
+    }
+
+    // Write .dynstr
+    {
+        let db = dynstr.as_bytes();
+        let start = dynstr_offset as usize;
+        if start + db.len() <= elf.len() {
+            elf[start..start + db.len()].copy_from_slice(db);
+        }
+    }
+
+    // Write section data
+    for ms in merged_sections.iter() {
+        if ms.sh_type == SHT_NOBITS || ms.data.is_empty() || ms.vaddr == 0 { continue; }
+        if ms.name == ".riscv.attributes" { continue; } // handled separately
+        let file_off = (ms.vaddr - base_addr) as usize;
+        if file_off + ms.data.len() <= elf.len() {
+            elf[file_off..file_off + ms.data.len()].copy_from_slice(&ms.data);
+        }
+    }
+
+    // Fill GOT entries with resolved symbol values
+    for (gi, name) in got_symbols.iter().enumerate() {
+        let entry_off = (got_offset + gi as u64 * 8) as usize;
+        if let Some(gsym) = global_syms.get(name) {
+            if gsym.defined {
+                if entry_off + 8 <= elf.len() {
+                    elf[entry_off..entry_off+8].copy_from_slice(&gsym.value.to_le_bytes());
+                }
+            }
+        } else {
+            // Try to resolve from local_sym_vaddrs via got_sym_key mapping
+            // For local GOT symbols, we need to find the actual value
+        }
+    }
+
+    // ── Apply relocations and collect R_RISCV_RELATIVE entries ──────
+    let mut rela_dyn_entries: Vec<(u64, u64)> = Vec::new(); // (offset, addend) for RELATIVE
+
+    // Add RELATIVE for GOT entries pointing to local symbols
+    for (gi, name) in got_symbols.iter().enumerate() {
+        if let Some(gsym) = global_syms.get(name) {
+            if gsym.defined {
+                let gea = got_vaddr + gi as u64 * 8;
+                rela_dyn_entries.push((gea, gsym.value));
+            }
+        }
+    }
+
+    // Process relocations
+    for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+        for (sec_idx, relocs) in obj.relocations.iter().enumerate() {
+            if relocs.is_empty() { continue; }
+
+            let (merged_idx, sec_offset) = match sec_mapping.get(&(obj_idx, sec_idx)) {
+                Some(&v) => v,
+                None => continue,
+            };
+
+            let sec_vaddr = section_vaddrs[merged_idx];
+            let data = &mut merged_sections[merged_idx].data;
+
+            for reloc in relocs {
+                let sym_idx = reloc.sym_idx as usize;
+                if sym_idx >= obj.symbols.len() { continue; }
+                let sym = &obj.symbols[sym_idx];
+
+                let p = sec_vaddr + sec_offset + reloc.offset;
+                let off = (sec_offset + reloc.offset) as usize;
+                let a = reloc.addend;
+
+                // Resolve symbol value
+                let s = if sym.sym_type() == STT_SECTION {
+                    if (sym.shndx as usize) < obj.sections.len() {
+                        if let Some(&(mi, mo)) = sec_mapping.get(&(obj_idx, sym.shndx as usize)) {
+                            section_vaddrs[mi] + mo
+                        } else { 0 }
+                    } else { 0 }
+                } else if !sym.name.is_empty() && sym.binding() != STB_LOCAL {
+                    global_syms.get(&sym.name).map(|gs| gs.value).unwrap_or(0)
+                } else {
+                    local_sym_vaddrs.get(obj_idx)
+                        .and_then(|v| v.get(sym_idx))
+                        .copied()
+                        .unwrap_or(0)
+                };
+
+                match reloc.rela_type {
+                    R_RISCV_RELAX | R_RISCV_ALIGN => { continue; }
+                    R_RISCV_64 => {
+                        let val = (s as i64 + a) as u64;
+                        if off + 8 <= data.len() {
+                            data[off..off+8].copy_from_slice(&val.to_le_bytes());
+                            // Emit R_RISCV_RELATIVE
+                            if s != 0 {
+                                rela_dyn_entries.push((p, val));
+                            }
+                        }
+                    }
+                    R_RISCV_32 => {
+                        let val = (s as i64 + a) as u32;
+                        if off + 4 <= data.len() {
+                            data[off..off+4].copy_from_slice(&val.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_PCREL_HI20 => {
+                        let target = s as i64 + a;
+                        let pc = p as i64;
+                        let offset_val = target - pc;
+                        patch_u_type(data, off, offset_val as u32);
+                    }
+                    R_RISCV_PCREL_LO12_I => {
+                        let auipc_addr = s as i64 + a;
+                        let hi_val = find_hi20_value_shared(
+                            obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
+                            &local_sym_vaddrs, &global_syms, auipc_addr as u64,
+                            sec_offset, got_vaddr, &got_symbols,
+                        );
+                        patch_i_type(data, off, hi_val as u32);
+                    }
+                    R_RISCV_PCREL_LO12_S => {
+                        let auipc_addr = s as i64 + a;
+                        let hi_val = find_hi20_value_shared(
+                            obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
+                            &local_sym_vaddrs, &global_syms, auipc_addr as u64,
+                            sec_offset, got_vaddr, &got_symbols,
+                        );
+                        patch_s_type(data, off, hi_val as u32);
+                    }
+                    R_RISCV_GOT_HI20 => {
+                        let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
+                        let got_entry_vaddr = if let Some(&got_off) = got_sym_offsets.get(&sym_name) {
+                            got_vaddr + got_off
+                        } else if let Some(gsym) = global_syms.get(&sym.name) {
+                            if let Some(got_off) = gsym.got_offset {
+                                got_vaddr + got_off
+                            } else { 0 }
+                        } else { 0 };
+                        let offset_val = got_entry_vaddr as i64 + a - p as i64;
+                        patch_u_type(data, off, offset_val as u32);
+                    }
+                    R_RISCV_CALL_PLT => {
+                        let target = if !sym.name.is_empty() && sym.binding() != STB_LOCAL {
+                            if let Some(gs) = global_syms.get(&sym.name) {
+                                gs.value as i64
+                            } else { s as i64 }
+                        } else { s as i64 };
+                        let offset_val = target + a - p as i64;
+                        let hi = ((offset_val + 0x800) >> 12) & 0xFFFFF;
+                        let lo = offset_val & 0xFFF;
+                        if off + 8 <= data.len() {
+                            let auipc = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+                            let auipc = (auipc & 0xFFF) | ((hi as u32) << 12);
+                            data[off..off+4].copy_from_slice(&auipc.to_le_bytes());
+                            let jalr = u32::from_le_bytes(data[off+4..off+8].try_into().unwrap());
+                            let jalr = (jalr & 0x000FFFFF) | ((lo as u32) << 20);
+                            data[off+4..off+8].copy_from_slice(&jalr.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_BRANCH => {
+                        let offset_val = (s as i64 + a - p as i64) as u32;
+                        patch_b_type(data, off, offset_val);
+                    }
+                    R_RISCV_JAL => {
+                        let offset_val = (s as i64 + a - p as i64) as u32;
+                        patch_j_type(data, off, offset_val);
+                    }
+                    R_RISCV_RVC_BRANCH => {
+                        let offset_val = (s as i64 + a - p as i64) as u32;
+                        patch_cb_type(data, off, offset_val);
+                    }
+                    R_RISCV_RVC_JUMP => {
+                        let offset_val = (s as i64 + a - p as i64) as u32;
+                        patch_cj_type(data, off, offset_val);
+                    }
+                    R_RISCV_HI20 => {
+                        let val = (s as i64 + a) as u32;
+                        let hi = val.wrapping_add(0x800) & 0xFFFFF000;
+                        if off + 4 <= data.len() {
+                            let insn = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+                            let insn = (insn & 0xFFF) | hi;
+                            data[off..off+4].copy_from_slice(&insn.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_LO12_I => {
+                        let val = (s as i64 + a) as u32;
+                        patch_i_type(data, off, val & 0xFFF);
+                    }
+                    R_RISCV_LO12_S => {
+                        let val = (s as i64 + a) as u32;
+                        patch_s_type(data, off, val & 0xFFF);
+                    }
+                    R_RISCV_TPREL_HI20 => {
+                        let val = (s as i64 + a - tls_vaddr as i64) as u32;
+                        let hi = val.wrapping_add(0x800) & 0xFFFFF000;
+                        if off + 4 <= data.len() {
+                            let insn = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+                            let insn = (insn & 0xFFF) | hi;
+                            data[off..off+4].copy_from_slice(&insn.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_TPREL_LO12_I => {
+                        let val = (s as i64 + a - tls_vaddr as i64) as u32;
+                        patch_i_type(data, off, val & 0xFFF);
+                    }
+                    R_RISCV_TPREL_LO12_S => {
+                        let val = (s as i64 + a - tls_vaddr as i64) as u32;
+                        patch_s_type(data, off, val & 0xFFF);
+                    }
+                    R_RISCV_TPREL_ADD => { /* hint */ }
+                    R_RISCV_ADD8 => {
+                        if off < data.len() { data[off] = data[off].wrapping_add((s as i64 + a) as u8); }
+                    }
+                    R_RISCV_ADD16 => {
+                        if off + 2 <= data.len() {
+                            let cur = u16::from_le_bytes(data[off..off+2].try_into().unwrap());
+                            data[off..off+2].copy_from_slice(&cur.wrapping_add((s as i64 + a) as u16).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_ADD32 => {
+                        if off + 4 <= data.len() {
+                            let cur = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+                            data[off..off+4].copy_from_slice(&cur.wrapping_add((s as i64 + a) as u32).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_ADD64 => {
+                        if off + 8 <= data.len() {
+                            let cur = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
+                            data[off..off+8].copy_from_slice(&cur.wrapping_add((s as i64 + a) as u64).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SUB8 => {
+                        if off < data.len() { data[off] = data[off].wrapping_sub((s as i64 + a) as u8); }
+                    }
+                    R_RISCV_SUB16 => {
+                        if off + 2 <= data.len() {
+                            let cur = u16::from_le_bytes(data[off..off+2].try_into().unwrap());
+                            data[off..off+2].copy_from_slice(&cur.wrapping_sub((s as i64 + a) as u16).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SUB32 => {
+                        if off + 4 <= data.len() {
+                            let cur = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
+                            data[off..off+4].copy_from_slice(&cur.wrapping_sub((s as i64 + a) as u32).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SUB64 => {
+                        if off + 8 <= data.len() {
+                            let cur = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
+                            data[off..off+8].copy_from_slice(&cur.wrapping_sub((s as i64 + a) as u64).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SET6 => {
+                        if off < data.len() {
+                            data[off] = (data[off] & 0xC0) | (((s as i64 + a) as u8) & 0x3F);
+                        }
+                    }
+                    R_RISCV_SUB6 => {
+                        if off < data.len() {
+                            let cur = data[off] & 0x3F;
+                            data[off] = (data[off] & 0xC0) | (cur.wrapping_sub((s as i64 + a) as u8) & 0x3F);
+                        }
+                    }
+                    R_RISCV_SET8 => {
+                        if off < data.len() { data[off] = (s as i64 + a) as u8; }
+                    }
+                    R_RISCV_SET16 => {
+                        if off + 2 <= data.len() {
+                            data[off..off+2].copy_from_slice(&((s as i64 + a) as u16).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SET32 => {
+                        if off + 4 <= data.len() {
+                            data[off..off+4].copy_from_slice(&((s as i64 + a) as u32).to_le_bytes());
+                        }
+                    }
+                    R_RISCV_32_PCREL => {
+                        if off + 4 <= data.len() {
+                            let val = ((s as i64 + a) - p as i64) as u32;
+                            data[off..off+4].copy_from_slice(&val.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_TLS_GD_HI20 => {
+                        // TODO: GD-to-LE relaxation is incorrect in shared libs
+                        // (rewriting auipc to lui breaks PIC). Proper fix: emit
+                        // R_RISCV_TLS_DTPMOD64/DTPOFF64 dynamic relocs. Works for
+                        // PostgreSQL because it doesn't use TLS GD in .so modules.
+                        let tprel = (s as i64 + a - tls_vaddr as i64) as u32;
+                        let hi = tprel.wrapping_add(0x800) & 0xFFFFF000;
+                        if off + 4 <= data.len() {
+                            let lui_insn: u32 = 0x00000537 | hi;
+                            data[off..off+4].copy_from_slice(&lui_insn.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_TLS_GOT_HI20 => {
+                        let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
+                        let got_entry_vaddr = if let Some(&got_off) = got_sym_offsets.get(&sym_name) {
+                            got_vaddr + got_off
+                        } else { 0 };
+                        let offset_val = got_entry_vaddr as i64 + a - p as i64;
+                        patch_u_type(data, off, offset_val as u32);
+                    }
+                    R_RISCV_SET_ULEB128 | R_RISCV_SUB_ULEB128 => {
+                        // Handle same as executable linker
+                        if reloc.rela_type == R_RISCV_SET_ULEB128 {
+                            let val = (s as i64 + a) as u64;
+                            let mut v = val;
+                            let mut idx = off;
+                            loop {
+                                if idx >= data.len() { break; }
+                                let byte = (v & 0x7F) as u8;
+                                v >>= 7;
+                                if v != 0 { data[idx] = byte | 0x80; } else { data[idx] = byte; break; }
+                                idx += 1;
+                            }
+                        } else {
+                            let mut cur: u64 = 0;
+                            let mut shift = 0;
+                            let mut idx = off;
+                            loop {
+                                if idx >= data.len() { break; }
+                                let byte = data[idx];
+                                cur |= ((byte & 0x7F) as u64) << shift;
+                                if byte & 0x80 == 0 { break; }
+                                shift += 7;
+                                idx += 1;
+                            }
+                            let val = cur.wrapping_sub((s as i64 + a) as u64);
+                            let mut v = val;
+                            let mut j = off;
+                            loop {
+                                if j >= data.len() { break; }
+                                let byte = (v & 0x7F) as u8;
+                                v >>= 7;
+                                if v != 0 { data[j] = byte | 0x80; } else { data[j] = byte; break; }
+                                j += 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Skip unknown relocations silently
+                    }
+                }
+            }
+        }
+    }
+
+    // Write updated section data back to elf buffer
+    for ms in merged_sections.iter() {
+        if ms.sh_type == SHT_NOBITS || ms.data.is_empty() || ms.vaddr == 0 { continue; }
+        if ms.name == ".riscv.attributes" { continue; }
+        let file_off = (ms.vaddr - base_addr) as usize;
+        if file_off + ms.data.len() <= elf.len() {
+            elf[file_off..file_off + ms.data.len()].copy_from_slice(&ms.data);
+        }
+    }
+
+    // Write GOT entries (re-fill after relocations may have changed values)
+    for (gi, name) in got_symbols.iter().enumerate() {
+        let entry_off = (got_offset + gi as u64 * 8) as usize;
+        if let Some(gsym) = global_syms.get(name) {
+            if gsym.defined && entry_off + 8 <= elf.len() {
+                elf[entry_off..entry_off+8].copy_from_slice(&gsym.value.to_le_bytes());
+            }
+        }
+    }
+
+    // Add RELATIVE entries for init_array/fini_array pointers
+    for ms in merged_sections.iter() {
+        if ms.name == ".init_array" || ms.name == ".fini_array" {
+            let num_entries = ms.data.len() / 8;
+            for ei in 0..num_entries {
+                let ptr_off = ei * 8;
+                if ptr_off + 8 <= ms.data.len() {
+                    let val = u64::from_le_bytes(ms.data[ptr_off..ptr_off+8].try_into().unwrap());
+                    if val != 0 {
+                        let runtime_addr = ms.vaddr + ptr_off as u64;
+                        rela_dyn_entries.push((runtime_addr, val));
+                    }
+                }
+            }
+        }
+    }
+
+    // Write .rela.dyn entries (R_RISCV_RELATIVE)
+    let actual_rela_count = rela_dyn_entries.len();
+    let rela_dyn_size = actual_rela_count as u64 * 24;
+    {
+        let mut rd = rela_dyn_offset as usize;
+        for &(rel_offset, rel_addend) in &rela_dyn_entries {
+            if rd + 24 <= elf.len() {
+                elf[rd..rd+8].copy_from_slice(&rel_offset.to_le_bytes());
+                elf[rd+8..rd+16].copy_from_slice(&R_RISCV_RELATIVE.to_le_bytes()); // r_info = type 3, sym 0
+                elf[rd+16..rd+24].copy_from_slice(&rel_addend.to_le_bytes());
+                rd += 24;
+            }
+        }
+    }
+
+    // Write .dynamic section
+    {
+        let mut dd = dynamic_offset as usize;
+        for lib in &needed_sonames {
+            let so = dynstr.get_offset(lib) as u64;
+            elf[dd..dd+8].copy_from_slice(&(DT_NEEDED as u64).to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&so.to_le_bytes());
+            dd += 16;
+        }
+        if let Some(ref sn) = soname {
+            let so = dynstr.get_offset(sn) as u64;
+            elf[dd..dd+8].copy_from_slice(&DT_SONAME.to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&so.to_le_bytes());
+            dd += 16;
+        }
+        let dyn_entries: Vec<(u64, u64)> = vec![
+            (DT_STRTAB as u64, dynstr_addr),
+            (DT_SYMTAB as u64, dynsym_addr),
+            (DT_STRSZ as u64, dynstr_size),
+            (DT_SYMENT as u64, 24),
+            (DT_RELA as u64, rela_dyn_addr),
+            (DT_RELASZ as u64, rela_dyn_size),
+            (DT_RELAENT as u64, 24),
+            (DT_RELACOUNT, actual_rela_count as u64),
+            (DT_GNU_HASH as u64, gnu_hash_addr),
+        ];
+        for (tag, val) in dyn_entries {
+            elf[dd..dd+8].copy_from_slice(&tag.to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&val.to_le_bytes());
+            dd += 16;
+        }
+        if has_init_array {
+            elf[dd..dd+8].copy_from_slice(&(DT_INIT_ARRAY as u64).to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&init_array_addr.to_le_bytes());
+            dd += 16;
+            elf[dd..dd+8].copy_from_slice(&(DT_INIT_ARRAYSZ as u64).to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&init_array_size.to_le_bytes());
+            dd += 16;
+        }
+        if has_fini_array {
+            elf[dd..dd+8].copy_from_slice(&(DT_FINI_ARRAY as u64).to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&fini_array_addr.to_le_bytes());
+            dd += 16;
+            elf[dd..dd+8].copy_from_slice(&(DT_FINI_ARRAYSZ as u64).to_le_bytes());
+            elf[dd+8..dd+16].copy_from_slice(&fini_array_size.to_le_bytes());
+            dd += 16;
+        }
+        // DT_NULL terminator
+        elf[dd..dd+8].copy_from_slice(&(DT_NULL as u64).to_le_bytes());
+        elf[dd+8..dd+16].copy_from_slice(&0u64.to_le_bytes());
+    }
+
+    // ── Append section headers ──────────────────────────────────────
+    // Add section headers for compatibility (some tools need them)
+    let mut shstrtab_data: Vec<u8> = vec![0]; // null entry
+    let mut section_headers: Vec<(String, u32, u64, u64, u64, u64, u32, u32, u64, u64)> = Vec::new();
+    // (name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize)
+
+    let add_shstrtab_name = |name: &str, strtab: &mut Vec<u8>| -> u32 {
+        let off = strtab.len() as u32;
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+        off
+    };
+
+    // Section 0: null
+    section_headers.push(("".into(), 0, 0, 0, 0, 0, 0, 0, 0, 0));
+
+    // .gnu.hash
+    let sh_name = add_shstrtab_name(".gnu.hash", &mut shstrtab_data);
+    section_headers.push((".gnu.hash".into(), 0x6ffffff6 /*SHT_GNU_HASH*/, SHF_ALLOC,
+        gnu_hash_addr, gnu_hash_offset, gnu_hash_size, 3 /*dynsym index*/, 0, 8, 0));
+    let _ = sh_name;
+
+    // .dynsym (index 2 -> we reference it as link=3 below, but let's track correctly)
+    // Actually: null=0, .gnu.hash=1, .dynsym=2, .dynstr=3
+    let _sh_name = add_shstrtab_name(".dynsym", &mut shstrtab_data);
+    section_headers.push((".dynsym".into(), SHT_DYNSYM, SHF_ALLOC,
+        dynsym_addr, dynsym_offset, dynsym_size, 3 /*dynstr*/, 1, 8, 24));
+
+    // .dynstr
+    let _sh_name = add_shstrtab_name(".dynstr", &mut shstrtab_data);
+    section_headers.push((".dynstr".into(), SHT_STRTAB, SHF_ALLOC,
+        dynstr_addr, dynstr_offset, dynstr_size, 0, 0, 1, 0));
+
+    // Fix .gnu.hash link to point to .dynsym (index 2)
+    section_headers[1].6 = 2;
+
+    // Add merged sections as section headers
+    for &si in &sec_indices {
+        let ms = &merged_sections[si];
+        if ms.name == ".riscv.attributes" { continue; } // add later
+        if ms.sh_flags & SHF_ALLOC == 0 && ms.sh_type != SHT_RISCV_ATTRIBUTES { continue; }
+        let _sh_name = add_shstrtab_name(&ms.name, &mut shstrtab_data);
+        let sh_offset = if ms.sh_type == SHT_NOBITS { 0 } else { ms.vaddr - base_addr };
+        let sh_size = ms.data.len() as u64;
+        section_headers.push((ms.name.clone(), ms.sh_type, ms.sh_flags,
+            ms.vaddr, sh_offset, sh_size, 0, 0, ms.align, 0));
+    }
+
+    // .rela.dyn
+    let _sh_name = add_shstrtab_name(".rela.dyn", &mut shstrtab_data);
+    section_headers.push((".rela.dyn".into(), SHT_RELA, SHF_ALLOC,
+        rela_dyn_addr, rela_dyn_offset, rela_dyn_size, 2 /*dynsym*/, 0, 8, 24));
+
+    // .dynamic
+    let _sh_name = add_shstrtab_name(".dynamic", &mut shstrtab_data);
+    section_headers.push((".dynamic".into(), SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE,
+        dynamic_addr, dynamic_offset, dynamic_size, 3 /*dynstr*/, 0, 8, 16));
+
+    // .got
+    if got_size > 0 {
+        let _sh_name = add_shstrtab_name(".got", &mut shstrtab_data);
+        section_headers.push((".got".into(), SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
+            got_vaddr, got_offset, got_size, 0, 0, 8, 8));
+    }
+
+    // .riscv.attributes (non-loadable)
+    let mut attr_file_offset = 0u64;
+    let mut attr_size = 0u64;
+    if let Some(ms) = merged_sections.iter().find(|ms| ms.name == ".riscv.attributes") {
+        let _sh_name = add_shstrtab_name(".riscv.attributes", &mut shstrtab_data);
+        // Append attributes data after the main file content
+        attr_file_offset = elf.len() as u64;
+        attr_size = ms.data.len() as u64;
+        elf.extend_from_slice(&ms.data);
+        section_headers.push((".riscv.attributes".into(), SHT_RISCV_ATTRIBUTES, 0,
+            0, attr_file_offset, attr_size, 0, 0, 1, 0));
+    }
+
+    // .shstrtab
+    let shstrtab_name_off = add_shstrtab_name(".shstrtab", &mut shstrtab_data);
+    let _ = shstrtab_name_off;
+    let shstrtab_idx = section_headers.len();
+    let shstrtab_file_offset = elf.len() as u64;
+    elf.extend_from_slice(&shstrtab_data);
+    section_headers.push((".shstrtab".into(), SHT_STRTAB, 0,
+        0, shstrtab_file_offset, shstrtab_data.len() as u64, 0, 0, 1, 0));
+
+    // Write section headers
+    // Align to 8 bytes
+    while elf.len() % 8 != 0 { elf.push(0); }
+    let shdr_offset = elf.len() as u64;
+    let shdr_count = section_headers.len();
+
+    // Rebuild shstrtab name offsets
+    let mut name_offsets: Vec<u32> = Vec::new();
+    {
+        let mut strtab_pos = 0u32;
+        for (name, ..) in &section_headers {
+            if name.is_empty() {
+                name_offsets.push(0);
+            } else {
+                // Find the name in shstrtab_data
+                let name_bytes = name.as_bytes();
+                let mut found = false;
+                for pos in 0..shstrtab_data.len() {
+                    if pos + name_bytes.len() < shstrtab_data.len()
+                        && &shstrtab_data[pos..pos + name_bytes.len()] == name_bytes
+                        && shstrtab_data[pos + name_bytes.len()] == 0
+                    {
+                        name_offsets.push(pos as u32);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found { name_offsets.push(strtab_pos); }
+            }
+            strtab_pos += name.len() as u32 + 1;
+        }
+    }
+
+    for (idx, (_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize)) in section_headers.iter().enumerate() {
+        let mut shdr = [0u8; 64];
+        let name_off = name_offsets[idx];
+        shdr[0..4].copy_from_slice(&name_off.to_le_bytes());
+        shdr[4..8].copy_from_slice(&sh_type.to_le_bytes());
+        shdr[8..16].copy_from_slice(&sh_flags.to_le_bytes());
+        shdr[16..24].copy_from_slice(&sh_addr.to_le_bytes());
+        shdr[24..32].copy_from_slice(&sh_offset.to_le_bytes());
+        shdr[32..40].copy_from_slice(&sh_size.to_le_bytes());
+        shdr[40..44].copy_from_slice(&sh_link.to_le_bytes());
+        shdr[44..48].copy_from_slice(&sh_info.to_le_bytes());
+        shdr[48..56].copy_from_slice(&sh_addralign.to_le_bytes());
+        shdr[56..64].copy_from_slice(&sh_entsize.to_le_bytes());
+        elf.extend_from_slice(&shdr);
+    }
+
+    // Update ELF header with section header info
+    elf[40..48].copy_from_slice(&shdr_offset.to_le_bytes()); // e_shoff
+    elf[60..62].copy_from_slice(&(shdr_count as u16).to_le_bytes()); // e_shnum
+    elf[62..64].copy_from_slice(&(shstrtab_idx as u16).to_le_bytes()); // e_shstrndx
+
+    // Update PT_RISCV_ATTRIBUTES phdr if present
+    if has_riscv_attrs && attr_size > 0 {
+        // Find the RISCV_ATTRIBUTES phdr and update it
+        let mut ph_off = 64;
+        for _ in 0..phdr_count {
+            let p_type = u32::from_le_bytes(elf[ph_off..ph_off+4].try_into().unwrap());
+            if p_type == PT_RISCV_ATTRIBUTES {
+                // Update offset and sizes
+                elf[ph_off+8..ph_off+16].copy_from_slice(&attr_file_offset.to_le_bytes());
+                // vaddr = 0, paddr = 0
+                elf[ph_off+16..ph_off+24].copy_from_slice(&0u64.to_le_bytes());
+                elf[ph_off+24..ph_off+32].copy_from_slice(&0u64.to_le_bytes());
+                elf[ph_off+32..ph_off+40].copy_from_slice(&attr_size.to_le_bytes());
+                elf[ph_off+40..ph_off+48].copy_from_slice(&0u64.to_le_bytes()); // memsz = 0
+                break;
+            }
+            ph_off += 56;
+        }
+    }
+
+    // Write output
+    std::fs::write(output_path, &elf)
+        .map_err(|e| format!("failed to write '{}': {}", output_path, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    Ok(())
+}
+
+/// Write a program header at a specific offset in the buffer.
+fn write_phdr_at(elf: &mut [u8], off: usize, p_type: u32, p_flags: u32,
+                 offset: u64, vaddr: u64, paddr: u64,
+                 filesz: u64, memsz: u64, align: u64) {
+    elf[off..off+4].copy_from_slice(&p_type.to_le_bytes());
+    elf[off+4..off+8].copy_from_slice(&p_flags.to_le_bytes());
+    elf[off+8..off+16].copy_from_slice(&offset.to_le_bytes());
+    elf[off+16..off+24].copy_from_slice(&vaddr.to_le_bytes());
+    elf[off+24..off+32].copy_from_slice(&paddr.to_le_bytes());
+    elf[off+32..off+40].copy_from_slice(&filesz.to_le_bytes());
+    elf[off+40..off+48].copy_from_slice(&memsz.to_le_bytes());
+    elf[off+48..off+56].copy_from_slice(&align.to_le_bytes());
+}
+
+/// Simplified find_hi20_value for shared library linking (no GD->LE relaxation, no PLT).
+fn find_hi20_value_shared(
+    obj: &ElfObject,
+    obj_idx: usize,
+    sec_idx: usize,
+    sec_mapping: &HashMap<(usize, usize), (usize, u64)>,
+    section_vaddrs: &[u64],
+    local_sym_vaddrs: &[Vec<u64>],
+    global_syms: &HashMap<String, GlobalSym>,
+    auipc_vaddr: u64,
+    sec_offset: u64,
+    got_vaddr: u64,
+    got_symbols: &[String],
+) -> i64 {
+    if sec_idx < obj.relocations.len() {
+        let relocs = &obj.relocations[sec_idx];
+        for reloc in relocs {
+            let reloc_vaddr = sec_offset + reloc.offset;
+            let (mi, _mo) = match sec_mapping.get(&(obj_idx, sec_idx)) {
+                Some(&v) => v,
+                None => continue,
+            };
+            let this_vaddr = section_vaddrs[mi] + reloc_vaddr;
+            if this_vaddr != auipc_vaddr { continue; }
+
+            match reloc.rela_type {
+                R_RISCV_PCREL_HI20 => {
+                    let hi_sym_idx = reloc.sym_idx as usize;
+                    let sym = &obj.symbols[hi_sym_idx];
+                    let s = resolve_symbol_value(sym, hi_sym_idx, obj, obj_idx, sec_mapping,
+                                                 section_vaddrs, local_sym_vaddrs, global_syms);
+                    let target = s as i64 + reloc.addend;
+                    return (target - auipc_vaddr as i64) & 0xFFF;
+                }
+                R_RISCV_GOT_HI20 | R_RISCV_TLS_GOT_HI20 => {
+                    let hi_sym_idx = reloc.sym_idx as usize;
+                    let sym = &obj.symbols[hi_sym_idx];
+                    let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
+                    let got_entry_vaddr = if let Some(idx) = got_symbols.iter().position(|n| n == &sym_name) {
+                        got_vaddr + idx as u64 * 8
+                    } else if let Some(gs) = global_syms.get(&sym.name) {
+                        if let Some(got_off) = gs.got_offset {
+                            got_vaddr + got_off
+                        } else { 0 }
+                    } else { 0 };
+                    return (got_entry_vaddr as i64 + reloc.addend - auipc_vaddr as i64) & 0xFFF;
+                }
+                _ => {}
+            }
+        }
+    }
+    0
 }
 
 // ── Helper functions ────────────────────────────────────────────────────

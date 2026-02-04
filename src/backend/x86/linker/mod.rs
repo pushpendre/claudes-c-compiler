@@ -1304,6 +1304,10 @@ fn load_file(
         return load_archive(&data, path, objects, globals, needed_sonames, lib_paths);
     }
 
+    if is_thin_archive(&data) {
+        return load_thin_archive(&data, path, objects, globals, needed_sonames, lib_paths);
+    }
+
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
             if let Some(paths) = parse_linker_script(text) {
@@ -1348,6 +1352,59 @@ fn load_archive(
         }
     }
 
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < member_objects.len() {
+            if member_resolves_undefined(&member_objects[i], globals) {
+                let obj = member_objects.remove(i);
+                let obj_idx = objects.len();
+                register_symbols(obj_idx, &obj, globals);
+                objects.push(obj);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load a GNU thin archive. Thin archives store only member headers and a name
+/// table; the actual object data lives in external files referenced by name
+/// (relative to the archive's directory).
+fn load_thin_archive(
+    data: &[u8], archive_path: &str, objects: &mut Vec<ElfObject>,
+    globals: &mut HashMap<String, GlobalSymbol>,
+    _needed_sonames: &mut Vec<String>, _lib_paths: &[String],
+) -> Result<(), String> {
+    let member_names = parse_thin_archive_members(data)?;
+    let archive_dir = Path::new(archive_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut member_objects: Vec<ElfObject> = Vec::new();
+    for name in &member_names {
+        let member_path = archive_dir.join(name);
+        let member_data = std::fs::read(&member_path).map_err(|e| {
+            format!(
+                "thin archive {}: failed to read member '{}': {}",
+                archive_path,
+                member_path.display(),
+                e
+            )
+        })?;
+        if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC {
+            continue;
+        }
+        let full_name = format!("{}({})", archive_path, name);
+        if let Ok(obj) = parse_object(&member_data, &full_name) {
+            member_objects.push(obj);
+        }
+    }
+
+    // Fixed-point iteration: pull in members that resolve undefined symbols
     let mut changed = true;
     while changed {
         changed = false;

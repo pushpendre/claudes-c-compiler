@@ -44,6 +44,17 @@ Known Issues Fixed:
      resolved in eval_const_expr, eval_global_addr_expr, array_needs_compound_init,
      or collect_compound_init_element. This caused SIGILL in opcode_args_ct()
      when tcg_target_op_def returned C_NotImplemented for basic TCG opcodes.
+  8. xgetbv inline assembly instruction not handled - FIXED
+     QEMU's cpuinfo-i386.c uses `asm("xgetbv")` for AVX feature detection.
+     Added xgetbv (0F 01 D0) and xsetbv (0F 01 D1) to the x86 assembler.
+  9. Thin archive (.a with !<thin> magic) not supported by linker - FIXED
+     Meson/ninja creates thin archives by default. These contain only member
+     headers and a name table; actual .o data lives in external files.
+     Added parse_thin_archive_members() to elf.rs and load_thin_archive()
+     to all four backend linkers (x86, ARM, i686, RISC-V).
+     Also fixed name parsing: thin archive member names can end with '/'
+     in the 16-byte header field (e.g., "/23607/"), requiring proper
+     trimming before parsing the offset number.
 
 Remaining Issues:
   1. Test library virtio-9p-client.c: __attribute__((common, weak)) on

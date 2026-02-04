@@ -1,9 +1,0 @@
-Implement shared library (.so) emission for the RISC-V linker.
-Port the x86-64 emit_shared_library() to RISC-V, handling:
-- ET_DYN ELF output with base address 0
-- .dynsym/.dynstr/.gnu.hash/.dynamic sections
-- R_RISCV_RELATIVE dynamic relocations
-- GOT for R_RISCV_GOT_HI20 relocations
-- RISC-V relocation application in PIC context
-- Section headers for compatibility
-- Update common.rs to route -shared for RISC-V to this new function

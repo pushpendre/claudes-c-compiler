@@ -16,7 +16,7 @@ pub use crate::backend::elf::{
     DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_STRTAB,
     DT_SYMTAB, DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT,
     DT_JMPREL, DT_PLTREL, DT_GNU_HASH,
-    parse_archive_members, parse_linker_script,
+    parse_archive_members, parse_thin_archive_members, is_thin_archive, parse_linker_script,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 

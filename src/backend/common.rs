@@ -224,6 +224,18 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                     is_nostdlib, is_static, is_shared,
                 );
             }
+            if config.expected_elf_machine == 243 {
+                if is_shared {
+                    return link_builtin_riscv_shared(
+                        object_files, output_path, user_args,
+                    );
+                } else {
+                    return link_builtin_riscv(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+            }
             if !is_shared {
                 if config.expected_elf_machine == 3 {
                     return link_builtin_i686(
@@ -233,12 +245,6 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                 }
                 if config.expected_elf_machine == 183 {
                     return link_builtin_aarch64(
-                        object_files, output_path, user_args,
-                        is_nostdlib, is_static,
-                    );
-                }
-                if config.expected_elf_machine == 243 {
-                    return link_builtin_riscv(
                         object_files, output_path, user_args,
                         is_nostdlib, is_static,
                     );
@@ -821,6 +827,28 @@ pub(crate) fn link_builtin_riscv(
         &needed_lib_refs,
         &crt_before_refs,
         &crt_after_refs,
+    )
+}
+
+/// Link a RISC-V shared library (.so) using the built-in linker.
+///
+/// Similar to `link_builtin_x86`'s shared path: no CRT objects, no default libs.
+/// Library paths are still resolved for -l flags.
+#[allow(dead_code)]
+pub(crate) fn link_builtin_riscv_shared(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+) -> Result<(), String> {
+    use crate::backend::riscv::linker;
+
+    let setup = resolve_builtin_link_setup(&DIRECT_LD_RISCV64, user_args, true, false);
+    let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+    linker::link_shared(
+        object_files,
+        output_path,
+        user_args,
+        &lib_path_refs,
     )
 }
 

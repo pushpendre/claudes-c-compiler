@@ -498,6 +498,20 @@ impl I686Codegen {
             if let Some((alloca_slot, _alloca_ty)) = self.state.param_alloca_slots[param_idx] {
                 if let Some(dest_slot) = self.state.get_slot(dest.0) {
                     if dest_slot.0 == alloca_slot.0 {
+                        // The param value is already in the alloca slot (stored by
+                        // emit_store_params). If dest also has a register assignment,
+                        // we must initialize the register from the slot — otherwise
+                        // the register contains garbage from the caller, and any
+                        // subsequent read via operand_to_eax will use the register
+                        // (uninitialized) instead of the slot.
+                        if let Some(phys) = self.dest_reg(dest) {
+                            let reg = phys_reg_name(phys);
+                            let load_instr = self.mov_load_for_type(ty);
+                            let src_ref = self.slot_ref(alloca_slot);
+                            emit!(self.state, "    {} {}, %eax", load_instr, src_ref);
+                            emit!(self.state, "    movl %eax, %{}", reg);
+                            self.state.reg_cache.invalidate_acc();
+                        }
                         return;
                     }
                 }

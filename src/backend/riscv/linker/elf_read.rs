@@ -12,7 +12,7 @@ pub use crate::backend::elf::{
     STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_SECTION,
     STV_DEFAULT,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
-    parse_archive_members,
+    parse_archive_members, parse_thin_archive_members, is_thin_archive,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
@@ -44,6 +44,30 @@ pub fn parse_archive(data: &[u8]) -> Result<Vec<(String, ElfObject)>, String> {
         if member_data.len() >= 4 && &member_data[0..4] == b"\x7fELF" {
             let full_name = format!("archive({})", name);
             if let Ok(obj) = parse_object(member_data, &full_name) {
+                results.push((name, obj));
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Parse a GNU thin archive and return all ELF .o members.
+/// In thin archives, member data is stored in external files referenced by name.
+pub fn parse_thin_archive(data: &[u8], archive_path: &str) -> Result<Vec<(String, ElfObject)>, String> {
+    let member_names = parse_thin_archive_members(data)?;
+    let archive_dir = std::path::Path::new(archive_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut results = Vec::new();
+    for name in member_names {
+        let member_path = archive_dir.join(&name);
+        let member_data = std::fs::read(&member_path).map_err(|e| {
+            format!("thin archive {}: failed to read member '{}': {}",
+                    archive_path, member_path.display(), e)
+        })?;
+        if member_data.len() >= 4 && &member_data[0..4] == b"\x7fELF" {
+            let full_name = format!("archive({})", name);
+            if let Ok(obj) = parse_object(&member_data, &full_name) {
                 results.push((name, obj));
             }
         }
