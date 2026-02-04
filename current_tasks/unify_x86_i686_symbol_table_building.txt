@@ -1,0 +1,15 @@
+Migrate x86 and i686 assemblers to use shared build_elf_symbol_table().
+
+Currently ARM and RISC-V assemblers use the shared build_elf_symbol_table()
+function from elf.rs, but x86 and i686 still manually build their symbol
+tables with ~130+ lines of ad-hoc code each. This is the most important
+cohesion discrepancy between the assemblers.
+
+This task refactors both x86 and i686 to:
+1. Convert their internal label_positions (section index-based) to the
+   (section_name, offset) format that SymbolTableInput expects
+2. Convert their pending_* fields to the HashMap format build_elf_symbol_table expects
+3. Replace the manual symbol table construction with a call to build_elf_symbol_table
+4. Keep COMMON symbols as extra_symbols (same pattern as ARM/RISC-V)
+
+Status: in_progress
