@@ -1,0 +1,2 @@
+Fixing QuickJS project for i686/arm/riscv architectures.
+Currently x86 passes. Working on getting i686 to pass first.
