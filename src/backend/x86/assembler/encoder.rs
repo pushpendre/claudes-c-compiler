@@ -204,7 +204,7 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         "cltq" | "cqto" | "cltd" | "cdq" | "cqo" | "ret" | "nop" | "ud2"
         | "endbr64" | "pause" | "mfence" | "lfence" | "sfence" | "clflush"
         | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp"
-        | "clc" | "stc" | "cld" | "std" | "sahf" | "lahf" | "fninit" | "fwait" | "wait" | "fnstcw" | "fstcw"
+        | "clc" | "stc" | "cli" | "sti" | "cld" | "std" | "sahf" | "lahf" | "fninit" | "fwait" | "wait" | "fnstcw" | "fstcw"
         | "fld1" | "fldl2e" | "fldlg2" | "fldln2" | "fldz" | "fldpi" | "fldl2t"
         | "fabs" | "fsqrt" | "frndint" | "f2xm1" | "fscale" | "fpatan" | "fprem" | "fprem1"
         | "fyl2x" | "fyl2xp1" | "fptan" | "fsin" | "fcos" | "fxtract" | "fnclex" | "fxch"
@@ -663,6 +663,8 @@ impl InstructionEncoder {
             // ---- Flag manipulation ----
             "clc" => { self.bytes.push(0xF8); Ok(()) }
             "stc" => { self.bytes.push(0xF9); Ok(()) }
+            "cli" => { self.bytes.push(0xFA); Ok(()) }
+            "sti" => { self.bytes.push(0xFB); Ok(()) }
             "sahf" => { self.bytes.push(0x9E); Ok(()) }
             "lahf" => { self.bytes.push(0x9F); Ok(()) }
             "pushf" | "pushfq" => { self.bytes.push(0x9C); Ok(()) }

@@ -102,6 +102,12 @@ pub struct ElfWriter {
     aliases: HashMap<String, String>,
     /// Section stack for .pushsection/.popsection.
     section_stack: Vec<Option<usize>>,
+    /// Deferred `.skip` expressions: (section_index, offset_in_section, expression, fill_byte).
+    /// Evaluated after all labels are known.
+    deferred_skips: Vec<(usize, usize, String, u8)>,
+    /// Deferred byte-sized symbol diffs: (section_index, offset_in_section, sym_a, sym_b, size).
+    /// Resolved after deferred skips are inserted (since skip insertion shifts offsets).
+    deferred_byte_diffs: Vec<(usize, usize, String, String, usize)>,
 }
 
 /// Check if a string is a numeric local label (just digits, e.g., "1", "42").
@@ -195,6 +201,14 @@ fn resolve_numeric_labels(items: &[AsmItem]) -> Vec<AsmItem> {
             AsmItem::Quad(vals) => {
                 let new_vals = resolve_numeric_data_values(vals, i, &defs);
                 result.push(AsmItem::Quad(new_vals));
+            }
+            AsmItem::Byte(vals) => {
+                let new_vals = resolve_numeric_data_values(vals, i, &defs);
+                result.push(AsmItem::Byte(new_vals));
+            }
+            AsmItem::SkipExpr(expr, fill) => {
+                let new_expr = resolve_numeric_refs_in_expr(expr, i, &defs);
+                result.push(AsmItem::SkipExpr(new_expr, *fill));
             }
             _ => result.push(item.clone()),
         }
@@ -317,6 +331,120 @@ fn resolve_numeric_displacement(
     }
 }
 
+/// Token in an expression for the deferred expression evaluator.
+#[derive(Debug, Clone, PartialEq)]
+enum ExprToken {
+    Number(i64),
+    Symbol(String),
+    Plus,
+    Minus,
+    Star,
+    LParen,
+    RParen,
+    Lt,
+    Gt,
+    And,
+    Or,
+    Xor,
+    Not,
+}
+
+/// Tokenize an expression string into ExprToken values.
+fn tokenize_expr(expr: &str) -> Result<Vec<ExprToken>, String> {
+    let mut tokens = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' => { i += 1; }
+            b'+' => { tokens.push(ExprToken::Plus); i += 1; }
+            b'-' => { tokens.push(ExprToken::Minus); i += 1; }
+            b'*' => { tokens.push(ExprToken::Star); i += 1; }
+            b'(' => { tokens.push(ExprToken::LParen); i += 1; }
+            b')' => { tokens.push(ExprToken::RParen); i += 1; }
+            b'<' => { tokens.push(ExprToken::Lt); i += 1; }
+            b'>' => { tokens.push(ExprToken::Gt); i += 1; }
+            b'&' => { tokens.push(ExprToken::And); i += 1; }
+            b'|' => { tokens.push(ExprToken::Or); i += 1; }
+            b'^' => { tokens.push(ExprToken::Xor); i += 1; }
+            b'~' => { tokens.push(ExprToken::Not); i += 1; }
+            b'0'..=b'9' => {
+                let start = i;
+                // Check for hex prefix
+                if i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i+1] == b'x' || bytes[i+1] == b'X') {
+                    i += 2;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                        i += 1;
+                    }
+                } else {
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                let num_str = &expr[start..i];
+                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
+                    i64::from_str_radix(&num_str[2..], 16)
+                        .map_err(|_| format!("bad hex number: {}", num_str))?
+                } else {
+                    num_str.parse::<i64>()
+                        .map_err(|_| format!("bad number: {}", num_str))?
+                };
+                tokens.push(ExprToken::Number(val));
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'.' => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') {
+                    i += 1;
+                }
+                tokens.push(ExprToken::Symbol(expr[start..i].to_string()));
+            }
+            c => return Err(format!("unexpected character in expression: '{}' (0x{:02x})", c as char, c)),
+        }
+    }
+
+    Ok(tokens)
+}
+
+/// Resolve numeric label references (e.g., "6651f", "661b") within an expression string.
+/// Scans for patterns like digits followed by 'f' or 'b' and replaces them with unique names.
+fn resolve_numeric_refs_in_expr(
+    expr: &str,
+    current_idx: usize,
+    defs: &HashMap<String, Vec<(usize, String)>>,
+) -> String {
+    let mut result = String::with_capacity(expr.len());
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for sequences of digits possibly followed by 'f' or 'b'
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Check if followed by 'f' or 'b' (and not more alphanumeric chars)
+            if i < bytes.len() && (bytes[i] == b'f' || bytes[i] == b'b') {
+                let next = i + 1;
+                if next >= bytes.len() || !bytes[next].is_ascii_alphanumeric() {
+                    let ref_name = &expr[start..=i];
+                    if let Some(resolved) = resolve_numeric_name(ref_name, current_idx, defs) {
+                        result.push_str(&resolved);
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+            // Not a numeric ref, just copy the digits
+            result.push_str(&expr[start..i]);
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
 impl ElfWriter {
     pub fn new() -> Self {
         ElfWriter {
@@ -336,6 +464,8 @@ impl ElfWriter {
             pending_internal: Vec::new(),
             aliases: HashMap::new(),
             section_stack: Vec::new(),
+            deferred_skips: Vec::new(),
+            deferred_byte_diffs: Vec::new(),
         }
     }
 
@@ -474,8 +604,7 @@ impl ElfWriter {
                 }
             }
             AsmItem::Byte(vals) => {
-                let section = self.current_section_mut()?;
-                section.data.extend_from_slice(vals);
+                self.emit_data_values(vals, 1)?;
             }
             AsmItem::Short(vals) => {
                 let section = self.current_section_mut()?;
@@ -492,6 +621,12 @@ impl ElfWriter {
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
                 section.data.extend(std::iter::repeat_n(0u8, *n as usize));
+            }
+            AsmItem::SkipExpr(expr, fill) => {
+                // Record a deferred skip - will be evaluated after all labels are known
+                let sec_idx = self.current_section.ok_or("no active section for .skip")?;
+                let offset = self.sections[sec_idx].data.len();
+                self.deferred_skips.push((sec_idx, offset, expr.clone(), *fill));
             }
             AsmItem::Asciz(bytes) | AsmItem::Ascii(bytes) => {
                 let section = self.current_section_mut()?;
@@ -593,10 +728,11 @@ impl ElfWriter {
             match val {
                 DataValue::Integer(v) => {
                     let section = &mut self.sections[sec_idx];
-                    if size == 4 {
-                        section.data.extend_from_slice(&(*v as i32).to_le_bytes());
-                    } else {
-                        section.data.extend_from_slice(&v.to_le_bytes());
+                    match size {
+                        1 => section.data.push(*v as u8),
+                        2 => section.data.extend_from_slice(&(*v as i16).to_le_bytes()),
+                        4 => section.data.extend_from_slice(&(*v as i32).to_le_bytes()),
+                        _ => section.data.extend_from_slice(&v.to_le_bytes()),
                     }
                 }
                 DataValue::Symbol(sym) => {
@@ -626,20 +762,28 @@ impl ElfWriter {
                     section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolDiff(a, b) => {
-                    // For `.long a - b` (e.g., .long .LBB3 - .Ljt_0):
-                    // Store as a R_X86_64_PC32 relocation with diff_symbol set.
-                    // The ELF writer will resolve the addend correctly after all
-                    // labels are known (handles forward references).
-                    let offset = self.sections[sec_idx].data.len() as u64;
-                    self.sections[sec_idx].relocations.push(ElfRelocation {
-                        offset,
-                        symbol: a.clone(),
-                        reloc_type: if size == 4 { R_X86_64_PC32 } else { R_X86_64_64 },
-                        addend: 0,
-                        diff_symbol: Some(b.clone()),
-                    });
-                    let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat_n(0, size));
+                    if size <= 2 {
+                        // For byte/short-sized diffs, defer resolution until after
+                        // deferred skips are inserted (skip insertion shifts offsets).
+                        // Can't use relocations here since they'd try to patch 4 bytes.
+                        let offset = self.sections[sec_idx].data.len();
+                        self.deferred_byte_diffs.push((sec_idx, offset, a.clone(), b.clone(), size));
+                        let section = &mut self.sections[sec_idx];
+                        section.data.extend(std::iter::repeat_n(0, size));
+                    } else {
+                        // For `.long a - b` or `.quad a - b`:
+                        // Store as a relocation with diff_symbol set.
+                        let offset = self.sections[sec_idx].data.len() as u64;
+                        self.sections[sec_idx].relocations.push(ElfRelocation {
+                            offset,
+                            symbol: a.clone(),
+                            reloc_type: if size == 4 { R_X86_64_PC32 } else { R_X86_64_64 },
+                            addend: 0,
+                            diff_symbol: Some(b.clone()),
+                        });
+                        let section = &mut self.sections[sec_idx];
+                        section.data.extend(std::iter::repeat_n(0, size));
+                    }
                 }
             }
         }
@@ -708,12 +852,257 @@ impl ElfWriter {
         }
     }
 
+    /// Resolve deferred `.skip` expressions after all labels are known.
+    /// Evaluates the expression, inserts the fill bytes, and adjusts all subsequent
+    /// label positions and relocation offsets in the same section.
+    fn resolve_deferred_skips(&mut self) -> Result<(), String> {
+        // Process in reverse order within each section so earlier insertions
+        // don't invalidate the offsets of later ones.
+        let mut skips = std::mem::take(&mut self.deferred_skips);
+        // Sort by (section_index, offset) in reverse order
+        skips.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).reverse());
+
+        for (sec_idx, offset, expr, fill) in &skips {
+            // Evaluate the expression
+            let val = self.evaluate_expr(expr)?;
+            let count = if val < 0 { 0usize } else { val as usize };
+
+            if count == 0 {
+                continue;
+            }
+
+            // Insert `count` fill bytes at `offset` in the section
+            let fill_bytes: Vec<u8> = vec![*fill; count];
+            self.sections[*sec_idx].data.splice(*offset..*offset, fill_bytes);
+
+            // Adjust label positions: any label in this section at or after `offset` shifts by `count`
+            for (_, (lsec, loff)) in self.label_positions.iter_mut() {
+                if *lsec == *sec_idx && (*loff as usize) >= *offset {
+                    *loff += count as u64;
+                }
+            }
+
+            // Adjust numeric label positions
+            for (_, positions) in self.numeric_label_positions.iter_mut() {
+                for (lsec, loff) in positions.iter_mut() {
+                    if *lsec == *sec_idx && (*loff as usize) >= *offset {
+                        *loff += count as u64;
+                    }
+                }
+            }
+
+            // Adjust relocation offsets
+            for reloc in self.sections[*sec_idx].relocations.iter_mut() {
+                if (reloc.offset as usize) >= *offset {
+                    reloc.offset += count as u64;
+                }
+            }
+
+            // Adjust jump offsets
+            for jump in self.sections[*sec_idx].jumps.iter_mut() {
+                if jump.offset >= *offset {
+                    jump.offset += count;
+                }
+            }
+
+            // Adjust other deferred byte diffs in the same section
+            for (bsec, boff, _, _, _) in self.deferred_byte_diffs.iter_mut() {
+                if *bsec == *sec_idx && *boff >= *offset {
+                    *boff += count;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve deferred byte-sized symbol diffs after skip resolution.
+    fn resolve_deferred_byte_diffs(&mut self) -> Result<(), String> {
+        let diffs = std::mem::take(&mut self.deferred_byte_diffs);
+        for (sec_idx, offset, sym_a, sym_b, size) in &diffs {
+            let pos_a = self.label_positions.get(sym_a)
+                .ok_or_else(|| format!("undefined label in .byte diff: {}", sym_a))?;
+            let pos_b = self.label_positions.get(sym_b)
+                .ok_or_else(|| format!("undefined label in .byte diff: {}", sym_b))?;
+
+            if pos_a.0 != pos_b.0 {
+                return Err(format!("cross-section .byte diff: {} - {}", sym_a, sym_b));
+            }
+
+            let diff = (pos_a.1 as i64) - (pos_b.1 as i64);
+            match size {
+                1 => {
+                    self.sections[*sec_idx].data[*offset] = diff as u8;
+                }
+                2 => {
+                    let bytes = (diff as i16).to_le_bytes();
+                    self.sections[*sec_idx].data[*offset] = bytes[0];
+                    self.sections[*sec_idx].data[*offset + 1] = bytes[1];
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate a `.skip` expression string using known label positions.
+    /// Supports arithmetic: +, -, *, negation, comparisons (<, >), bitwise (&, |, ^).
+    /// Uses GNU assembler convention: comparisons return -1 (all ones) for true, 0 for false.
+    fn evaluate_expr(&self, expr: &str) -> Result<i64, String> {
+        let expr = expr.trim();
+        let tokens = tokenize_expr(expr)?;
+        let mut pos = 0;
+        let result = self.parse_expr_or(&tokens, &mut pos)?;
+        if pos < tokens.len() {
+            return Err(format!("unexpected token in expression at position {}: {:?}", pos, tokens.get(pos)));
+        }
+        Ok(result)
+    }
+
+    fn parse_expr_or(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_xor(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Or => { *pos += 1; val |= self.parse_expr_xor(tokens, pos)?; }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_xor(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_and(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Xor => { *pos += 1; val ^= self.parse_expr_and(tokens, pos)?; }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_and(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_cmp(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::And => { *pos += 1; val &= self.parse_expr_cmp(tokens, pos)?; }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_cmp(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_add(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Lt => {
+                    *pos += 1;
+                    let rhs = self.parse_expr_add(tokens, pos)?;
+                    // GNU as: comparisons return -1 for true, 0 for false
+                    val = if val < rhs { -1 } else { 0 };
+                }
+                ExprToken::Gt => {
+                    *pos += 1;
+                    let rhs = self.parse_expr_add(tokens, pos)?;
+                    val = if val > rhs { -1 } else { 0 };
+                }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_add(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_mul(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Plus => { *pos += 1; val = val.wrapping_add(self.parse_expr_mul(tokens, pos)?); }
+                ExprToken::Minus => { *pos += 1; val = val.wrapping_sub(self.parse_expr_mul(tokens, pos)?); }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_mul(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        let mut val = self.parse_expr_unary(tokens, pos)?;
+        while *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Star => { *pos += 1; val = val.wrapping_mul(self.parse_expr_unary(tokens, pos)?); }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    fn parse_expr_unary(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        if *pos < tokens.len() {
+            match tokens[*pos] {
+                ExprToken::Minus => {
+                    *pos += 1;
+                    let val = self.parse_expr_unary(tokens, pos)?;
+                    Ok(-val)
+                }
+                ExprToken::Plus => {
+                    *pos += 1;
+                    self.parse_expr_unary(tokens, pos)
+                }
+                ExprToken::Not => {
+                    *pos += 1;
+                    let val = self.parse_expr_unary(tokens, pos)?;
+                    Ok(!val)
+                }
+                _ => self.parse_expr_primary(tokens, pos),
+            }
+        } else {
+            Err("unexpected end of expression".to_string())
+        }
+    }
+
+    fn parse_expr_primary(&self, tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+        if *pos >= tokens.len() {
+            return Err("unexpected end of expression".to_string());
+        }
+        match &tokens[*pos] {
+            ExprToken::Number(n) => {
+                *pos += 1;
+                Ok(*n)
+            }
+            ExprToken::Symbol(name) => {
+                *pos += 1;
+                if let Some(&(_, offset)) = self.label_positions.get(name.as_str()) {
+                    Ok(offset as i64)
+                } else {
+                    Err(format!("undefined symbol in expression: {}", name))
+                }
+            }
+            ExprToken::LParen => {
+                *pos += 1;
+                let val = self.parse_expr_or(tokens, pos)?;
+                if *pos < tokens.len() && tokens[*pos] == ExprToken::RParen {
+                    *pos += 1;
+                } else {
+                    return Err("missing closing parenthesis".to_string());
+                }
+                Ok(val)
+            }
+            other => Err(format!("unexpected token: {:?}", other)),
+        }
+    }
+
     /// Emit the final ELF object file.
     fn emit_elf(mut self) -> Result<Vec<u8>, String> {
         // Relax long jumps to short jumps where possible.
         // This must happen BEFORE resolving sizes and updating symbol values,
         // because relaxation changes label positions and section data lengths.
         self.relax_jumps();
+
+        // Resolve deferred .skip expressions (label arithmetic) - inserts bytes and shifts labels.
+        self.resolve_deferred_skips()?;
+
+        // Resolve deferred byte-sized symbol diffs (must happen after skip resolution).
+        self.resolve_deferred_byte_diffs()?;
 
         // After relaxation, update all symbol values from the (now-correct) label_positions.
         for (name, &(_sec_idx, offset)) in &self.label_positions {

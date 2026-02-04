@@ -224,7 +224,12 @@ impl ElfWriter {
             }
             AsmItem::Byte(vals) => {
                 let section = self.current_section_mut()?;
-                section.data.extend_from_slice(vals);
+                for val in vals {
+                    match val {
+                        DataValue::Integer(v) => section.data.push(*v as u8),
+                        _ => return Err("unsupported label expression in .byte for i686".to_string()),
+                    }
+                }
             }
             AsmItem::Short(vals) => {
                 let section = self.current_section_mut()?;
@@ -242,6 +247,16 @@ impl ElfWriter {
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
                 section.data.extend(std::iter::repeat_n(0u8, *n as usize));
+            }
+            AsmItem::SkipExpr(expr, fill) => {
+                // i686 doesn't need deferred skip expression support (kernel uses x86-64)
+                // Try simple integer parse; error otherwise
+                if let Ok(val) = expr.trim().parse::<u32>() {
+                    let section = self.current_section_mut()?;
+                    section.data.extend(std::iter::repeat(*fill).take(val as usize));
+                } else {
+                    return Err(format!("unsupported .skip expression in i686: {}", expr));
+                }
             }
             AsmItem::Asciz(bytes) | AsmItem::Ascii(bytes) => {
                 let section = self.current_section_mut()?;

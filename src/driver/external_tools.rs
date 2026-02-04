@@ -113,6 +113,13 @@ impl Driver {
 
         // Handle MY_ASM=builtin: read the file and use the built-in assembler
         if custom_asm.as_deref() == Some("builtin") {
+            // When -Wa,--version is passed, print a GNU-compatible version string.
+            // The Linux kernel's scripts/as-version.sh probes the assembler version
+            // this way and expects "GNU assembler ... <version>" on stdout.
+            if self.assembler_extra_args.iter().any(|a| a == "--version") {
+                println!("GNU assembler (CCC built-in) 2.42");
+                return Ok(());
+            }
             return self.assemble_source_file_builtin(input_file, output_path);
         }
 

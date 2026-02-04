@@ -29,8 +29,8 @@ pub enum AsmItem {
     Label(String),
     /// Alignment: `.align N`
     Align(u32),
-    /// Emit bytes: `.byte val, val, ...`
-    Byte(Vec<u8>),
+    /// Emit bytes: `.byte val, val, ...` (can contain label expressions)
+    Byte(Vec<DataValue>),
     /// Emit 16-bit values: `.short val, ...`
     Short(Vec<i16>),
     /// Emit 32-bit values: `.long val, ...` (can be symbol references)
@@ -39,6 +39,11 @@ pub enum AsmItem {
     Quad(Vec<DataValue>),
     /// Emit zero bytes: `.zero N`
     Zero(u32),
+    /// Deferred `.skip` with expression: evaluated after all labels are known.
+    /// Used by kernel alternatives framework for label-arithmetic expressions
+    /// like `.skip -(((6651f-6641f)-(662b-661b)) > 0) * ((6651f-6641f)-(662b-661b)), 0x90`.
+    /// Fields: (expression_string, fill_byte)
+    SkipExpr(String, u8),
     /// NUL-terminated string: `.asciz "str"`
     Asciz(Vec<u8>),
     /// String without NUL: `.ascii "str"`
@@ -432,8 +437,8 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             }
         }
         ".byte" => {
-            let vals = parse_comma_separated_integers(args)?;
-            Ok(AsmItem::Byte(vals.iter().map(|v| *v as u8).collect()))
+            let vals = parse_data_values(args)?;
+            Ok(AsmItem::Byte(vals))
         }
         ".short" | ".value" | ".2byte" => {
             let vals = parse_comma_separated_integers(args)?;
@@ -448,9 +453,17 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             Ok(AsmItem::Quad(vals))
         }
         ".zero" | ".skip" => {
-            let val: u32 = args.split(',').next().unwrap_or("0").trim()
-                .parse().map_err(|_| format!("bad zero count: {}", args))?;
-            Ok(AsmItem::Zero(val))
+            let (expr_str, fill) = split_skip_args(args);
+            if let Ok(val) = parse_integer_expr(expr_str) {
+                if fill == 0 {
+                    Ok(AsmItem::Zero(val as u32))
+                } else {
+                    Ok(AsmItem::SkipExpr(expr_str.to_string(), fill))
+                }
+            } else {
+                // Expression contains labels or complex arithmetic - defer to ELF writer
+                Ok(AsmItem::SkipExpr(expr_str.to_string(), fill))
+            }
         }
         ".asciz" | ".string" => {
             let s = parse_string_literal(args)?;
@@ -937,6 +950,57 @@ fn parse_comma_separated_integers(s: &str) -> Result<Vec<i64>, String> {
     Ok(vals)
 }
 
+/// Split `.skip expr, fill` arguments, respecting parentheses.
+/// Returns the expression string and the fill byte (default 0).
+fn split_skip_args(args: &str) -> (&str, u8) {
+    let mut depth = 0i32;
+    let mut last_comma = None;
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => last_comma = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(pos) = last_comma {
+        let expr = &args[..pos];
+        let fill_str = args[pos + 1..].trim();
+        let fill = if let Ok(v) = parse_integer_expr(fill_str) { v as u8 } else { 0u8 };
+        (expr, fill)
+    } else {
+        (args, 0u8)
+    }
+}
+
+/// Parse a label diff without spaces, e.g., `663b-661b`.
+/// Returns a SymbolDiff DataValue if both sides look like labels.
+fn parse_label_diff(s: &str) -> Option<DataValue> {
+    for (i, c) in s.char_indices().skip(1) {
+        if c == '-' {
+            let lhs = &s[..i];
+            let rhs = &s[i + 1..];
+            if !lhs.is_empty() && !rhs.is_empty()
+                && is_label_like(lhs) && is_label_like(rhs) {
+                return Some(DataValue::SymbolDiff(lhs.to_string(), rhs.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Check if a string looks like a label (alphanumeric, underscore, dot).
+fn is_label_like(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.as_bytes()[0];
+    if !(first.is_ascii_alphabetic() || first == b'_' || first == b'.' || first.is_ascii_digit()) {
+        return false;
+    }
+    s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+}
+
 /// Parse data values (integers or symbol references).
 fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
     let mut vals = Vec::new();
@@ -957,6 +1021,12 @@ fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
         // Try integer
         if let Ok(val) = parse_integer_expr(trimmed) {
             vals.push(DataValue::Integer(val));
+            continue;
+        }
+
+        // Check for label diff without spaces (e.g., 663b-661b)
+        if let Some(val) = parse_label_diff(trimmed) {
+            vals.push(val);
             continue;
         }
 
@@ -1302,7 +1372,7 @@ main:
 .cfi_endproc
 .size main, .-main
 "#;
-        let items = parse(asm).unwrap();
+        let items = parse_asm(asm).unwrap();
         // Should parse without errors
         let labels: Vec<_> = items.iter().filter(|i| matches!(i, AsmItem::Label(_))).collect();
         assert_eq!(labels.len(), 1);

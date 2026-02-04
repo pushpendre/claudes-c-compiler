@@ -261,6 +261,12 @@ impl Target {
         // Check if we should use the built-in assembler
         if let Ok(ref val) = std::env::var("MY_ASM") {
             if val == "builtin" {
+                // Handle -Wa,--version: print GNU-compatible version string for
+                // kernel build system's as-version.sh probe.
+                if extra_args.iter().any(|a| a == "--version") {
+                    println!("GNU assembler (CCC built-in) 2.42");
+                    return Ok(());
+                }
                 match self {
                     Target::Aarch64 => {
                         return arm::assembler::assemble(asm_text, output_path);
