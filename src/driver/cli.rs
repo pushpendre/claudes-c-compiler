@@ -89,7 +89,7 @@ impl Driver {
                     // Meson detects GCC by checking for "Free Software Foundation"
                     // in the --version output. We claim GCC 14.2.0 compatibility
                     // (matching our __GNUC__/__GNUC_MINOR__/__GNUC_PATCHLEVEL__).
-                    println!("ccc (GCC-compatible) 14.2.0");
+                    println!("ccc (Claude's C Compiler, GCC-compatible) 14.2.0");
                     println!("GCC is maintained by the Free Software Foundation, Inc.");
                     println!("This program was written by Claude Opus 4.6;");
                     println!("It is not intended for production use.");
@@ -112,7 +112,7 @@ impl Driver {
                     return Ok(true);
                 }
                 "-v" if args.len() == 2 => {
-                    println!("ccc (GCC-compatible) 14.2.0");
+                    println!("ccc (Claude's C Compiler, GCC-compatible) 14.2.0");
                     println!("Target: {}", target.triple());
                     return Ok(true);
                 }
@@ -678,7 +678,7 @@ impl Driver {
         {
             let _ = (target, linker_items);
             // Print GNU ld-compatible version info for build system detection
-            println!("GNU ld (CCC built-in) 2.42");
+            println!("GNU ld (Claude's C Compiler built-in) 2.42");
         }
     }
 

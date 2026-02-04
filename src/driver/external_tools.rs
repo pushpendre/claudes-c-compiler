@@ -122,7 +122,7 @@ impl Driver {
         {
             // Handle -Wa,--version: print GNU-compatible version string
             if self.assembler_extra_args.iter().any(|a| a == "--version") {
-                println!("GNU assembler (CCC built-in) 2.42");
+                println!("GNU assembler (Claude's C Compiler built-in) 2.42");
                 return Ok(());
             }
             self.assemble_source_file_builtin(input_file, output_path)

@@ -354,7 +354,7 @@ impl Target {
             // Handle -Wa,--version: print GNU-compatible version string for
             // kernel build system's as-version.sh probe.
             if extra_args.iter().any(|a| a == "--version") {
-                println!("GNU assembler (CCC built-in) 2.42");
+                println!("GNU assembler (Claude's C Compiler built-in) 2.42");
                 return Ok(());
             }
 

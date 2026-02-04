@@ -1,3 +1,0 @@
-Restore "Claude's C Compiler" as the full name for CCC in README and DESIGN_DOC.
-Improve README with missing sections newcomers expect: prerequisites, getting started,
-running tests, and a brief architecture overview link.

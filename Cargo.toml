@@ -2,7 +2,7 @@
 name = "ccc"
 version = "0.1.0"
 edition = "2021"
-description = "A C compiler targeting x86-64, i686, ARM64, and RISC-V"
+description = "Claude's C Compiler -- a C compiler targeting x86-64, i686, ARM64, and RISC-V"
 autobins = false
 
 [[bin]]

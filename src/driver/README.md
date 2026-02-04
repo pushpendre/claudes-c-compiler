@@ -224,7 +224,7 @@ The driver reports as GCC 14.2.0 for build system compatibility:
 |-------|----------|
 | `-dumpmachine` | Target triple (e.g., `x86_64-linux-gnu`) |
 | `-dumpversion` | `14` |
-| `--version` | `ccc (GCC-compatible) 14.2.0` + FSF copyright |
+| `--version` | `ccc (Claude's C Compiler, GCC-compatible) 14.2.0` + FSF copyright |
 | `-v` (alone) | Target and version info |
 | `-print-search-dirs` | Standard library directory layout |
 | `-print-file-name=NAME` | Searches standard GCC library paths; returns bundled include dir for `include` |
@@ -454,7 +454,7 @@ tokenization enabled) before passing the result to the builtin assembler. For
 `.s` files, the content is read directly.
 
 The builtin assembler path also handles the `-Wa,--version` probe: when
-detected, it prints `GNU assembler (CCC built-in) 2.42` to satisfy the Linux
+detected, it prints `GNU assembler (Claude's C Compiler built-in) 2.42` to satisfy the Linux
 kernel's `scripts/as-version.sh`.
 
 ### Linker Selection

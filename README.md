@@ -1,10 +1,20 @@
-# CCC
+# CCC -- Claude's C Compiler
 
 A C compiler written entirely from scratch in Rust, targeting x86-64, i686,
 AArch64, and RISC-V 64. Zero compiler-specific dependencies -- the frontend,
 SSA-based IR, optimizer, code generator, peephole optimizers, assembler,
 linker, and DWARF debug info generation are all implemented from scratch.
 The compiler produces ELF executables without any external toolchain.
+
+## Prerequisites
+
+- **Rust** (stable, 2021 edition) -- install via [rustup](https://rustup.rs/)
+- **Linux host** -- the compiler targets Linux ELF executables and relies on
+  Linux system headers / C runtime libraries (glibc or musl) being installed on
+  the host
+- For cross-compilation targets (ARM, RISC-V, i686), the corresponding
+  cross-compilation sysroots should be installed (e.g.,
+  `aarch64-linux-gnu-gcc`, `riscv64-linux-gnu-gcc`)
 
 ## Building
 
@@ -79,6 +89,40 @@ cargo build --release --features gcc_m16
 When compiled with GCC fallback features enabled, `--version` shows which
 components use GCC (e.g., `Backend: gcc_assembler, gcc_linker`).
 
+## Getting Started
+
+Write a simple C program:
+
+```c
+// hello.c
+#include <stdio.h>
+
+int main(void) {
+    printf("Hello from Claude's C Compiler!\n");
+    return 0;
+}
+```
+
+Compile and run it:
+
+```bash
+./target/release/ccc -o hello hello.c
+./hello
+```
+
+The compiler works as a drop-in GCC replacement in most build systems:
+
+```bash
+# Use CCC with Make
+make CC=./target/release/ccc
+
+# Use CCC with CMake
+cmake -DCMAKE_C_COMPILER=./target/release/ccc ..
+
+# Use CCC with configure scripts
+./configure CC=./target/release/ccc
+```
+
 ## Status
 
 The compiler can build real-world C codebases across all four architectures,
@@ -99,6 +143,31 @@ assembler and linker.
   partially implemented (core 128-bit operations work).
 - **Atomics**: `_Atomic` is parsed but treated as the underlying type (the
   qualifier is not tracked through the type system).
+
+## Testing
+
+The compiler has two kinds of tests:
+
+**Unit tests** (in-source `#[test]` functions for individual passes and modules):
+
+```bash
+cargo test --release
+```
+
+**Integration tests** (end-to-end compilation tests in `tests/`). Each test is
+a directory containing a `main.c` source file and expected output files:
+
+```
+tests/
+  some-test-name/
+    main.c              # C source to compile
+    expected.stdout     # Expected stdout (if any)
+    expected.ret        # Expected exit code (if any)
+    expected.skip.arm   # Skip marker for specific architectures (optional)
+```
+
+Tests are run by compiling `main.c` with `ccc`, executing the resulting binary,
+and comparing stdout and the exit code against the expected files.
 
 ## Environment Variables
 
@@ -128,5 +197,5 @@ scripts/            Helper scripts (assembly comparison, cross-compilation setup
 ```
 
 Each `src/` subdirectory has its own `README.md` with detailed design
-documentation. For the full architecture and implementation details, see
-[DESIGN_DOC.md](DESIGN_DOC.md).
+documentation. For the full architecture, compilation pipeline data flow,
+and key design decisions, see [DESIGN_DOC.md](DESIGN_DOC.md).
