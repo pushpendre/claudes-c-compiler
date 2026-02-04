@@ -1,0 +1,14 @@
+Unify linker-defined symbols across all 4 backend linkers (x86, i686, ARM, RISC-V).
+
+Currently each backend defines a different set of linker-defined symbols:
+- x86-64: only 5 symbols (_GLOBAL_OFFSET_TABLE_, __bss_start, _edata, _end, __end)
+- i686: 13 symbols
+- ARM: ~20 symbols
+- RISC-V: ~30 symbols
+
+This causes link failures for programs that reference standard linker symbols
+like __ehdr_start, _etext, __dso_handle, __data_start, etc. on backends that
+don't define them.
+
+The fix will add the missing standard linker-defined symbols to the x86-64
+and i686 backends so all backends define a consistent core set of symbols.
