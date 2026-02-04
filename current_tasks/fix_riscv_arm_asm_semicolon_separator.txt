@@ -1,0 +1,11 @@
+Fix RISC-V and ARM assembler parsers to handle semicolon statement separators.
+
+GAS uses ';' to separate multiple statements on the same line.
+The x86/i686 parser already handles this, but the RISC-V and ARM parsers do not.
+
+This causes failures when inline assembly uses semicolons:
+  __asm__("csrr %0, sstatus; csrc sstatus, %1" : "=r"(flags) : "r"(2));
+
+The fix adds a split_on_semicolons() function to both parsers, matching the
+x86 parser's approach. Also handles label+instruction on the same line
+(e.g., "label: instruction") which can occur after semicolon splitting.
