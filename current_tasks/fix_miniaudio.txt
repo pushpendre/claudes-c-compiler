@@ -1,0 +1,2 @@
+Add missing SSE instructions (rsqrtss, rsqrtps, rcpss, rcpps, sqrtps, sqrtpd) to x86 and i686 assemblers.
+This fixes the miniaudio project build which uses rsqrtss via inline asm.
