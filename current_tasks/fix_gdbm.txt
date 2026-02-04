@@ -1,3 +1,0 @@
-Fixing gdbm project to compile and pass tests with builtin assembler/linker.
-Testing across all architectures, starting with x86.
-Started: 2026-02-04

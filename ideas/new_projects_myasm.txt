@@ -97,3 +97,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | libcsv  | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | nghttp2 | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | discount | PASS | PASS | PASS | PASS | Fixed x86 linker: local symbol collision (local STB_LOCAL symbols were resolved to global symbols with same name from other object files) |
+| gdbm    | PASS | PASS | PASS | PASS | Fixed RISC-V linker: added _Unwind/gcc_personality to linker_defined list + fixed .so search in linker scripts |

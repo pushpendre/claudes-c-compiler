@@ -267,7 +267,18 @@ pub fn link_builtin(
                                 let actual_path = if token.starts_with('/') {
                                     token.to_string()
                                 } else {
-                                    format!("{}/{}", dir, token)
+                                    // Search all lib paths for the referenced .so file
+                                    let mut found = format!("{}/{}", dir, token);
+                                    if !std::path::Path::new(&found).exists() {
+                                        for search_dir in &lib_search_paths {
+                                            let candidate = format!("{}/{}", search_dir, token);
+                                            if std::path::Path::new(&candidate).exists() {
+                                                found = candidate;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    found
                                 };
                                 if let Ok(syms) = read_shared_lib_symbols(&actual_path) {
                                     for si in syms {
@@ -720,6 +731,9 @@ pub fn link_builtin(
             "__ehdr_start", "__executable_start", "_etext", "etext",
             "__rela_iplt_start", "__rela_iplt_end",
             "_ITM_registerTMCloneTable", "_ITM_deregisterTMCloneTable",
+            // Weak symbols for exception handling / unwinding (defined later as STB_WEAK)
+            "__gcc_personality_v0", "_Unwind_Resume", "_Unwind_ForcedUnwind", "_Unwind_GetCFA",
+            "__pthread_initialize_minimal", "_dl_rtld_map",
             "_init", "_fini",
         ];
         let mut truly_undefined: Vec<&String> = global_syms.iter()
