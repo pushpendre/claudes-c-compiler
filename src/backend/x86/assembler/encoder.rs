@@ -1107,6 +1107,47 @@ impl InstructionEncoder {
             "vunpckhpd" => self.encode_avx_3op(ops, 0x15, true),
             "vunpcklps" => self.encode_avx_3op_np(ops, 0x14),
             "vunpckhps" => self.encode_avx_3op_np(ops, 0x15),
+            "vmovlhps" => self.encode_avx_3op_np(ops, 0x16),
+            "vmovhlps" => self.encode_avx_3op_np(ops, 0x12),
+            "vmovddup" => self.encode_avx_2op_0f(ops, 0x12, 3),  // VEX.F2.0F 12 /r
+            "vmovshdup" => self.encode_avx_2op_0f(ops, 0x16, 2), // VEX.F3.0F 16 /r
+            "vmovsldup" => self.encode_avx_2op_0f(ops, 0x12, 2), // VEX.F3.0F 12 /r
+
+            // AVX comparison with immediate (vcmpps/vcmppd/vcmpss/vcmpsd)
+            "vcmpps" => self.encode_avx_3op_0f_imm8(ops, 0xC2, false),
+            "vcmppd" => self.encode_avx_3op_0f_imm8(ops, 0xC2, true),
+            "vcmpss" => self.encode_avx_cmp_scalar(ops, 0xC2, 2), // VEX.NDS.LIG.F3.0F C2 /r ib
+            "vcmpsd" => self.encode_avx_cmp_scalar(ops, 0xC2, 3), // VEX.NDS.LIG.F2.0F C2 /r ib
+
+            // AVX scalar float operations (VEX.NDS.LIG.F3/F2.0F)
+            "vmovss" => self.encode_avx_scalar_mov(ops, 0x10, 0x11, 2), // F3 prefix
+            "vmovsd" if ops.len() > 0 => self.encode_avx_scalar_mov(ops, 0x10, 0x11, 3), // F2 prefix
+            "vaddss" => self.encode_avx_scalar_3op(ops, 0x58, 2),   // VEX.NDS.LIG.F3.0F 58
+            "vsubss" => self.encode_avx_scalar_3op(ops, 0x5C, 2),   // VEX.NDS.LIG.F3.0F 5C
+            "vmulss" => self.encode_avx_scalar_3op(ops, 0x59, 2),   // VEX.NDS.LIG.F3.0F 59
+            "vdivss" => self.encode_avx_scalar_3op(ops, 0x5E, 2),   // VEX.NDS.LIG.F3.0F 5E
+            "vaddsd" => self.encode_avx_scalar_3op(ops, 0x58, 3),   // VEX.NDS.LIG.F2.0F 58
+            "vsubsd" => self.encode_avx_scalar_3op(ops, 0x5C, 3),   // VEX.NDS.LIG.F2.0F 5C
+            "vmulsd" => self.encode_avx_scalar_3op(ops, 0x59, 3),   // VEX.NDS.LIG.F2.0F 59
+            "vdivsd" => self.encode_avx_scalar_3op(ops, 0x5E, 3),   // VEX.NDS.LIG.F2.0F 5E
+            "vmaxps" => self.encode_avx_3op_np(ops, 0x5F),
+            "vminps" => self.encode_avx_3op_np(ops, 0x5D),
+            "vmaxpd" => self.encode_avx_3op(ops, 0x5F, true),
+            "vminpd" => self.encode_avx_3op(ops, 0x5D, true),
+            "vmaxss" => self.encode_avx_scalar_3op(ops, 0x5F, 2),
+            "vminss" => self.encode_avx_scalar_3op(ops, 0x5D, 2),
+            "vmaxsd" => self.encode_avx_scalar_3op(ops, 0x5F, 3),
+            "vminsd" => self.encode_avx_scalar_3op(ops, 0x5D, 3),
+
+            // AVX extract/permute
+            "vextractf128" => self.encode_avx_extract_imm8(ops, 0x19, true), // VEX.256.66.0F3A 19 /r ib
+            "vpermilps" => self.encode_avx_shuffle_3a(ops, 0x04, true),      // VEX.256.66.0F3A 04 /r ib (imm form)
+            "vpermilpd" => self.encode_avx_shuffle_3a(ops, 0x05, true),      // VEX.256.66.0F3A 05 /r ib (imm form)
+
+            // AVX conversions
+            "vcvtps2dq" => self.encode_avx_2op_0f(ops, 0x5B, 1),        // VEX.128/256.66.0F 5B /r
+            "vcvtdq2ps" => self.encode_avx_2op_0f(ops, 0x5B, 0),        // VEX.128/256.0F 5B /r
+            "vcvttps2dq" => self.encode_avx_2op_0f(ops, 0x5B, 2),       // VEX.128/256.F3.0F 5B /r
 
             // AVX insert/extract
             "vpinsrb" => self.encode_avx_insert_gp(ops, 0x20, true),
@@ -1606,6 +1647,12 @@ impl InstructionEncoder {
                 // Handle setXXb forms (e.g., setcb = setc with byte suffix)
                 self.encode_setcc(ops, mnemonic)
             }
+
+            // SSE comparison pseudo-ops: cmpXXps/pd/ss/sd -> cmpps/pd/ss/sd $imm
+            _ if self.try_encode_sse_cmp_pseudo(ops, mnemonic)?.is_some() => Ok(()),
+
+            // AVX comparison pseudo-ops: vcmpXXps/pd/ss/sd -> vcmpps/pd/ss/sd $imm
+            _ if self.try_encode_avx_cmp_pseudo(ops, mnemonic)?.is_some() => Ok(()),
 
             _ => {
                 // TODO: many more instructions to handle
@@ -4377,6 +4424,368 @@ impl InstructionEncoder {
                 self.encode_modrm_mem(dst_num, mem)
             }
             _ => Err("unsupported AVX 2-op operands".to_string()),
+        }
+    }
+
+    /// Encode AVX 2-operand in 0F map (e.g., vmovddup, vmovshdup, vmovsldup)
+    /// pp: 0=NP, 1=66, 2=F3, 3=F2
+    fn encode_avx_2op_0f(&mut self, ops: &[Operand], opcode: u8, pp: u8) -> Result<(), String> {
+        if ops.len() != 2 { return Err("AVX 2-op requires 2 operands".to_string()); }
+        let l = self.vex_l_from_ops(ops);
+
+        match (&ops[0], &ops[1]) {
+            (Operand::Register(src), Operand::Register(dst)) if is_xmm_or_ymm(&src.name) && is_xmm_or_ymm(&dst.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                self.emit_vex(r, false, b, 1, 0, 0, l, pp);  // mm=1 (0F), vvvv=0
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            (Operand::Memory(mem), Operand::Register(dst)) if is_xmm_or_ymm(&dst.name) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                self.emit_vex(r, x, b_ext, 1, 0, 0, l, pp);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            _ => Err("unsupported AVX 2-op operands".to_string()),
+        }
+    }
+
+    /// Encode AVX scalar comparison (vcmpss/vcmpsd) with F3/F2 prefix
+    /// pp: 2=F3 (vcmpss), 3=F2 (vcmpsd)
+    fn encode_avx_cmp_scalar(&mut self, ops: &[Operand], opcode: u8, pp: u8) -> Result<(), String> {
+        if ops.len() != 4 { return Err("AVX scalar cmp requires 4 operands (imm8, src, vvvv, dst)".to_string()); }
+        let l = 0; // LIG, use 128-bit
+
+        match (&ops[0], &ops[1], &ops[2], &ops[3]) {
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, false, b, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)?;
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            _ => Err("unsupported AVX scalar cmp operands".to_string()),
+        }
+    }
+
+    /// Encode AVX scalar 3-operand instruction (e.g. vmulss, vaddss)
+    /// pp: 2=F3 (single), 3=F2 (double)
+    fn encode_avx_scalar_3op(&mut self, ops: &[Operand], opcode: u8, pp: u8) -> Result<(), String> {
+        if ops.len() != 3 { return Err("AVX scalar 3-op requires 3 operands".to_string()); }
+        let l = 0; // LIG - always 128-bit for scalar
+
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Register(src), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, false, b, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            (Operand::Memory(mem), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            _ => Err("unsupported AVX scalar 3-op operands".to_string()),
+        }
+    }
+
+    /// Encode AVX scalar move (vmovss/vmovsd) - handles both 2-op (load/store) and 3-op (merge) forms
+    /// pp: 2=F3 (vmovss), 3=F2 (vmovsd)
+    fn encode_avx_scalar_mov(&mut self, ops: &[Operand], load_op: u8, store_op: u8, pp: u8) -> Result<(), String> {
+        match ops.len() {
+            2 => {
+                // 2-operand load/store form (no vvvv merge)
+                match (&ops[0], &ops[1]) {
+                    (Operand::Memory(mem), Operand::Register(dst)) if is_xmm_or_ymm(&dst.name) => {
+                        let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                        let r = needs_vex_ext(&dst.name);
+                        let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                        let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                        self.emit_vex(r, x, b_ext, 1, 0, 0, 0, pp); // vvvv=0, L=0
+                        self.bytes.push(load_op);
+                        self.encode_modrm_mem(dst_num, mem)
+                    }
+                    (Operand::Register(src), Operand::Memory(mem)) if is_xmm_or_ymm(&src.name) => {
+                        let src_num = reg_num(&src.name).ok_or("bad register")?;
+                        let r = needs_vex_ext(&src.name);
+                        let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                        let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                        self.emit_vex(r, x, b_ext, 1, 0, 0, 0, pp); // vvvv=0, L=0
+                        self.bytes.push(store_op);
+                        self.encode_modrm_mem(src_num, mem)
+                    }
+                    (Operand::Register(src), Operand::Register(dst)) if is_xmm_or_ymm(&src.name) && is_xmm_or_ymm(&dst.name) => {
+                        // reg-reg: use load form
+                        let src_num = reg_num(&src.name).ok_or("bad register")?;
+                        let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                        let r = needs_vex_ext(&dst.name);
+                        let b = needs_vex_ext(&src.name);
+                        self.emit_vex(r, false, b, 1, 0, 0, 0, pp);
+                        self.bytes.push(load_op);
+                        self.bytes.push(self.modrm(3, dst_num, src_num));
+                        Ok(())
+                    }
+                    _ => Err("unsupported AVX scalar mov 2-op operands".to_string()),
+                }
+            }
+            3 => {
+                // 3-operand merge form (VEX.NDS)
+                self.encode_avx_scalar_3op(ops, load_op, pp)
+            }
+            _ => Err("AVX scalar mov requires 2 or 3 operands".to_string()),
+        }
+    }
+
+    /// Encode AVX shuffle in 0F3A map (e.g. vpermilps, vpermilpd with immediate)
+    /// Format: VEX.128/256.66.0F3A opcode /r ib
+    fn encode_avx_shuffle_3a(&mut self, ops: &[Operand], opcode: u8, has_66: bool) -> Result<(), String> {
+        if ops.len() != 3 { return Err("AVX shuffle 3A requires 3 operands".to_string()); }
+        let l = self.vex_l_from_ops(ops);
+        let pp = if has_66 { 1 } else { 0 };
+
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                self.emit_vex(r, false, b, 3, 0, 0, l, pp); // mm=3 (0F3A), vvvv=0
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                self.emit_vex(r, x, b_ext, 3, 0, 0, l, pp);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)?;
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            _ => Err("unsupported AVX shuffle 3A operands".to_string()),
+        }
+    }
+
+    /// Parse SSE comparison predicate from pseudo-op mnemonic.
+    /// Returns (predicate, suffix) e.g. "cmpnleps" -> Some((6, "ps"))
+    fn parse_sse_cmp_pseudo(mnemonic: &str) -> Option<(u8, &str)> {
+        if !mnemonic.starts_with("cmp") { return None; }
+        let rest = &mnemonic[3..];
+        // Try to match a suffix (ps, pd, ss, sd)
+        let suffixes = ["ps", "pd", "ss", "sd"];
+        for suffix in &suffixes {
+            if rest.ends_with(suffix) {
+                let pred_str = &rest[..rest.len() - suffix.len()];
+                let pred = match pred_str {
+                    "eq" => 0,
+                    "lt" => 1,
+                    "le" => 2,
+                    "unord" => 3,
+                    "neq" => 4,
+                    "nlt" => 5,
+                    "nle" => 6,
+                    "ord" => 7,
+                    _ => continue,
+                };
+                return Some((pred, suffix));
+            }
+        }
+        None
+    }
+
+    /// Try to encode an SSE comparison pseudo-op (e.g. cmpnleps -> cmpps $6, src, dst)
+    fn try_encode_sse_cmp_pseudo(&mut self, ops: &[Operand], mnemonic: &str) -> Result<Option<()>, String> {
+        let (pred, suffix) = match Self::parse_sse_cmp_pseudo(mnemonic) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let opcode: &[u8] = match suffix {
+            "ps" => &[0x0F, 0xC2],
+            "pd" => &[0x66, 0x0F, 0xC2],
+            "ss" => &[0xF3, 0x0F, 0xC2],
+            "sd" => &[0xF2, 0x0F, 0xC2],
+            _ => return Ok(None),
+        };
+        if ops.len() != 2 {
+            return Err(format!("{} requires 2 operands", mnemonic));
+        }
+        // Encode as the base instruction with an implicit immediate predicate
+        match (&ops[0], &ops[1]) {
+            (Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
+                for &b in &opcode[..prefix_len] {
+                    self.bytes.push(b);
+                }
+                self.emit_rex_rr(0, &dst.name, &src.name);
+                self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(pred);
+                Ok(Some(()))
+            }
+            (Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
+                for &b in &opcode[..prefix_len] {
+                    self.bytes.push(b);
+                }
+                self.emit_rex_rm(0, &dst.name, mem);
+                self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                self.encode_modrm_mem(dst_num, mem)?;
+                self.bytes.push(pred);
+                Ok(Some(()))
+            }
+            _ => Err(format!("unsupported {} operands", mnemonic)),
+        }
+    }
+
+    /// Parse AVX comparison predicate from pseudo-op mnemonic.
+    /// Returns (predicate, suffix) e.g. "vcmpnleps" -> Some((6, "ps"))
+    fn parse_avx_cmp_pseudo(mnemonic: &str) -> Option<(u8, &str)> {
+        if !mnemonic.starts_with("vcmp") { return None; }
+        let rest = &mnemonic[4..];
+        let suffixes = ["ps", "pd", "ss", "sd"];
+        for suffix in &suffixes {
+            if rest.ends_with(suffix) {
+                let pred_str = &rest[..rest.len() - suffix.len()];
+                let pred = match pred_str {
+                    "eq" => 0,
+                    "lt" => 1,
+                    "le" => 2,
+                    "unord" => 3,
+                    "neq" => 4,
+                    "nlt" => 5,
+                    "nle" => 6,
+                    "ord" => 7,
+                    // AVX extended predicates (8-31)
+                    "eq_uq" => 8,
+                    "nge" => 9,
+                    "ngt" => 10,
+                    "false" => 11,
+                    "neq_oq" => 12,
+                    "ge" => 13,
+                    "gt" => 14,
+                    "true" => 15,
+                    "eq_os" => 16,
+                    "lt_oq" => 17,
+                    "le_oq" => 18,
+                    "unord_s" => 19,
+                    "neq_us" => 20,
+                    "nlt_uq" => 21,
+                    "nle_uq" => 22,
+                    "ord_s" => 23,
+                    "eq_us" => 24,
+                    "nge_uq" => 25,
+                    "ngt_uq" => 26,
+                    "false_os" => 27,
+                    "neq_os" => 28,
+                    "ge_oq" => 29,
+                    "gt_oq" => 30,
+                    "true_us" => 31,
+                    _ => continue,
+                };
+                return Some((pred, suffix));
+            }
+        }
+        None
+    }
+
+    /// Try to encode an AVX comparison pseudo-op (e.g. vcmpnleps -> vcmpps $6, src, vvvv, dst)
+    fn try_encode_avx_cmp_pseudo(&mut self, ops: &[Operand], mnemonic: &str) -> Result<Option<()>, String> {
+        let (pred, suffix) = match Self::parse_avx_cmp_pseudo(mnemonic) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        // AVX pseudo-ops take 3 operands: src, vvvv, dst (no explicit immediate)
+        if ops.len() != 3 {
+            return Err(format!("{} requires 3 operands", mnemonic));
+        }
+        let (has_66, pp_scalar) = match suffix {
+            "ps" => (false, None),
+            "pd" => (true, None),
+            "ss" => (false, Some(2u8)), // F3
+            "sd" => (false, Some(3u8)), // F2
+            _ => return Ok(None),
+        };
+
+        let l = self.vex_l_from_ops(ops);
+        let pp = match pp_scalar {
+            Some(p) => p,
+            None => if has_66 { 1 } else { 0 },
+        };
+
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Register(src), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, false, b, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(0xC2);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(pred);
+                Ok(Some(()))
+            }
+            (Operand::Memory(mem), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
+                self.bytes.push(0xC2);
+                self.encode_modrm_mem(dst_num, mem)?;
+                self.bytes.push(pred);
+                Ok(Some(()))
+            }
+            _ => Err(format!("unsupported {} operands", mnemonic)),
         }
     }
 

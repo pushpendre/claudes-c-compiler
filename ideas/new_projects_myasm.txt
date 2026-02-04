@@ -218,3 +218,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | vec     | PASS | PASS | PASS | PASS | All architectures pass |
 | hdiffpatch | PASS | PASS | FAIL (ARM NEON vrev32q_u8) | PASS | Added SSSE3 _mm_alignr_epi8, SHA-NI intrinsics (sha256rnds2/msg1/msg2), BMI2 _bzhi_u64/_bzhi_u32, i686 xgetbv instruction |
 | Icon    | PASS | TODO | TODO | TODO | Fixed x86: added section headers to linker executables (needed for strip command) |
+| libmpg123 | PASS | TODO | TODO | TODO | Fixed x86 asm: added SSE/AVX cmp pseudo-ops (cmpnleps/vcmpnleps), vmovlhps, vmovddup, vmulss, vmovss, vpermilps, vextractf128, vcvtps2dq; fixed parser for constant+symbol displacement (32+maxmin_avx) |

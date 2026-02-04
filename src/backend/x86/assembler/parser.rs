@@ -1033,16 +1033,30 @@ fn try_parse_symbol_plus_offset(s: &str) -> Option<Displacement> {
     // Skip the first character to avoid splitting on leading sign/dot.
     for (i, c) in s.char_indices().skip(1) {
         if c == '+' || c == '-' {
-            let sym = s[..i].trim();
-            let offset_str = s[i..].trim(); // includes the + or -
-            if sym.is_empty() {
+            let left = s[..i].trim();
+            let right_with_sign = s[i..].trim(); // includes the + or -
+            if left.is_empty() {
                 continue;
             }
-            // The offset part must be parseable as an integer
-            if let Ok(offset) = parse_integer_expr(offset_str) {
-                // Make sure the symbol part looks like a valid symbol name
-                if sym.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$') {
-                    return Some(Displacement::SymbolPlusOffset(sym.to_string(), offset));
+
+            let is_valid_sym = |s: &str| -> bool {
+                !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$')
+            };
+
+            // Case 1: symbol+offset (e.g. "maxmin_avx+32")
+            if let Ok(offset) = parse_integer_expr(right_with_sign) {
+                if is_valid_sym(left) {
+                    return Some(Displacement::SymbolPlusOffset(left.to_string(), offset));
+                }
+            }
+
+            // Case 2: offset+symbol (e.g. "32+maxmin_avx") - only for '+'
+            if c == '+' {
+                if let Ok(offset) = parse_integer_expr(left) {
+                    let sym = right_with_sign[1..].trim(); // skip the '+'
+                    if is_valid_sym(sym) {
+                        return Some(Displacement::SymbolPlusOffset(sym.to_string(), offset));
+                    }
                 }
             }
         }
