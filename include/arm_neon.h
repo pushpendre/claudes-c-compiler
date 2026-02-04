@@ -1883,6 +1883,51 @@ vld4q_u8(unsigned char const *__p)
 }
 
 /* ================================================================== */
+/*          REINTERPRET CASTS: signed <-> unsigned                     */
+/* ================================================================== */
+
+/* vreinterpretq_u8_s16: reinterpret int16x8_t as uint8x16_t */
+static __inline__ uint8x16_t __attribute__((__always_inline__))
+vreinterpretq_u8_s16(int16x8_t __a)
+{
+    uint8x16_t __ret;
+    __builtin_memcpy(&__ret, &__a, 16);
+    return __ret;
+}
+
+/* vreinterpretq_s16_u8: reinterpret uint8x16_t as int16x8_t */
+static __inline__ int16x8_t __attribute__((__always_inline__))
+vreinterpretq_s16_u8(uint8x16_t __a)
+{
+    int16x8_t __ret;
+    __builtin_memcpy(&__ret, &__a, 16);
+    return __ret;
+}
+
+/* vreinterpretq_u8_s32: reinterpret int32x4_t as uint8x16_t */
+static __inline__ uint8x16_t __attribute__((__always_inline__))
+vreinterpretq_u8_s32(int32x4_t __a)
+{
+    uint8x16_t __ret;
+    __builtin_memcpy(&__ret, &__a, 16);
+    return __ret;
+}
+
+/* ================================================================== */
+/*          DUPLICATE (BROADCAST): signed types                        */
+/* ================================================================== */
+
+/* vdupq_n_s16: broadcast signed 16-bit value into all 8 lanes */
+static __inline__ int16x8_t __attribute__((__always_inline__))
+vdupq_n_s16(short __a)
+{
+    int16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++)
+        __ret.__val[__i] = __a;
+    return __ret;
+}
+
+/* ================================================================== */
 /*           HORIZONTAL REDUCTION OPERATIONS                           */
 /* ================================================================== */
 
@@ -1914,6 +1959,30 @@ vmaxvq_u32(uint32x4_t __a)
     for (int __i = 1; __i < 4; __i++)
         if (__a.__val[__i] > __ret) __ret = __a.__val[__i];
     return __ret;
+}
+
+/* vmaxvq_s16: horizontal max across int16x8_t */
+static __inline__ short __attribute__((__always_inline__))
+vmaxvq_s16(int16x8_t __a)
+{
+    short __max = __a.__val[0];
+    for (int __i = 1; __i < 8; __i++) {
+        if (__a.__val[__i] > __max)
+            __max = __a.__val[__i];
+    }
+    return __max;
+}
+
+/* vmaxvq_u16: horizontal max across uint16x8_t */
+static __inline__ unsigned short __attribute__((__always_inline__))
+vmaxvq_u16(uint16x8_t __a)
+{
+    unsigned short __max = __a.__val[0];
+    for (int __i = 1; __i < 8; __i++) {
+        if (__a.__val[__i] > __max)
+            __max = __a.__val[__i];
+    }
+    return __max;
 }
 
 /* ================================================================== */
@@ -1965,5 +2034,52 @@ vceqq_u16(uint16x8_t __a, uint16x8_t __b)
         __ret.__val[__i] = (__a.__val[__i] == __b.__val[__i]) ? 0xFFFF : 0x0000;
     return __ret;
 }
+
+/* vqaddq_s16: saturating add int16x8_t */
+static __inline__ int16x8_t __attribute__((__always_inline__))
+vqaddq_s16(int16x8_t __a, int16x8_t __b)
+{
+    int16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++) {
+        int __sum = (int)__a.__val[__i] + (int)__b.__val[__i];
+        if (__sum > 32767) __sum = 32767;
+        else if (__sum < -32768) __sum = -32768;
+        __ret.__val[__i] = (short)__sum;
+    }
+    return __ret;
+}
+
+/* vqsubq_u16: saturating subtract uint16x8_t */
+static __inline__ uint16x8_t __attribute__((__always_inline__))
+vqsubq_u16(uint16x8_t __a, uint16x8_t __b)
+{
+    uint16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++) {
+        int __diff = (int)__a.__val[__i] - (int)__b.__val[__i];
+        __ret.__val[__i] = __diff < 0 ? 0 : (unsigned short)__diff;
+    }
+    return __ret;
+}
+
+/* vcgtq_s16: compare greater-than int16x8_t -> uint16x8_t mask */
+static __inline__ uint16x8_t __attribute__((__always_inline__))
+vcgtq_s16(int16x8_t __a, int16x8_t __b)
+{
+    uint16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++)
+        __ret.__val[__i] = (__a.__val[__i] > __b.__val[__i]) ? 0xFFFF : 0x0000;
+    return __ret;
+}
+
+/* vmaxq_s16: element-wise maximum of int16x8_t */
+static __inline__ int16x8_t __attribute__((__always_inline__))
+vmaxq_s16(int16x8_t __a, int16x8_t __b)
+{
+    int16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++)
+        __ret.__val[__i] = __a.__val[__i] > __b.__val[__i] ? __a.__val[__i] : __b.__val[__i];
+    return __ret;
+}
+
 
 #endif /* _ARM_NEON_H_INCLUDED */

@@ -1,4 +1,0 @@
-Fix bwa project for ARM (and potentially riscv/i686).
-ARM fails with missing NEON intrinsics: vmaxq_s16, vmaxvq_s16, vmaxvq_u16, vmaxvq_u8, vqaddq_s16, vqaddq_u8, vqsubq_u16, vreinterpretq_s16_u8, vreinterpretq_u8_s16
-RISC-V: bwa mem aborts (core dump)
-i686: unknown failure (needs investigation)

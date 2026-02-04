@@ -611,7 +611,7 @@ The final phase writes the complete ELF executable:
    - `PT_LOAD` (RW): read-write segment
    - `PT_DYNAMIC`: dynamic section
    - `PT_NOTE`: note section (stub)
-   - `PT_GNU_EH_FRAME`: exception handling frame header (stub)
+   - `PT_GNU_EH_FRAME`: exception handling frame header (.eh_frame_hdr with binary search table)
    - `PT_GNU_STACK`: stack permissions (RW, no execute)
    - `PT_GNU_RELRO`: RELRO boundary for .dynamic/.got/init arrays
    - `PT_TLS`: thread-local storage segment (only if TLS sections exist)

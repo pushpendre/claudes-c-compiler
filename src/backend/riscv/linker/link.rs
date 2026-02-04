@@ -852,6 +852,24 @@ pub fn link_builtin(
         }
     }
 
+    // Create synthetic .eh_frame_hdr section (placeholder data, filled after relocations)
+    let eh_frame_hdr_fde_count = merged_map.get(".eh_frame")
+        .map(|&i| crate::backend::linker_common::count_eh_frame_fdes(&merged_sections[i].data))
+        .unwrap_or(0);
+    if eh_frame_hdr_fde_count > 0 {
+        let hdr_size = 12 + 8 * eh_frame_hdr_fde_count;
+        let idx = merged_sections.len();
+        merged_map.insert(".eh_frame_hdr".into(), idx);
+        merged_sections.push(MergedSection {
+            name: ".eh_frame_hdr".into(),
+            sh_type: SHT_PROGBITS,
+            sh_flags: SHF_ALLOC,
+            data: vec![0u8; hdr_size],
+            vaddr: 0,
+            align: 4,
+        });
+    }
+
     // ── Phase 4: Layout sections and assign virtual addresses ───────────
 
     // Sort sections by canonical order
@@ -2145,23 +2163,21 @@ pub fn link_builtin(
         dynamic_data.resize(dynamic_size as usize, 0);
     }
 
-    // ── Phase 11: Build .eh_frame_hdr ───────────────────────────────────
+    // ── Phase 11: Build .eh_frame_hdr from relocated .eh_frame data ─────
 
-    // Simple .eh_frame_hdr: just a header with no FDE table
-    // (sufficient for basic execution, won't support C++ exceptions)
-    let eh_frame_vaddr = merged_map.get(".eh_frame")
-        .map(|&i| section_vaddrs[i])
-        .unwrap_or(0);
-    let _eh_frame_hdr_data = if eh_frame_vaddr > 0 {
-        let mut hdr = vec![1, 0x1b, 0x03, 0x3b];
-        // eh_frame_ptr: will be patched with offset
-        hdr.extend_from_slice(&0i32.to_le_bytes()); // placeholder
-        // fde_count
-        hdr.extend_from_slice(&0u32.to_le_bytes());
-        hdr
-    } else {
-        Vec::new()
-    };
+    if let (Some(&hdr_idx), Some(&ef_idx)) = (merged_map.get(".eh_frame_hdr"), merged_map.get(".eh_frame")) {
+        let eh_frame_vaddr = section_vaddrs[ef_idx];
+        let eh_frame_hdr_vaddr = section_vaddrs[hdr_idx];
+        let hdr_data = crate::backend::linker_common::build_eh_frame_hdr(
+            &merged_sections[ef_idx].data,
+            eh_frame_vaddr,
+            eh_frame_hdr_vaddr,
+            true, // 64-bit
+        );
+        if !hdr_data.is_empty() {
+            merged_sections[hdr_idx].data = hdr_data;
+        }
+    }
 
     // ── Phase 12: Find entry point ──────────────────────────────────────
 
@@ -2244,8 +2260,14 @@ pub fn link_builtin(
     // NOTE (dummy - for .note.ABI-tag if present)
     write_phdr(&mut elf, PT_NOTE, PF_R, 0, 0, 0, 0, 0, 4);
 
-    // GNU_EH_FRAME (dummy for now)
-    write_phdr(&mut elf, PT_GNU_EH_FRAME, PF_R, 0, 0, 0, 0, 0, 4);
+    // GNU_EH_FRAME
+    if let Some(&hdr_idx) = merged_map.get(".eh_frame_hdr") {
+        let sz = merged_sections[hdr_idx].data.len() as u64;
+        write_phdr(&mut elf, PT_GNU_EH_FRAME, PF_R, section_offsets[hdr_idx],
+                   section_vaddrs[hdr_idx], section_vaddrs[hdr_idx], sz, sz, 4);
+    } else {
+        write_phdr(&mut elf, PT_GNU_EH_FRAME, PF_R, 0, 0, 0, 0, 0, 4);
+    }
 
     // GNU_STACK
     write_phdr(&mut elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0, 0x10);

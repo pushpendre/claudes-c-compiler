@@ -3000,7 +3000,7 @@ fn emit_executable(
     // Layout: Single RX LOAD segment from file offset 0 (ELF hdr + phdrs + text + rodata),
     // followed by a RW LOAD segment for data + bss, plus TLS and GNU_STACK phdrs.
     let has_tls = output_sections.iter().any(|s| s.flags & SHF_TLS != 0 && s.mem_size > 0);
-    let phdr_count: u64 = 2 + if has_tls { 1 } else { 0 } + 1; // 2 LOAD + optional TLS + GNU_STACK
+    let phdr_count: u64 = 2 + if has_tls { 1 } else { 0 } + 1 + 1; // 2 LOAD + optional TLS + GNU_STACK + GNU_EH_FRAME
     let phdr_total_size = phdr_count * 56;
     let debug_layout = std::env::var("LINKER_DEBUG_LAYOUT").is_ok();
 
@@ -3034,6 +3034,43 @@ fn emit_executable(
             offset += sec.mem_size;
         }
     }
+
+    // Build .eh_frame_hdr: find .eh_frame, count FDEs, reserve space
+    let mut eh_frame_hdr_vaddr = 0u64;
+    let mut eh_frame_hdr_offset = 0u64;
+    let mut eh_frame_hdr_size = 0u64;
+    let mut eh_frame_vaddr = 0u64;
+    let mut eh_frame_file_offset = 0u64;
+    let mut eh_frame_size = 0u64;
+    for sec in output_sections.iter() {
+        if sec.name == ".eh_frame" && sec.mem_size > 0 {
+            eh_frame_vaddr = sec.addr;
+            eh_frame_file_offset = sec.file_offset;
+            eh_frame_size = sec.mem_size;
+            break;
+        }
+    }
+    if eh_frame_size > 0 {
+        // Count FDEs from individual input .eh_frame sections (data not merged yet)
+        let mut fde_count = 0usize;
+        if let Some(ef_sec) = output_sections.iter().find(|s| s.name == ".eh_frame" && s.mem_size > 0) {
+            for input in &ef_sec.inputs {
+                let sd = &objects[input.object_idx].section_data[input.section_idx];
+                fde_count += crate::backend::linker_common::count_eh_frame_fdes(sd);
+            }
+        }
+        eh_frame_hdr_size = (12 + 8 * fde_count) as u64;
+        // Align to 4 bytes
+        offset = (offset + 3) & !3;
+        eh_frame_hdr_offset = offset;
+        eh_frame_hdr_vaddr = BASE_ADDR + offset;
+        offset += eh_frame_hdr_size;
+        if debug_layout {
+            eprintln!("  LAYOUT EH_FRAME_HDR: addr=0x{:x} foff=0x{:x} sz=0x{:x} fde_count={}",
+                eh_frame_hdr_vaddr, eh_frame_hdr_offset, eh_frame_hdr_size, fde_count);
+        }
+    }
+
     let rx_filesz = offset; // RX segment: [0, rx_filesz)
     let _rx_memsz = rx_filesz;
 
@@ -3347,7 +3384,7 @@ fn emit_executable(
     }
     // ARM-specific linker symbols not in the shared list
     let arm_extra_syms: [(&str, u64); 3] = [
-        ("__GNU_EH_FRAME_HDR", 0),
+        ("__GNU_EH_FRAME_HDR", eh_frame_hdr_vaddr),
         ("_init", init_addr),
         ("_fini", fini_addr),
     ];
@@ -3487,6 +3524,25 @@ fn emit_executable(
     reloc::apply_relocations(objects, &globals_snap, output_sections, section_map,
                              &mut out, &tls_info, &got_info)?;
 
+    // Build .eh_frame_hdr from relocated .eh_frame data and write it
+    if eh_frame_hdr_size > 0 && eh_frame_size > 0 {
+        let ef_start = eh_frame_file_offset as usize;
+        let ef_end = ef_start + eh_frame_size as usize;
+        if ef_end <= out.len() {
+            let eh_frame_relocated = out[ef_start..ef_end].to_vec();
+            let hdr_data = crate::backend::linker_common::build_eh_frame_hdr(
+                &eh_frame_relocated,
+                eh_frame_vaddr,
+                eh_frame_hdr_vaddr,
+                true, // 64-bit
+            );
+            let hdr_off = eh_frame_hdr_offset as usize;
+            if !hdr_data.is_empty() && hdr_off + hdr_data.len() <= out.len() {
+                write_bytes(&mut out, hdr_off, &hdr_data);
+            }
+        }
+    }
+
     // === ELF header ===
     out[0..4].copy_from_slice(&ELF_MAGIC);
     out[4] = ELFCLASS64; out[5] = ELFDATA2LSB; out[6] = 1;
@@ -3529,6 +3585,11 @@ fn emit_executable(
 
     // GNU_STACK
     wphdr(&mut out, ph, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0x10);
+    ph += 56;
+
+    // PT_GNU_EH_FRAME: points to .eh_frame_hdr for stack unwinding
+    wphdr(&mut out, ph, PT_GNU_EH_FRAME, PF_R,
+          eh_frame_hdr_offset, eh_frame_hdr_vaddr, eh_frame_hdr_size, eh_frame_hdr_size, 4);
 
     // Write output
     std::fs::write(output_path, &out).map_err(|e| format!("failed to write '{}': {}", output_path, e))?;

@@ -1083,6 +1083,7 @@ fn emit_executable(
     num_phdrs += 4; // LOAD x4 (headers, text, rodata, data)
     if !is_static { num_phdrs += 1; } // DYNAMIC
     num_phdrs += 1; // GNU_STACK
+    num_phdrs += 1; // GNU_EH_FRAME
     if has_tls_sections { num_phdrs += 1; }
 
     let phdrs_total_size = num_phdrs * phdr_size;
@@ -1256,13 +1257,31 @@ fn emit_executable(
         vaddr += output_sections[idx].data.len() as u32;
     }
 
-    if let Some(idx) = section_name_to_idx.get(".eh_frame").copied() {
+    let eh_frame_sec_idx = section_name_to_idx.get(".eh_frame").copied();
+    if let Some(idx) = eh_frame_sec_idx {
         let a = output_sections[idx].align.max(4);
         file_offset = align_up(file_offset, a); vaddr = align_up(vaddr, a);
         output_sections[idx].addr = vaddr;
         output_sections[idx].file_offset = file_offset;
         file_offset += output_sections[idx].data.len() as u32;
         vaddr += output_sections[idx].data.len() as u32;
+    }
+
+    // Build .eh_frame_hdr: count FDEs and reserve space after .eh_frame
+    let mut eh_frame_hdr_vaddr = 0u32;
+    let mut eh_frame_hdr_offset = 0u32;
+    let mut eh_frame_hdr_size = 0u32;
+    if let Some(idx) = eh_frame_sec_idx {
+        let fde_count = crate::backend::linker_common::count_eh_frame_fdes(&output_sections[idx].data);
+        if fde_count > 0 {
+            eh_frame_hdr_size = (12 + 8 * fde_count) as u32;
+            file_offset = align_up(file_offset, 4);
+            vaddr = align_up(vaddr, 4);
+            eh_frame_hdr_offset = file_offset;
+            eh_frame_hdr_vaddr = vaddr;
+            file_offset += eh_frame_hdr_size;
+            vaddr += eh_frame_hdr_size;
+        }
     }
 
     let rodata_seg_file_end = file_offset;
@@ -1445,6 +1464,23 @@ fn emit_executable(
         reloc::apply_relocations(inputs, &mut reloc_ctx)?;
     }
 
+    // Build .eh_frame_hdr from relocated .eh_frame data
+    let eh_frame_hdr_data = if eh_frame_hdr_size > 0 {
+        if let Some(idx) = eh_frame_sec_idx {
+            let sec = &output_sections[idx];
+            crate::backend::linker_common::build_eh_frame_hdr(
+                &sec.data,
+                sec.addr as u64,
+                eh_frame_hdr_vaddr as u64,
+                false, // 32-bit
+            )
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     // ── Build GOT data ───────────────────────────────────────────────────
     let mut got_data: Vec<u8> = Vec::new();
     if needs_got_section {
@@ -1618,6 +1654,9 @@ fn emit_executable(
             dynamic_data.len() as u32, dynamic_data.len() as u32, PF_R | PF_W, 4);
     }
     write_ph(&mut output, &mut phdr_pos, PT_GNU_STACK, 0, 0, 0, 0, PF_R | PF_W, 0x10);
+    write_ph(&mut output, &mut phdr_pos, PT_GNU_EH_FRAME,
+        eh_frame_hdr_offset, eh_frame_hdr_vaddr,
+        eh_frame_hdr_size, eh_frame_hdr_size, PF_R, 4);
     if has_tls {
         write_ph(&mut output, &mut phdr_pos, PT_TLS, tls_file_offset, tls_addr,
             tls_file_size, tls_mem_size, PF_R, tls_align);
@@ -1648,6 +1687,11 @@ fn emit_executable(
     write_data(&mut output, iplt_offset, &iplt_data);
     write_data(&mut output, ifunc_got_offset, &ifunc_got_data);
     write_data(&mut output, rel_iplt_offset, &rel_iplt_data);
+
+    // Write .eh_frame_hdr
+    if !eh_frame_hdr_data.is_empty() && eh_frame_hdr_offset > 0 {
+        write_data(&mut output, eh_frame_hdr_offset, &eh_frame_hdr_data);
+    }
 
     // Write all output sections
     for sec in output_sections.iter() {
