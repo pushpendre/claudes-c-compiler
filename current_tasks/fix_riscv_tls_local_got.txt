@@ -1,0 +1,13 @@
+Fix RISC-V builtin linker: local TLS GOT entries incorrectly default to 0.
+
+When a TLS_GOT_HI20 relocation references a local symbol (like .LANCHOR0 in glibc's
+ctype-info.o), the GOT entry value defaults to 0 because local symbols are not in
+global_syms. This causes __ctype_init to write ctype pointers to wrong TLS offsets,
+leaving the actual __libc_tsd_CTYPE_B/TOLOWER/TOUPPER variables as NULL.
+
+This affects any printf with %f/%e/%g format specifiers (and likely other locale-sensitive
+operations), causing ~600 test failures (24% of RISC-V tests) with MY_LD=builtin.
+
+The same bug likely exists in the x86, ARM, and i686 linkers.
+
+Fix: properly track and resolve local TLS symbol addresses for GOT entry computation.
