@@ -1,7 +1,0 @@
-Fix missing assembler instructions across all architectures:
-
-ARM: cas, stnp, mneg, mvni, rbit (v.16b), swp + NEON encoding fixes (BSL, EXT, MOVI .2d, SSHR, USHR)
-x86: vinserti128, cmovc, movntiq, vpcmpgtb, vpxord, movlps, haddps, movhps, indirect call
-RISC-V: .insn directive support
-
-Also fix NEON encoding bugs in ARM assembler for BSL, EXT, MOVI, SSHR, USHR operations.
