@@ -20,7 +20,7 @@ pub enum ExternalDecl {
 /// specifiers (static, inline, extern) and GCC __attribute__((...)) syntax.
 ///
 /// Boolean attributes are stored as a packed bitfield (`flags`) for memory
-/// efficiency — 10 booleans collapse from 10 bytes into 2 bytes. Accessor
+/// efficiency — 13 booleans collapse from 13 bytes into 2 bytes. Accessor
 /// methods provide the same API as the old struct fields.
 ///
 /// Non-boolean attributes (`section`, `visibility`) remain as `Option<String>`.
@@ -198,7 +198,7 @@ pub mod decl_flag {
 /// A variable/type declaration.
 ///
 /// Boolean storage-class / qualifier / attribute flags are stored as a packed
-/// bitfield (`flags`) for memory efficiency — 8 booleans collapse from 8 bytes
+/// bitfield (`flags`) for memory efficiency — 9 booleans collapse from 9 bytes
 /// into 2 bytes.  Accessor methods provide the same API as the old struct
 /// fields.
 #[derive(Clone)]

@@ -87,7 +87,7 @@ The lexer recognizes a broad set of GCC built-in keywords:
 | `GnuLabel` | `__label__` |
 | `SegGs` / `SegFs` | `__seg_gs` / `__seg_fs` |
 
-Double-underscore forms are always recognized. The bare forms `typeof` and `asm` are only keywords when `gnu_extensions` is enabled (the default); in strict standard mode (`-std=c99` etc.) they fall through as ordinary identifiers.
+Double-underscore forms are always recognized. The bare form `typeof` is always recognized as a keyword (matching GCC/Clang behavior). The bare form `asm` is only a keyword when `gnu_extensions` is enabled (the default); in strict standard mode (`-std=c99` etc.) it falls through as an ordinary identifier.
 
 GCC-style qualifier aliases (`__const__`, `__volatile__`, `__inline__`, `__restrict__`, `__signed__`, `__complex__`, `__noreturn__`, `__thread`) map to their standard C counterparts.
 

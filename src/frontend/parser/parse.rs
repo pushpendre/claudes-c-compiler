@@ -107,7 +107,7 @@ pub(super) mod parsed_attr_flag {
 /// and making the "set then consume" lifecycle explicit.
 ///
 /// Boolean attributes are stored as a packed bitfield (`flags`) for memory
-/// efficiency — 18 booleans collapse from 18 bytes into 4 bytes. Accessor
+/// efficiency — 19 booleans collapse from 19 bytes into 4 bytes. Accessor
 /// methods provide the same API as the old struct fields.
 #[derive(Default)]
 pub(super) struct ParsedDeclAttrs {

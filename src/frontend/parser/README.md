@@ -60,13 +60,13 @@ several properties of the C grammar:
 ## Module Organization
 
 The `Parser` struct is defined once in `parse.rs`, but its methods are spread
-across five files via separate `impl Parser` blocks.  Each file is a private
+across six files via separate `impl Parser` blocks.  Each file is a private
 module that adds domain-specific parsing methods:
 
 ```
 parser/
   mod.rs            -- Module declarations; re-exports Parser
-  parse.rs         -- Parser struct, constructor, token helpers, entry point
+  parse.rs          -- Parser struct, constructor, token helpers, entry point
   expressions.rs    -- Expression parsing (precedence climbing)
   types.rs          -- Type specifier collection and resolution
   declarations.rs   -- External and local declarations, initializers, function defs
@@ -84,7 +84,7 @@ This split keeps each file focused on one aspect of the grammar.  The type
 specifier parser (`types.rs`) handles the combinatorial complexity of C's
 type keywords; the declarator parser (`declarators.rs`) handles the recursive
 inside-out syntax; the expression parser (`expressions.rs`) handles operator
-precedence; and so on.  Despite spanning five files, there is a single `Parser`
+precedence; and so on.  Despite spanning six files, there is a single `Parser`
 struct with a single token stream and a single parse position -- no separate
 sub-parsers or intermediate representations.
 
@@ -175,8 +175,8 @@ enum PrecedenceLevel {
 }
 ```
 
-The `token_to_binop` function maps a `(TokenKind, PrecedenceLevel)` pair to an
-optional `BinOp`.  The shared loop in `parse_binary_expr` repeatedly:
+The `token_to_binop` method on `Parser` maps a `(&TokenKind, PrecedenceLevel)`
+pair to an optional `BinOp`.  The shared loop in `parse_binary_expr` repeatedly:
 
 1. Parses the next-tighter level via `parse_next_tighter`.
 2. Checks if the current token maps to an operator at this level.
@@ -343,13 +343,13 @@ parser in `types.rs` handles this by collecting boolean flags into a
 ```rust
 struct TypeSpecFlags {
     has_void: bool,
+    has_bool: bool,
+    has_float: bool,
+    has_double: bool,
+    has_complex: bool,
     has_char: bool,
     has_short: bool,
     has_int: bool,
-    has_float: bool,
-    has_double: bool,
-    has_bool: bool,
-    has_complex: bool,
     has_unsigned: bool,
     has_signed: bool,
     has_struct: bool,
@@ -455,8 +455,8 @@ designators `[lo ... hi]`), and the transfer of accumulated GCC attributes
 to per-declarator `DeclAttributes`.
 
 A `DeclContext` struct groups per-declaration attribute state (alignment,
-`_Alignas` type, common flag, per-declarator attributes) to avoid passing
-15+ individual parameters between `parse_external_decl` and
+`_Alignas` type, common flag, per-declarator attributes) to avoid threading
+many individual parameters between `parse_external_decl` and
 `parse_declaration_rest`.
 
 When a `typedef` declaration is parsed, the declared names are added to the
@@ -484,6 +484,7 @@ The statement parser in `statements.rs` handles all C statement forms:
 
 | Statement | AST variant |
 |---|---|
+| `expr;` (expression statement) | `Stmt::Expr` |
 | `return expr;` | `Stmt::Return` |
 | `if (cond) then else` | `Stmt::If` |
 | `while (cond) body` | `Stmt::While` |
@@ -604,25 +605,31 @@ Also carries alignment overrides, address space qualifiers (`__seg_gs`,
 A large enum covering all C type forms:
 
 - **Primitive types:** `Void`, `Char`, `Short`, `Int`, `Long`, `LongLong`,
-  `Float`, `Double`, `LongDouble`, `Bool`, `Int128`
+  `Float`, `Double`, `LongDouble`, `Signed`, `Unsigned`, `Bool`, `Int128`
 - **Unsigned variants:** `UnsignedChar` through `UnsignedInt128`
 - **Complex types:** `ComplexFloat`, `ComplexDouble`, `ComplexLongDouble`
 - **Aggregate types:** `Struct(name, fields, packed, pragma_pack, aligned)`,
   `Union(...)`, `Enum(name, variants, packed)`
 - **Derived types:** `Pointer(inner, address_space)`, `Array(inner, size)`,
-  `FunctionPointer(ret, params, variadic)`, `BareFunction(...)`
+  `FunctionPointer(ret, params, variadic)`, `BareFunction(ret, params, variadic)`
 - **Name-based:** `TypedefName(String)`
 - **Deferred:** `Typeof(Expr)`, `TypeofType(TypeSpecifier)`, `AutoType`
 
+Note: `Signed` and `Unsigned` are standalone variants that exist for
+completeness in type resolution but are not currently emitted by the parser
+(they are resolved into their concrete forms like `Int` or `UnsignedInt`
+during `resolve_type_flags`).
+
 ### `Expr`
 
-The expression enum has over 30 variants covering:
+The expression enum has 43 variants covering:
 
 - **Literals:** `IntLiteral`, `UIntLiteral`, `LongLiteral`, `ULongLiteral`,
   `LongLongLiteral`, `ULongLongLiteral`, `FloatLiteral`, `FloatLiteralF32`,
   `FloatLiteralLongDouble` (with full 128-bit precision bytes), `StringLiteral`,
-  `WideStringLiteral`, `Char16StringLiteral`, `CharLiteral`, and imaginary
-  literal variants for `_Complex` support
+  `WideStringLiteral`, `Char16StringLiteral`, `CharLiteral`,
+  `ImaginaryLiteral`, `ImaginaryLiteralF32`, `ImaginaryLiteralLongDouble`
+- **Names:** `Identifier`
 - **Operators:** `BinaryOp`, `UnaryOp`, `PostfixOp`, `Assign`,
   `CompoundAssign`
 - **Access:** `ArraySubscript`, `MemberAccess`, `PointerMemberAccess`,
@@ -644,10 +651,16 @@ downstream type-checking and constant-evaluation phases.
 ### `Stmt`
 
 Covers all C statement forms as described in the
-[Statement Parsing](#statement-parsing) section, including the GCC extension
-variants `CaseRange`, `GotoIndirect`, and `InlineAsm`.  Each statement
-variant that represents a control-flow construct carries a `Span` for source
-location, accessible via `Stmt::span()`.
+[Statement Parsing](#statement-parsing) section.  The full set of variants:
+
+- `Expr(Option<Expr>)` -- expression statement (the most common statement type)
+- `Return`, `If`, `While`, `DoWhile`, `For`, `Compound`
+- `Break`, `Continue`, `Switch`, `Case`, `Default`
+- `CaseRange` (GCC extension), `Goto`, `GotoIndirect` (GCC computed goto)
+- `Label`, `Declaration`, `InlineAsm`
+
+Each statement variant that represents a control-flow construct carries a `Span`
+for source location, accessible via `Stmt::span()`.
 
 ### `DerivedDeclarator`
 
@@ -737,13 +750,15 @@ encountering invalid input:
    continues from the current position, producing a potentially malformed but
    complete AST.
 
-2. **Contextual error messages.**  Three `expect` variants produce
+2. **Contextual error messages.**  Four `expect` variants produce
    increasingly specific diagnostics:
    - `expect(token)` -- generic: "expected `;` before `}`"
    - `expect_after(token, context)` -- positional: "expected `;` after return
-     statement"
+     statement" with a fix-it hint
+   - `expect_context(token, context)` -- contextual: "expected `(` after `if`"
+     with a fix-it hint
    - `expect_closing(token, open_span)` -- matching: "expected `)` before `;`"
-     with a note "to match this `(` at file.c:10:5"
+     with a note "to match this `(` at file.c:10:5" and a fix-it hint
 
 3. **Fix-it hints.**  Error diagnostics include insertion suggestions (e.g.,
    "insert `;`") that an IDE or error display could use to suggest corrections.
