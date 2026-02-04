@@ -181,7 +181,15 @@ impl InstructionEncoder {
 
         match mnemonic {
             // Data movement
-            "movq" => self.encode_mov(ops, 8),
+            "movq" => {
+                // Check if any operand is an XMM register - route to SSE movq
+                let has_xmm = ops.iter().any(|op| matches!(op, Operand::Register(r) if is_xmm(&r.name)));
+                if has_xmm {
+                    self.encode_movq_xmm(ops)
+                } else {
+                    self.encode_mov(ops, 8)
+                }
+            }
             "movl" => self.encode_mov(ops, 4),
             "movw" => self.encode_mov(ops, 2),
             "movb" => self.encode_mov(ops, 1),
@@ -351,6 +359,61 @@ impl InstructionEncoder {
             "punpckhwd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x69]),
             "pmovmskb" => self.encode_sse_cvt_xmm_to_gp(ops, &[0x66, 0x0F, 0xD7], 4),
 
+            // Additional SSE2 packed integer operations
+            "pcmpeqb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x74]),
+            "pcmpeqd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x76]),
+            "pcmpeqw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x75]),
+            "pand" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDB]),
+            "pandn" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDF]),
+            "por" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xEB]),
+            "pxor" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xEF]),
+            "psubusb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xD8]),
+            "psubusw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xD9]),
+            "psubsb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xE8]),
+            "psubsw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xE9]),
+            "paddusb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDC]),
+            "paddusw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDD]),
+            "paddsb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xEC]),
+            "paddsw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xED]),
+            "pmuludq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xF4]),
+            "pmullw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xD5]),
+            "pmulld" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x40]),
+            "pminub" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDA]),
+            "pmaxub" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xDE]),
+            "pminsd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x39]),
+            "pmaxsd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3D]),
+            "pavgb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xE0]),
+            "pavgw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xE3]),
+            "psadbw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xF6]),
+            "punpcklqdq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x6C]),
+            "punpckhqdq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x6D]),
+            "punpckldq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x62]),
+            "punpckhdq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x6A]),
+
+            // SSE packed float operations
+            "addpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x58]),
+            "subpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x5C]),
+            "mulpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x59]),
+            "divpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x5E]),
+            "addps" => self.encode_sse_op(ops, &[0x0F, 0x58]),
+            "subps" => self.encode_sse_op(ops, &[0x0F, 0x5C]),
+            "mulps" => self.encode_sse_op(ops, &[0x0F, 0x59]),
+            "divps" => self.encode_sse_op(ops, &[0x0F, 0x5E]),
+            "orpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x56]),
+            "orps" => self.encode_sse_op(ops, &[0x0F, 0x56]),
+            "andnpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x55]),
+            "andnps" => self.encode_sse_op(ops, &[0x0F, 0x55]),
+            "minsd" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x5D]),
+            "maxsd" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x5F]),
+            "minss" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x5D]),
+            "maxss" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x5F]),
+
+            // Additional SSE data movement
+            "movaps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x28], &[0x0F, 0x29]),
+            "movdqa" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x6F], &[0x66, 0x0F, 0x7F]),
+            "movlpd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x12], &[0x66, 0x0F, 0x13]),
+            "movhpd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x16], &[0x66, 0x0F, 0x17]),
+
             // SSE shifts with immediate
             "psllw" => self.encode_sse_shift(ops, &[0x66, 0x0F, 0xF1], 6, &[0x66, 0x0F, 0x71]),
             "psrlw" => self.encode_sse_shift(ops, &[0x66, 0x0F, 0xD1], 2, &[0x66, 0x0F, 0x71]),
@@ -393,6 +456,12 @@ impl InstructionEncoder {
             "movnti" => self.encode_movnti(ops),
             "movntdq" => self.encode_sse_store(ops, &[0x66, 0x0F, 0xE7]),
             "movntpd" => self.encode_sse_store(ops, &[0x66, 0x0F, 0x2B]),
+
+            // CRC32
+            "crc32b" => self.encode_crc32(ops, 1),
+            "crc32w" => self.encode_crc32(ops, 2),
+            "crc32l" => self.encode_crc32(ops, 4),
+            "crc32q" => self.encode_crc32(ops, 8),
 
             // x87 FPU
             "fldt" => self.encode_x87_mem(ops, &[0xDB], 5),
@@ -1807,6 +1876,144 @@ impl InstructionEncoder {
                 Ok(())
             }
             _ => Err("unsupported pextrX operands".to_string()),
+        }
+    }
+
+    // ---- MOVQ with XMM registers ----
+
+    /// Encode movq with XMM register operands.
+    /// Forms:
+    ///   movq %gp64, %xmm  -> 66 REX.W 0F 6E /r (GP -> XMM)
+    ///   movq %xmm, %gp64  -> 66 REX.W 0F 7E /r (XMM -> GP)
+    ///   movq mem, %xmm    -> F3 0F 7E /r (load 64-bit from memory)
+    ///   movq %xmm, mem    -> 66 0F D6 /r (store 64-bit to memory)
+    ///   movq %xmm, %xmm   -> F3 0F 7E /r (xmm-to-xmm)
+    fn encode_movq_xmm(&mut self, ops: &[Operand]) -> Result<(), String> {
+        if ops.len() != 2 {
+            return Err("movq requires 2 operands".to_string());
+        }
+        match (&ops[0], &ops[1]) {
+            // movq %gp64, %xmm -> 66 REX.W 0F 6E /r
+            (Operand::Register(src), Operand::Register(dst)) if !is_xmm(&src.name) && is_xmm(&dst.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.push(0x66);
+                // REX.W with proper R (dst xmm ext) and B (src gp ext)
+                let r = needs_rex_ext(&dst.name);
+                let b = needs_rex_ext(&src.name);
+                self.bytes.push(self.rex(true, r, false, b));
+                self.bytes.extend_from_slice(&[0x0F, 0x6E]);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            // movq %xmm, %gp64 -> 66 REX.W 0F 7E /r
+            (Operand::Register(src), Operand::Register(dst)) if is_xmm(&src.name) && !is_xmm(&dst.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.push(0x66);
+                // REX.W with proper R (src xmm ext) and B (dst gp ext)
+                let r = needs_rex_ext(&src.name);
+                let b = needs_rex_ext(&dst.name);
+                self.bytes.push(self.rex(true, r, false, b));
+                self.bytes.extend_from_slice(&[0x0F, 0x7E]);
+                self.bytes.push(self.modrm(3, src_num, dst_num));
+                Ok(())
+            }
+            // movq %xmm, %xmm -> F3 0F 7E /r
+            (Operand::Register(src), Operand::Register(dst)) if is_xmm(&src.name) && is_xmm(&dst.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.push(0xF3);
+                self.emit_rex_rr(0, &dst.name, &src.name);
+                self.bytes.extend_from_slice(&[0x0F, 0x7E]);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            // movq mem, %xmm -> F3 0F 7E /r (load)
+            (Operand::Memory(mem), Operand::Register(dst)) if is_xmm(&dst.name) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.push(0xF3);
+                self.emit_rex_rm(0, &dst.name, mem);
+                self.bytes.extend_from_slice(&[0x0F, 0x7E]);
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            // movq %xmm, mem -> 66 0F D6 /r (store)
+            (Operand::Register(src), Operand::Memory(mem)) if is_xmm(&src.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                self.bytes.push(0x66);
+                self.emit_rex_rm(0, &src.name, mem);
+                self.bytes.extend_from_slice(&[0x0F, 0xD6]);
+                self.encode_modrm_mem(src_num, mem)
+            }
+            _ => Err("unsupported movq operand combination".to_string()),
+        }
+    }
+
+    // ---- CRC32 encoding ----
+
+    /// Encode CRC32 instruction.
+    /// crc32b: F2 0F 38 F0 /r (8-bit source)
+    /// crc32w: 66 F2 0F 38 F1 /r (16-bit source)
+    /// crc32l: F2 0F 38 F1 /r (32-bit source)
+    /// crc32q: F2 REX.W 0F 38 F1 /r (64-bit source)
+    fn encode_crc32(&mut self, ops: &[Operand], src_size: u8) -> Result<(), String> {
+        if ops.len() != 2 {
+            return Err("crc32 requires 2 operands".to_string());
+        }
+        match (&ops[0], &ops[1]) {
+            (Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+
+                if src_size == 2 {
+                    self.bytes.push(0x66); // operand size prefix for 16-bit
+                }
+                self.bytes.push(0xF2); // mandatory prefix
+
+                // REX prefix
+                let w = src_size == 8;
+                let r = needs_rex_ext(&dst.name);
+                let b = needs_rex_ext(&src.name);
+                let need_rex = w || r || b || (src_size == 1 && is_rex_required_8bit(&src.name));
+                if need_rex {
+                    self.bytes.push(self.rex(w, r, false, b));
+                }
+
+                self.bytes.extend_from_slice(&[0x0F, 0x38]);
+                if src_size == 1 {
+                    self.bytes.push(0xF0);
+                } else {
+                    self.bytes.push(0xF1);
+                }
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            (Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+
+                if src_size == 2 {
+                    self.bytes.push(0x66);
+                }
+                self.bytes.push(0xF2);
+
+                let w = src_size == 8;
+                let r = needs_rex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+                let need_rex = w || r || b_ext || x;
+                if need_rex {
+                    self.bytes.push(self.rex(w, r, x, b_ext));
+                }
+
+                self.bytes.extend_from_slice(&[0x0F, 0x38]);
+                if src_size == 1 {
+                    self.bytes.push(0xF0);
+                } else {
+                    self.bytes.push(0xF1);
+                }
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            _ => Err("unsupported crc32 operands".to_string()),
         }
     }
 
