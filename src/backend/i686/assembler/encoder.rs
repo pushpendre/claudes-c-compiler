@@ -543,6 +543,162 @@ impl InstructionEncoder {
             "fsubrs" => self.encode_x87_mem(ops, &[0xD8], 5),
             "fdivrs" => self.encode_x87_mem(ops, &[0xD8], 7),
 
+            // x87 register-register arithmetic (fadd/fmul/fsub/fdiv with st(i) operands)
+            "fadd" => self.encode_x87_arith_reg(ops, 0xD8, 0xDC, 0xC0),
+            "fmul" => self.encode_x87_arith_reg(ops, 0xD8, 0xDC, 0xC8),
+            "fsub" => self.encode_x87_arith_reg(ops, 0xD8, 0xDC, 0xE0),
+            "fdiv" => self.encode_x87_arith_reg(ops, 0xD8, 0xDC, 0xF0),
+
+            // x87 additional
+            "fxtract" => { self.bytes.extend_from_slice(&[0xD9, 0xF4]); Ok(()) }
+            "fnstenv" => self.encode_x87_mem(ops, &[0xD9], 6),
+            "fldenv" => self.encode_x87_mem(ops, &[0xD9], 4),
+            "fistl" => self.encode_x87_mem(ops, &[0xDB], 2),
+            "fistps" => self.encode_x87_mem(ops, &[0xDF], 3),
+            "fildll" => self.encode_x87_mem(ops, &[0xDF], 5),
+            "fisttpll" => self.encode_x87_mem(ops, &[0xDD], 1),
+            "fistpll" => self.encode_x87_mem(ops, &[0xDF], 7),
+            "fstcw" => {
+                // fstcw = fwait + fnstcw
+                self.bytes.push(0x9B); // FWAIT
+                self.encode_x87_mem(ops, &[0xD9], 7)
+            }
+
+            // Flag manipulation
+            "cld" => { self.bytes.push(0xFC); Ok(()) }
+            "std" => { self.bytes.push(0xFD); Ok(()) }
+            "clc" => { self.bytes.push(0xF8); Ok(()) }
+            "stc" => { self.bytes.push(0xF9); Ok(()) }
+            "cmc" => { self.bytes.push(0xF5); Ok(()) }
+            "cli" => { self.bytes.push(0xFA); Ok(()) }
+            "sti" => { self.bytes.push(0xFB); Ok(()) }
+            "sahf" => { self.bytes.push(0x9E); Ok(()) }
+            "lahf" => { self.bytes.push(0x9F); Ok(()) }
+            "pushf" | "pushfl" => { self.bytes.push(0x9C); Ok(()) }
+            "popf" | "popfl" => { self.bytes.push(0x9D); Ok(()) }
+
+            // Leave (stack frame teardown)
+            "leave" => { self.bytes.push(0xC9); Ok(()) }
+
+            // int3 (explicit breakpoint mnemonic)
+            "int3" => { self.bytes.push(0xCC); Ok(()) }
+
+            // Endbr32 (CET)
+            "endbr32" => { self.bytes.extend_from_slice(&[0xF3, 0x0F, 0x1E, 0xFB]); Ok(()) }
+
+            // SSE packed float arithmetic
+            "addpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x58]),
+            "subpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x5C]),
+            "mulpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x59]),
+            "divpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x5E]),
+            "addps" => self.encode_sse_op(ops, &[0x0F, 0x58]),
+            "subps" => self.encode_sse_op(ops, &[0x0F, 0x5C]),
+            "mulps" => self.encode_sse_op(ops, &[0x0F, 0x59]),
+            "divps" => self.encode_sse_op(ops, &[0x0F, 0x5E]),
+
+            // SSE3 horizontal operations
+            "haddpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x7C]),
+            "hsubpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x7D]),
+            "haddps" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x7C]),
+            "hsubps" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x7D]),
+            "addsubpd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xD0]),
+            "addsubps" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0xD0]),
+
+            // SSSE3
+            "palignr" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0F]),
+            "pshufb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x00]),
+            "phaddw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x01]),
+            "phaddd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x02]),
+            "phsubw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x05]),
+            "phsubd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x06]),
+            "pmulhrsw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x0B]),
+
+            // SSE4.1 blend
+            "blendvpd" => { let ops2 = if ops.len() == 3 { &ops[1..] } else { ops }; self.encode_sse_op(ops2, &[0x66, 0x0F, 0x38, 0x15]) }
+            "blendvps" => { let ops2 = if ops.len() == 3 { &ops[1..] } else { ops }; self.encode_sse_op(ops2, &[0x66, 0x0F, 0x38, 0x14]) }
+            "pblendvb" => { let ops2 = if ops.len() == 3 { &ops[1..] } else { ops }; self.encode_sse_op(ops2, &[0x66, 0x0F, 0x38, 0x10]) }
+            "roundsd" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0B]),
+            "roundss" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0A]),
+            "roundpd" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x09]),
+            "roundps" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x08]),
+            "pblendw" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0E]),
+            "blendpd" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0D]),
+            "blendps" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x0C]),
+            "dpps" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x40]),
+            "dppd" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x41]),
+
+            // SSE4.1 test / min-max
+            "ptest" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x17]),
+            "pminsb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x38]),
+            "pmaxsb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3C]),
+            "pminuw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3A]),
+            "pmaxuw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3E]),
+            "pminud" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3B]),
+            "pmaxud" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3F]),
+            "pminsd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x39]),
+            "pmaxsd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x3D]),
+            "phminposuw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x41]),
+
+            // SSE4.1 insert/extract (32-bit and byte)
+            "pinsrd" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22]),
+            "pextrd" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16]),
+            "pinsrb" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x20]),
+            "pextrb" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x14]),
+
+            // SSE4.1/SSE4.2 packed integer extensions
+            "pcmpgtq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x37]),
+
+            // SSE4.1 zero/sign extend
+            "pmovzxbw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x30]),
+            "pmovzxbd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x31]),
+            "pmovzxbq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x32]),
+            "pmovzxwd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x33]),
+            "pmovzxwq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x34]),
+            "pmovzxdq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x35]),
+            "pmovsxbw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x20]),
+            "pmovsxbd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x21]),
+            "pmovsxbq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x22]),
+            "pmovsxwd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x23]),
+            "pmovsxwq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x24]),
+            "pmovsxdq" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x25]),
+
+            // SSE data movement (missing from i686)
+            "movapd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x28], &[0x66, 0x0F, 0x29]),
+            "movhlps" => self.encode_sse_op(ops, &[0x0F, 0x12]),
+            "movlhps" => self.encode_sse_op(ops, &[0x0F, 0x16]),
+            "movddup" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x12]),
+            "movshdup" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x16]),
+            "movsldup" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x12]),
+            "movntps" => self.encode_sse_store_only(ops, &[0x0F, 0x2B]),
+            "movntpd" => self.encode_sse_store_only(ops, &[0x66, 0x0F, 0x2B]),
+
+            // Prefetch instructions
+            "prefetcht0" => self.encode_prefetch(ops, 1),
+            "prefetcht1" => self.encode_prefetch(ops, 2),
+            "prefetcht2" => self.encode_prefetch(ops, 3),
+            "prefetchnta" => self.encode_prefetch(ops, 0),
+            "prefetchw" => self.encode_prefetch_0f0d(ops, 1),
+
+            // Rotate through carry
+            "rclb" | "rclw" | "rcll" | "rcl" => self.encode_shift(ops, mnemonic, 2),
+            "rcrb" | "rcrw" | "rcrl" | "rcr" => self.encode_shift(ops, mnemonic, 3),
+
+            // 16-bit string operations
+            "movsw" => { self.bytes.extend_from_slice(&[0x66, 0xA5]); Ok(()) }
+            "stosw" => { self.bytes.extend_from_slice(&[0x66, 0xAB]); Ok(()) }
+            "lodsw" => { self.bytes.extend_from_slice(&[0x66, 0xAD]); Ok(()) }
+            "scasw" => { self.bytes.extend_from_slice(&[0x66, 0xAF]); Ok(()) }
+            "cmpsw" => { self.bytes.extend_from_slice(&[0x66, 0xA7]); Ok(()) }
+
+            // Additional multiply/divide sizes
+            "mulb" => self.encode_unary_rm(ops, 4, 1),
+            "mulw" => { self.bytes.push(0x66); self.encode_unary_rm(ops, 4, 2) }
+            "divw" => { self.bytes.push(0x66); self.encode_unary_rm(ops, 6, 2) }
+            "divb" => self.encode_unary_rm(ops, 6, 1),
+            "idivw" => { self.bytes.push(0x66); self.encode_unary_rm(ops, 7, 2) }
+            "idivb" => self.encode_unary_rm(ops, 7, 1),
+            "imulw" => self.encode_imul(ops, 2),
+
             _ => {
                 Err(format!("unhandled i686 instruction: {} {:?}", mnemonic, ops))
             }
@@ -2354,6 +2510,135 @@ impl InstructionEncoder {
             "GOTPC" => R_386_GOTPC,
             "GOTNTPOFF" | "INDNTPOFF" => R_386_TLS_IE,
             _ => R_386_32,
+        }
+    }
+
+    /// Encode x87 register-register arithmetic (fadd/fmul/fsub/fdiv with st(i) operands).
+    fn encode_x87_arith_reg(&mut self, ops: &[Operand], opcode_st0: u8, opcode_sti: u8, base_modrm: u8) -> Result<(), String> {
+        match ops.len() {
+            0 => {
+                // Default: fadd %st(1), %st (i.e., st(0) = st(0) op st(1))
+                self.bytes.extend_from_slice(&[opcode_st0, base_modrm + 1]);
+                Ok(())
+            }
+            1 => {
+                // fadd %st(i) -> st(0) = st(0) op st(i)
+                match &ops[0] {
+                    Operand::Register(reg) => {
+                        let n = parse_st_num(&reg.name)?;
+                        self.bytes.extend_from_slice(&[opcode_st0, base_modrm + n]);
+                        Ok(())
+                    }
+                    _ => Err("x87 arith requires st register operand".to_string()),
+                }
+            }
+            2 => {
+                // Two operands: fadd %st(i), %st or fadd %st, %st(i)
+                match (&ops[0], &ops[1]) {
+                    (Operand::Register(src), Operand::Register(dst)) => {
+                        let src_n = parse_st_num(&src.name)?;
+                        let dst_n = parse_st_num(&dst.name)?;
+                        if dst_n == 0 {
+                            // fadd %st(i), %st -> D8 (base + i)
+                            self.bytes.extend_from_slice(&[opcode_st0, base_modrm + src_n]);
+                        } else if src_n == 0 {
+                            // fadd %st, %st(i) -> DC (base + i)
+                            // Note: fsub/fdiv swap in DC encoding
+                            let dc_modrm = match base_modrm {
+                                0xC0 => 0xC0, // fadd
+                                0xC8 => 0xC8, // fmul
+                                0xE0 => 0xE8, // fsub -> fsubr encoding in DC
+                                0xF0 => 0xF8, // fdiv -> fdivr encoding in DC
+                                _ => base_modrm,
+                            };
+                            self.bytes.extend_from_slice(&[opcode_sti, dc_modrm + dst_n]);
+                        } else {
+                            return Err("x87 arith: one operand must be st(0)".to_string());
+                        }
+                        Ok(())
+                    }
+                    _ => Err("x87 arith requires st register operands".to_string()),
+                }
+            }
+            _ => Err("x87 arith requires 0-2 operands".to_string()),
+        }
+    }
+
+    /// Encode SSE4.1 insert (pinsrd, pinsrb): $imm8, r/m32, xmm
+    fn encode_sse_insert(&mut self, ops: &[Operand], opcode: &[u8]) -> Result<(), String> {
+        if ops.len() != 3 {
+            return Err("pinsrX requires 3 operands".to_string());
+        }
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.extend_from_slice(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.extend_from_slice(opcode);
+                self.encode_modrm_mem(dst_num, mem)?;
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            _ => Err("unsupported pinsrX operands".to_string()),
+        }
+    }
+
+    /// Encode SSE4.1 extract (pextrd, pextrb): $imm8, xmm, r/m32
+    fn encode_sse_extract(&mut self, ops: &[Operand], opcode: &[u8]) -> Result<(), String> {
+        if ops.len() != 3 {
+            return Err("pextrX requires 3 operands".to_string());
+        }
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.bytes.extend_from_slice(opcode);
+                self.bytes.push(self.modrm(3, src_num, dst_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Memory(mem)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                self.bytes.extend_from_slice(opcode);
+                self.encode_modrm_mem(src_num, mem)?;
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            _ => Err("unsupported pextrX operands".to_string()),
+        }
+    }
+
+    /// Encode prefetch instructions (0F 18 /hint)
+    fn encode_prefetch(&mut self, ops: &[Operand], hint: u8) -> Result<(), String> {
+        if ops.len() != 1 {
+            return Err("prefetch requires 1 operand".to_string());
+        }
+        match &ops[0] {
+            Operand::Memory(mem) => {
+                self.bytes.extend_from_slice(&[0x0F, 0x18]);
+                self.encode_modrm_mem(hint, mem)
+            }
+            _ => Err("prefetch requires memory operand".to_string()),
+        }
+    }
+
+    /// Encode prefetchw (0F 0D /1)
+    fn encode_prefetch_0f0d(&mut self, ops: &[Operand], hint: u8) -> Result<(), String> {
+        if ops.len() != 1 {
+            return Err("prefetchw requires 1 operand".to_string());
+        }
+        match &ops[0] {
+            Operand::Memory(mem) => {
+                self.bytes.extend_from_slice(&[0x0F, 0x0D]);
+                self.encode_modrm_mem(hint, mem)
+            }
+            _ => Err("prefetchw requires memory operand".to_string()),
         }
     }
 }

@@ -1486,6 +1486,43 @@ impl InstructionEncoder {
             "rdrand" | "rdrandl" | "rdrandq" => self.encode_rdrand(ops, mnemonic, 0xC7, 6),
             "rdseed" | "rdseedl" | "rdseedq" => self.encode_rdrand(ops, mnemonic, 0xC7, 7),
 
+            // ---- Instructions from i686 encoder for cohesion ----
+
+            // SSE ordered compare (comisd/comiss)
+            "comisd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x2F]),
+            "comiss" => self.encode_sse_op(ops, &[0x0F, 0x2F]),
+
+            // SSE compare with immediate (cmpsd/cmpss/cmppd/cmpps as SSE ops)
+            "cmpsd" => self.encode_sse_op_imm8(ops, &[0xF2, 0x0F, 0xC2]),
+            "cmpss" => self.encode_sse_op_imm8(ops, &[0xF3, 0x0F, 0xC2]),
+            "cmppd" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0xC2]),
+            "cmpps" => self.encode_sse_op_imm8(ops, &[0x0F, 0xC2]),
+
+            // x87 additional from i686
+            "ftst" => { self.bytes.extend_from_slice(&[0xD9, 0xE4]); Ok(()) }
+            "fxam" => { self.bytes.extend_from_slice(&[0xD9, 0xE5]); Ok(()) }
+            "fucomi" => self.encode_fucomi(ops),
+            "fstl" => self.encode_x87_mem(ops, &[0xDD], 2),
+
+            // x87 reverse memory arithmetic
+            "fsubrl" => self.encode_x87_mem(ops, &[0xDC], 5),
+            "fdivrl" => self.encode_x87_mem(ops, &[0xDC], 7),
+            "fsubrs" => self.encode_x87_mem(ops, &[0xD8], 5),
+            "fdivrs" => self.encode_x87_mem(ops, &[0xD8], 7),
+
+            // Data movement: byte-to-word extensions
+            "movsbw" => self.encode_movsx(ops, 1, 2),
+            "movzbw" => self.encode_movzx(ops, 1, 2),
+
+            // SSE packed integer (missing from x86)
+            "pcmpgtd" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x66]),
+            "pmulhuw" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xE4]),
+            "psubb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0xF8]),
+
+            // System instructions
+            "rdmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x32]); Ok(()) }
+            "wrmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x30]); Ok(()) }
+
             _ if mnemonic.starts_with("set") => {
                 // Handle setXXb forms (e.g., setcb = setc with byte suffix)
                 self.encode_setcc(ops, mnemonic)
@@ -1941,7 +1978,7 @@ impl InstructionEncoder {
         }
 
         let opcode = match (src_size, dst_size) {
-            (1, _) => vec![0x0F, 0xBE],   // movsbq/movsbl
+            (1, _) => vec![0x0F, 0xBE],   // movsbq/movsbl/movsbw
             (2, _) => vec![0x0F, 0xBF],   // movswq/movswl
             (4, 8) => vec![0x63],          // movslq (movsxd)
             _ => return Err(format!("unsupported movsx combination: {} -> {}", src_size, dst_size)),
@@ -1951,12 +1988,15 @@ impl InstructionEncoder {
             (Operand::Register(src), Operand::Register(dst)) => {
                 let src_num = reg_num(&src.name).ok_or("bad src register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad dst register")?;
+                // 16-bit destination needs operand-size override prefix
+                if dst_size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rr(dst_size, &dst.name, &src.name);
                 self.bytes.extend_from_slice(&opcode);
                 self.bytes.push(self.modrm(3, dst_num, src_num));
             }
             (Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad dst register")?;
+                if dst_size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(dst_size, &dst.name, mem);
                 self.bytes.extend_from_slice(&opcode);
                 self.encode_modrm_mem(dst_num, mem)?;
@@ -1966,32 +2006,34 @@ impl InstructionEncoder {
         Ok(())
     }
 
-    fn encode_movzx(&mut self, ops: &[Operand], src_size: u8, _dst_size: u8) -> Result<(), String> {
+    fn encode_movzx(&mut self, ops: &[Operand], src_size: u8, dst_size: u8) -> Result<(), String> {
         if ops.len() != 2 {
             return Err("movzx requires 2 operands".to_string());
         }
 
         let opcode = match src_size {
-            1 => vec![0x0F, 0xB6],  // movzbl/movzbq
+            1 => vec![0x0F, 0xB6],  // movzbl/movzbq/movzbw
             2 => vec![0x0F, 0xB7],  // movzwl/movzwq
             _ => return Err(format!("unsupported movzx src size: {}", src_size)),
         };
 
         // Note: movzbl zero-extends to 64 bits implicitly (32-bit op clears upper 32)
         // So we use size=4 for REX calculation unless dst is an extended register needing REX.B
-        let rex_size = if _dst_size == 8 { 8 } else { 4 };
+        let rex_size = if dst_size == 8 { 8 } else { 4 };
 
         match (&ops[0], &ops[1]) {
             (Operand::Register(src), Operand::Register(dst)) => {
                 let src_num = reg_num(&src.name).ok_or("bad src register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad dst register")?;
-                // movzbl uses 32-bit destination but we need REX if either operand is extended
+                // 16-bit destination needs operand-size override prefix
+                if dst_size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rr(rex_size, &dst.name, &src.name);
                 self.bytes.extend_from_slice(&opcode);
                 self.bytes.push(self.modrm(3, dst_num, src_num));
             }
             (Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad dst register")?;
+                if dst_size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(rex_size, &dst.name, mem);
                 self.bytes.extend_from_slice(&opcode);
                 self.encode_modrm_mem(dst_num, mem)?;
@@ -3454,6 +3496,34 @@ impl InstructionEncoder {
             Ok(())
         } else {
             Err("fcomip requires 0 or 2 operands".to_string())
+        }
+    }
+
+    fn encode_fucomi(&mut self, ops: &[Operand]) -> Result<(), String> {
+        // fucomi %st(i), %st -> DB E8+i (0 or 2 operands; 1-operand also accepted)
+        if ops.len() == 2 {
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDB, 0xE8 + n]);
+                    Ok(())
+                }
+                _ => Err("fucomi requires st register".to_string()),
+            }
+        } else if ops.len() == 1 {
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDB, 0xE8 + n]);
+                    Ok(())
+                }
+                _ => Err("fucomi requires st register".to_string()),
+            }
+        } else if ops.is_empty() {
+            self.bytes.extend_from_slice(&[0xDB, 0xE9]); // default st(1)
+            Ok(())
+        } else {
+            Err("fucomi requires 0-2 operands".to_string())
         }
     }
 
