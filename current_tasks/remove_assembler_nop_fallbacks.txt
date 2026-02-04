@@ -1,0 +1,15 @@
+Task: Remove silent NOP fallback emissions from assembler backends
+
+Problem: ARM and RISC-V assembler backends silently emit NOP instructions when
+they encounter unsupported/unknown instructions, instead of returning errors.
+This causes silent binary corruption which is far worse than a compiler error.
+
+Locations to fix:
+1. ARM elf_writer.rs - Err handler emits NOP instead of propagating error
+2. RISC-V elf_writer.rs - Err handler emits NOP instead of propagating error
+3. ARM encoder.rs - prfm instruction stubbed as NOP
+4. ARM encoder.rs - fmov with immediate returns NOP placeholder
+
+Fix: Convert all NOP fallbacks to proper error propagation.
+For prfm: implement proper encoding or return error.
+For fmov immediate: implement proper encoding or return error.
