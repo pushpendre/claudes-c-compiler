@@ -1,0 +1,14 @@
+Fix x86 assembler .if directive register comparisons and .elseif support.
+
+The kernel's UNWIND_HINT_REGS macro uses:
+  .if \base == %rsp
+  .elseif \base == %rbp
+  ...
+  .else
+    .error "UNWIND_HINT_REGS: bad base register"
+  .endif
+
+This requires:
+1. Support for == and != operators in .if expressions (use shared eval_if_condition)
+2. Support for x86 register names (%rsp, %rbp, etc.) as numeric values in .if expressions
+3. Support for .elseif directive
