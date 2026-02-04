@@ -46,6 +46,8 @@ pub enum Operand {
     RegArrangement { reg: String, arrangement: String },
     /// NEON register with lane index: v0.d[1], v0.b[0], v0.s[2], etc.
     RegLane { reg: String, elem_size: String, index: u32 },
+    /// NEON register list: {v0.16b}, {v0.16b, v1.16b}, etc.
+    RegList(Vec<Operand>),
 }
 
 /// A parsed assembly statement.
@@ -207,12 +209,21 @@ fn parse_operands(s: &str) -> Result<Vec<Operand>, String> {
     let mut operands = Vec::new();
     let mut current = String::new();
     let mut bracket_depth = 0;
+    let mut brace_depth = 0;
 
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         match chars[i] {
+            '{' => {
+                brace_depth += 1;
+                current.push('{');
+            }
+            '}' => {
+                brace_depth -= 1;
+                current.push('}');
+            }
             '[' => {
                 bracket_depth += 1;
                 current.push('[');
@@ -226,7 +237,7 @@ fn parse_operands(s: &str) -> Result<Vec<Operand>, String> {
                     i += 1;
                 }
             }
-            ',' if bracket_depth == 0 => {
+            ',' if bracket_depth == 0 && brace_depth == 0 => {
                 let op = parse_single_operand(current.trim())?;
                 operands.push(op);
                 current.clear();
@@ -272,6 +283,11 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty operand".to_string());
+    }
+
+    // Register list: {v0.16b}, {v0.16b, v1.16b}, etc.
+    if s.starts_with('{') && s.ends_with('}') {
+        return parse_register_list(s);
     }
 
     // Memory operand: [base, #offset]! (pre-index) or [base, #offset] or [base]
@@ -349,7 +365,7 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
         let arr_part = &s[dot_pos + 1..];
         if is_register(reg_part) {
             let arr_lower = arr_part.to_lowercase();
-            if matches!(arr_lower.as_str(), "8b" | "16b" | "4h" | "8h" | "2s" | "4s" | "1d" | "2d"
+            if matches!(arr_lower.as_str(), "8b" | "16b" | "4h" | "8h" | "2s" | "4s" | "1d" | "2d" | "1q"
                 | "b" | "h" | "s" | "d") {
                 return Ok(Operand::RegArrangement {
                     reg: reg_part.to_string(),
@@ -386,6 +402,23 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
 
     // Plain symbol/label
     Ok(Operand::Symbol(s.to_string()))
+}
+
+/// Parse a register list like {v0.16b} or {v0.16b, v1.16b, v2.16b, v3.16b}
+fn parse_register_list(s: &str) -> Result<Operand, String> {
+    let inner = &s[1..s.len() - 1]; // strip { and }
+    let mut regs = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if !part.is_empty() {
+            let op = parse_single_operand(part)?;
+            regs.push(op);
+        }
+    }
+    if regs.is_empty() {
+        return Err("empty register list".to_string());
+    }
+    Ok(Operand::RegList(regs))
 }
 
 fn parse_memory_operand(s: &str) -> Result<Operand, String> {
