@@ -76,12 +76,50 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
             continue;
         }
 
-        match parse_line(line) {
-            Ok(stmt) => statements.push(stmt),
-            Err(e) => return Err(format!("Line {}: {}: '{}'", line_num + 1, e, line)),
+        // Handle ';' as statement separator (GAS syntax).
+        // Split the line on ';' and parse each part independently.
+        let parts = split_on_semicolons(line);
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match parse_line(part) {
+                Ok(stmts) => statements.extend(stmts),
+                Err(e) => return Err(format!("Line {}: {}: '{}'", line_num + 1, e, part)),
+            }
         }
     }
     Ok(statements)
+}
+
+/// Split a line on ';' characters, respecting strings.
+/// In GAS syntax, ';' separates multiple statements on the same line.
+fn split_on_semicolons(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+    for (i, c) in line.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if c == ';' && !in_string {
+            parts.push(&line[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&line[start..]);
+    parts
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -102,7 +140,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-fn parse_line(line: &str) -> Result<AsmStatement, String> {
+fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
     // Check for label definition (name:)
     // Labels can be at the start of the line, possibly followed by an instruction
     if let Some(colon_pos) = line.find(':') {
@@ -120,7 +158,13 @@ fn parse_line(line: &str) -> Result<AsmStatement, String> {
                 || potential_label.starts_with(".L")
                 || potential_label.starts_with(".l")
             {
-                return Ok(AsmStatement::Label(potential_label.to_string()));
+                let mut result = vec![AsmStatement::Label(potential_label.to_string())];
+                // Check for instruction/directive after the label on the same line
+                let rest = line[colon_pos + 1..].trim();
+                if !rest.is_empty() {
+                    result.extend(parse_line(rest)?);
+                }
+                return Ok(result);
             }
         }
     }
@@ -129,11 +173,11 @@ fn parse_line(line: &str) -> Result<AsmStatement, String> {
 
     // Directive: starts with .
     if trimmed.starts_with('.') {
-        return parse_directive(trimmed);
+        return Ok(vec![parse_directive(trimmed)?]);
     }
 
     // Instruction
-    parse_instruction(trimmed)
+    Ok(vec![parse_instruction(trimmed)?])
 }
 
 fn parse_directive(line: &str) -> Result<AsmStatement, String> {
