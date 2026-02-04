@@ -1,0 +1,11 @@
+Fix RISC-V builtin linker: add group-loading for archive resolution
+
+Root cause: RISC-V linker Phase 1c processes each archive only once. When
+libm.a pulls in fmod which needs __clzdi2 from libgcc.a, but libgcc.a was
+already scanned, the symbol remains unresolved -> CALL_PLT targets 0 -> segfault.
+
+410 out of 421 builtin linker failures (92.6% vs 99.8% without builtin) are
+caused by this. The fix: iterate all archives until no new symbols are resolved,
+like the ARM linker already does (group-loading).
+
+Also add gcc_eh to RISC-V static linking in common.rs (same as AArch64).
