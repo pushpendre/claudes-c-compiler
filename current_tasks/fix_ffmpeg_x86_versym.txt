@@ -1,0 +1,14 @@
+Task: Fix x86 linker versym hidden bit handling for FFmpeg
+
+Problem: The x86 linker's parse_shared_library_symbols() in linker_common.rs
+does not read the .gnu.version (SHT_GNU_VERSYM) section when importing symbols
+from shared libraries. This causes it to treat non-default versioned symbols
+(those with the hidden bit 0x8000 set, like sysctl@GLIBC_2.2.5) as available
+for linking. GNU ld correctly skips these symbols.
+
+This causes FFmpeg's ./configure to incorrectly detect HAVE_SYSCTL=1 (because
+ccc-x86 successfully links against the hidden sysctl symbol), but then the
+build fails because <sys/sysctl.h> doesn't exist on this system.
+
+Fix: Add .gnu.version parsing to parse_shared_library_symbols() and its
+phdr-based fallback, skipping symbols with hidden bit set and version index >= 2.
