@@ -1,0 +1,5 @@
+Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
+
+| Project | x86 | i686 | arm | riscv | Notes |
+|---------|-----|------|-----|-------|-------|
+| lz4     | PASS | FAIL (segfault in datagen) | FAIL | FAIL | x86 works after fixing -shared fallback |

@@ -1,2 +1,0 @@
-Testing lz4 project with builtin assembler and linker (MY_ASM=builtin MY_LD=builtin).
-Will fix any compilation or test failures found.

@@ -313,16 +313,21 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                 }
             }
 
-            // For other architectures, resolve ld path and use direct ld invocation.
-            // If the value is a boolean-like flag ("1", "true", "yes"),
-            // auto-detect the correct ld for the target arch.
-            let ld_path = resolve_ld_path(ld_val, config.expected_elf_machine)?;
+            // When MY_LD=builtin and the builtin linker can't handle this operation
+            // (e.g., -shared or -r), fall through to the GCC default path rather than
+            // trying to execute a binary named "builtin".
+            if !(lower == "builtin" && (is_shared || is_relocatable)) {
+                // For other architectures, resolve ld path and use direct ld invocation.
+                // If the value is a boolean-like flag ("1", "true", "yes"),
+                // auto-detect the correct ld for the target arch.
+                let ld_path = resolve_ld_path(ld_val, config.expected_elf_machine)?;
 
-            if let Some(arch_config) = get_direct_ld_config(config.expected_elf_machine) {
-                return link_direct_ld(
-                    &ld_path, arch_config, object_files, output_path, user_args,
-                    is_shared, is_nostdlib, is_relocatable, is_static,
-                );
+                if let Some(arch_config) = get_direct_ld_config(config.expected_elf_machine) {
+                    return link_direct_ld(
+                        &ld_path, arch_config, object_files, output_path, user_args,
+                        is_shared, is_nostdlib, is_relocatable, is_static,
+                    );
+                }
             }
         }
     }
