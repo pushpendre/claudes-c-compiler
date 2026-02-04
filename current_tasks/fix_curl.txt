@@ -1,0 +1,2 @@
+Fixing curl project for x86 target.
+Diagnosing and fixing compilation/linking issues with ccc-x86 for the curl library.
