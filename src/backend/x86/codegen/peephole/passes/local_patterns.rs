@@ -1,6 +1,6 @@
 //! Local peephole pattern matching passes.
 //!
-//! Merges 5 simple local passes into a single linear scan (`combined_local_pass`)
+//! Merges 6 simple local passes into a single linear scan (`combined_local_pass`)
 //! to avoid redundant iteration over the lines array. Also includes
 //! `fuse_movq_ext_truncation` which fuses movq + extension/truncation patterns.
 //!
@@ -10,6 +10,7 @@
 //!   3. eliminate_redundant_movq_self: movq %reg, %reg (same src/dst)
 //!   4. eliminate_redundant_cltq: cltq after movslq/movq$ to %rax
 //!   5. eliminate_redundant_zero_extend: redundant zero/sign extensions
+//!   6. eliminate_redundant_xorl_zero: xorl %eax,%eax when %rax already zero
 
 use super::super::types::*;
 use super::helpers::is_valid_gp_reg;
@@ -18,11 +19,97 @@ pub(super) fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo])
     let mut changed = false;
     let len = store.len();
 
+    // Track whether %rax is known to be zero for redundant xorl elimination.
+    // This is set to true after `xorl %eax, %eax` and stays true across
+    // StoreRbp instructions (which don't modify register values), but is
+    // invalidated by anything that writes %rax, or by control flow barriers.
+    let mut rax_is_zero = false;
+
     let mut i = 0;
     while i < len {
         if infos[i].is_nop() {
             i += 1;
             continue;
+        }
+
+        // --- Pattern: redundant xorl %eax, %eax elimination ---
+        // When %rax is already known to be zero (from a previous xorl %eax, %eax),
+        // and only StoreRbp instructions intervene (which read but don't modify
+        // registers), the repeated xorl is redundant.
+        //
+        // Common pattern from codegen zeroing multiple local variables:
+        //   xorl %eax, %eax          # sets rax = 0
+        //   movq %rax, -N(%rbp)      # stores 0, rax still 0
+        //   xorl %eax, %eax          # REDUNDANT
+        //   movq %rax, -M(%rbp)      # stores 0, rax still 0
+        if rax_is_zero {
+            if let LineKind::Other { dest_reg: 0 } = infos[i].kind {
+                let trimmed = infos[i].trimmed(store.get(i));
+                if trimmed == "xorl %eax, %eax" {
+                    mark_nop(&mut infos[i]);
+                    changed = true;
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Update rax_is_zero tracking based on current instruction.
+        match infos[i].kind {
+            LineKind::StoreRbp { .. } => {
+                // Stores to stack don't modify registers, rax_is_zero unchanged.
+            }
+            LineKind::Other { dest_reg: 0 } => {
+                // Something writes to %rax. Check if it's xorl %eax, %eax.
+                let trimmed = infos[i].trimmed(store.get(i));
+                rax_is_zero = trimmed == "xorl %eax, %eax";
+            }
+            LineKind::Other { dest_reg } if dest_reg != 0 => {
+                // Writes to a non-rax register, rax_is_zero unchanged.
+                // But check if it also reads/clobbers rax implicitly.
+                // Most Other instructions only write their dest_reg.
+                // Conservative: only keep rax_is_zero if the instruction
+                // doesn't reference rax at all (via reg_refs).
+                if infos[i].reg_refs & 1 != 0 {
+                    // References rax - could be a read or write, invalidate
+                    // But actually a read of rax is fine for rax_is_zero.
+                    // Only a write to rax matters. Since dest_reg != 0,
+                    // rax is not the destination, so it's a read - OK.
+                    // Exception: instructions like div/idiv/mul/cqto that
+                    // implicitly clobber rax through dest_reg rdx.
+                    let trimmed = infos[i].trimmed(store.get(i));
+                    if trimmed.starts_with("div") || trimmed.starts_with("idiv")
+                        || trimmed.starts_with("mul") || trimmed.starts_with("imul")
+                        || trimmed == "cqto" || trimmed == "cqo" || trimmed == "cdq"
+                        || trimmed.starts_with("xchg") || trimmed.starts_with("cmpxchg") {
+                        rax_is_zero = false;
+                    }
+                    // Otherwise rax is only read, not written - keep tracking.
+                }
+            }
+            LineKind::LoadRbp { reg: 0, .. } => {
+                // Load to rax - rax is no longer zero
+                rax_is_zero = false;
+            }
+            LineKind::LoadRbp { .. } => {
+                // Load to non-rax register, rax_is_zero unchanged.
+            }
+            LineKind::Label | LineKind::Jmp | LineKind::JmpIndirect
+            | LineKind::CondJmp | LineKind::Ret | LineKind::Call => {
+                // Control flow or label - invalidate tracking
+                rax_is_zero = false;
+            }
+            LineKind::Pop { reg: 0 } | LineKind::SetCC { reg: 0 } => {
+                rax_is_zero = false;
+            }
+            LineKind::Pop { .. } | LineKind::SetCC { .. }
+            | LineKind::Push { .. } | LineKind::Cmp | LineKind::Directive => {
+                // Don't affect rax
+            }
+            _ => {
+                // Conservative: invalidate
+                rax_is_zero = false;
+            }
         }
 
         // --- Pattern: self-move elimination (movq %reg, %reg) ---

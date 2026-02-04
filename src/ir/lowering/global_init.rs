@@ -695,17 +695,70 @@ impl Lowerer {
             };
 
             if flat_idx < flat_num_elems {
-                let mut elem_parts = Vec::new();
-                self.collect_compound_init_element(&item.init, &mut elem_parts, elem_size);
-                for (i, elem) in elem_parts.into_iter().enumerate() {
-                    if flat_idx + i < flat_num_elems {
-                        let elem = match elem {
-                            GlobalInit::Scalar(val) => {
-                                GlobalInit::Scalar(val.coerce_to(base_ty))
+                // For inner List initializers, handle designators to place
+                // elements at the correct offset within the sub-array.
+                if let Initializer::List(sub_items) = &item.init {
+                    if is_structured {
+                        // Process inner list with designator support
+                        let mut inner_idx = 0usize;
+                        for sub in sub_items {
+                            // Check for inner designator
+                            let inner_desig: Vec<usize> = sub.designators.iter().filter_map(|d| {
+                                if let Designator::Index(ref idx_expr) = d {
+                                    self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                                } else {
+                                    None
+                                }
+                            }).collect();
+                            if !inner_desig.is_empty() {
+                                inner_idx = inner_desig[0];
                             }
-                            other => other,
-                        };
-                        elements[flat_idx + i] = elem;
+                            let target_idx = flat_idx + inner_idx;
+                            if target_idx < flat_num_elems {
+                                let mut elem_parts = Vec::new();
+                                self.collect_compound_init_element(&sub.init, &mut elem_parts, elem_size);
+                                for (i, elem) in elem_parts.into_iter().enumerate() {
+                                    if target_idx + i < flat_num_elems {
+                                        let elem = match elem {
+                                            GlobalInit::Scalar(val) => {
+                                                GlobalInit::Scalar(val.coerce_to(base_ty))
+                                            }
+                                            other => other,
+                                        };
+                                        elements[target_idx + i] = elem;
+                                    }
+                                }
+                            }
+                            inner_idx += 1;
+                        }
+                    } else {
+                        let mut elem_parts = Vec::new();
+                        self.collect_compound_init_element(&item.init, &mut elem_parts, elem_size);
+                        for (i, elem) in elem_parts.into_iter().enumerate() {
+                            if flat_idx + i < flat_num_elems {
+                                let elem = match elem {
+                                    GlobalInit::Scalar(val) => {
+                                        GlobalInit::Scalar(val.coerce_to(base_ty))
+                                    }
+                                    other => other,
+                                };
+                                elements[flat_idx + i] = elem;
+                            }
+                        }
+                    }
+                } else {
+                    let mut elem_parts = Vec::new();
+                    self.collect_compound_init_element(&item.init, &mut elem_parts, elem_size);
+                    for (i, elem) in elem_parts.into_iter().enumerate() {
+                        if flat_idx + i < flat_num_elems {
+                            let elem = match elem {
+                                GlobalInit::Scalar(val) => {
+                                    GlobalInit::Scalar(val.coerce_to(base_ty))
+                                }
+                                other => other,
+                            };
+                            elements[flat_idx + i] = elem;
+                        }
                     }
                 }
             }

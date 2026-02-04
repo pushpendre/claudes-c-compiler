@@ -836,6 +836,82 @@ mod tests {
         assert!(result.contains("addq -48(%rbp), %rax"),
             "should fold with empty lines between: {}", result);
     }
+
+    // ── Redundant xorl elimination tests ─────────────────────────────────
+
+    #[test]
+    fn test_redundant_xorl_after_zero_store() {
+        let asm = [
+            "    xorl %eax, %eax",
+            "    movq %rax, -8(%rbp)",
+            "    xorl %eax, %eax",
+            "    movq %rax, -16(%rbp)",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("xorl %eax, %eax").count(), 1,
+            "second xorl should be eliminated: {}", result);
+        assert!(result.contains("movq %rax, -8(%rbp)"),
+            "first store should remain: {}", result);
+        assert!(result.contains("movq %rax, -16(%rbp)"),
+            "second store should remain: {}", result);
+    }
+
+    #[test]
+    fn test_redundant_xorl_chain_of_four() {
+        let asm = [
+            "    xorl %eax, %eax",
+            "    movq %rax, -8(%rbp)",
+            "    xorl %eax, %eax",
+            "    movq %rax, -16(%rbp)",
+            "    xorl %eax, %eax",
+            "    movq %rax, -24(%rbp)",
+            "    xorl %eax, %eax",
+            "    movq %rax, -32(%rbp)",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("xorl %eax, %eax").count(), 1,
+            "only first xorl should survive: {}", result);
+    }
+
+    #[test]
+    fn test_xorl_not_eliminated_after_rax_write() {
+        let asm = [
+            "    xorl %eax, %eax",
+            "    movq %rax, -8(%rbp)",
+            "    movq -16(%rbp), %rax",
+            "    xorl %eax, %eax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The load to %rax invalidates rax_is_zero, so both xorls are needed
+        assert_eq!(result.matches("xorl %eax, %eax").count(), 2,
+            "both xorls should survive after rax modification: {}", result);
+    }
+
+    #[test]
+    fn test_xorl_not_eliminated_after_label() {
+        let asm = [
+            "    xorl %eax, %eax",
+            "    movq %rax, -8(%rbp)",
+            ".LBB1:",
+            "    xorl %eax, %eax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("xorl %eax, %eax").count(), 2,
+            "xorl after label should NOT be eliminated: {}", result);
+    }
+
+    #[test]
+    fn test_xorl_not_eliminated_after_call() {
+        let asm = [
+            "    xorl %eax, %eax",
+            "    movq %rax, -8(%rbp)",
+            "    call some_func",
+            "    xorl %eax, %eax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert_eq!(result.matches("xorl %eax, %eax").count(), 2,
+            "xorl after call should NOT be eliminated: {}", result);
+    }
 }
 
 #[cfg(test)]

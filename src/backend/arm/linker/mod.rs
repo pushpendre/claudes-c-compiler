@@ -474,7 +474,11 @@ fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<Strin
                 });
             }
         } else if sym.shndx == SHN_COMMON {
-            if !globals.contains_key(&sym.name) {
+            let should_insert = match globals.get(&sym.name) {
+                None => true,
+                Some(e) => e.defined_in.is_none(),
+            };
+            if should_insert {
                 globals.insert(sym.name.clone(), GlobalSymbol {
                     value: sym.value, size: sym.size, info: sym.info,
                     defined_in: Some(obj_idx), section_idx: SHN_COMMON,

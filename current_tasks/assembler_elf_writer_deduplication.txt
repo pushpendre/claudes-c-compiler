@@ -1,0 +1,18 @@
+Refactoring assembler elf_writer code to eliminate massive duplication between x86 and i686.
+
+The x86 and i686 elf_writer.rs files share ~1500 lines of near-identical code:
+- ElfWriter struct and new()
+- process_item() (~200 lines each, identical logic)
+- ensure_symbol() (~50 lines, identical)
+- emit_data_values() (~100 lines, only reloc types differ)
+- emit_elf() conversion (~190 lines, near-identical)
+- relax_jumps() (~170 lines, identical algorithm)
+- resolve_internal_relocations() (~80 lines, identical pattern)
+- resolve_numeric_label() (~40 lines, identical)
+- is_local_symbol() (~20 lines, identical)
+- Supporting structs (Section, SymbolInfo, etc.)
+
+Plan:
+1. Create a shared ElfWriterCommon<Offset> that handles all the common logic
+2. Parameterize on offset type (u32 for i686, u64 for x86) and relocation types
+3. Have x86 and i686 elf_writer.rs be thin wrappers that provide arch-specific parts

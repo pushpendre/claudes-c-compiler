@@ -231,3 +231,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | lynx    | PASS | TODO | TODO | TODO | Fixed: added incompatible pointer subtraction type check (C11 6.5.6p3) so configure correctly detects dirent64 compatibility |
 | libtomcrypt | PASS | PASS | PASS | PASS | Fixed RISC-V: narrow pass incorrectly eliminated AND zero-extension mask (uint32 & 0xFFFFFFFF) when narrowing I64→U32, causing sign-extended addw results to leak |
 | libpng  | PASS | PASS | PASS | PASS | Fixed: -Wl flag splitting broke -soname/-rpath multi-arg flags; inliner now avoids bloating recursive function frames |
+| s2n-tls | PASS* | TODO | TODO | TODO | x86: 281/282 tests pass (1 codegen segfault in s2n_tls13_key_schedule_test). Fixed: COMMON symbol archive extraction, decimal constant type promotion (C11 6.4.4.1), nested designated initializer pointer placement |

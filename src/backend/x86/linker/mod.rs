@@ -1527,7 +1527,14 @@ fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<Strin
                 });
             }
         } else if sym.shndx == SHN_COMMON {
-            if !globals.contains_key(&sym.name) {
+            // COMMON symbols should replace undefined entries (satisfying the reference)
+            // and insert if no entry exists. They should NOT replace an existing definition
+            // or another COMMON symbol (first COMMON wins, like traditional ld behavior).
+            let should_insert = match globals.get(&sym.name) {
+                None => true,
+                Some(e) => e.defined_in.is_none(),
+            };
+            if should_insert {
                 globals.insert(sym.name.clone(), GlobalSymbol {
                     value: sym.value, size: sym.size, info: sym.info,
                     defined_in: Some(obj_idx), from_lib: None,
