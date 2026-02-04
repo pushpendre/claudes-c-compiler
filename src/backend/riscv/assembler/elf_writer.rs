@@ -195,6 +195,72 @@ impl ElfWriter {
         }
     }
 
+    /// Try to handle a symbol difference expression like "A - B" or "A - B + C".
+    /// For .word/.long (size=4), emits R_RISCV_ADD32 + R_RISCV_SUB32 relocation pairs.
+    /// For .quad/.dword (size=8), emits R_RISCV_ADD64 + R_RISCV_SUB64 relocation pairs.
+    /// Returns None if the expression is not a symbol difference.
+    fn try_emit_symbol_diff(&mut self, expr: &str, size: usize) -> Option<Result<(), String>> {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return None;
+        }
+
+        // Look for "A - B" pattern where A is a symbol reference
+        // The first character should be a letter, underscore, or dot (symbol start)
+        let first_char = expr.chars().next()?;
+        if !first_char.is_ascii_alphabetic() && first_char != '_' && first_char != '.' {
+            return None;
+        }
+
+        // Find the '-' that separates the two symbols (not at position 0)
+        // Be careful with dots in section names and symbol names
+        let minus_pos = find_symbol_diff_minus(expr)?;
+
+        let sym_a = expr[..minus_pos].trim();
+        let rest = expr[minus_pos + 1..].trim();
+
+        // rest might be "B" or "B + offset"
+        // Parse sym_b and optional addend
+        let (sym_b, addend) = if let Some(plus_pos) = rest.find('+') {
+            let b = rest[..plus_pos].trim();
+            let add_str = rest[plus_pos + 1..].trim();
+            let add_val: i64 = add_str.parse().unwrap_or(0);
+            (b, add_val)
+        } else {
+            (rest, 0i64)
+        };
+
+        // Verify sym_b looks like a symbol
+        if sym_b.is_empty() {
+            return None;
+        }
+        let b_first = sym_b.chars().next().unwrap();
+        if !b_first.is_ascii_alphabetic() && b_first != '_' && b_first != '.' {
+            return None;
+        }
+
+        // Emit ADD + SUB relocation pair
+        let (add_type, sub_type) = if size == 4 {
+            (RelocType::Add32.elf_type(), RelocType::Sub32.elf_type())
+        } else {
+            (RelocType::Add64.elf_type(), RelocType::Sub64.elf_type())
+        };
+
+        self.add_reloc(add_type, sym_a.to_string(), addend);
+        // SUB reloc is at the same offset (add_reloc uses current_offset which
+        // hasn't changed yet since we haven't emitted the data bytes)
+        self.add_reloc(sub_type, sym_b.to_string(), 0);
+
+        // Emit zero bytes as placeholder
+        if size == 4 {
+            self.emit_bytes(&0u32.to_le_bytes());
+        } else {
+            self.emit_bytes(&0u64.to_le_bytes());
+        }
+
+        Some(Ok(()))
+    }
+
     fn align_to(&mut self, align: u64) {
         if align <= 1 {
             return;
@@ -414,14 +480,11 @@ impl ElfWriter {
             ".long" | ".4byte" | ".word" => {
                 for part in args.split(',') {
                     let trimmed = part.trim();
-                    // Handle symbol references
-                    if trimmed.contains('-') && !trimmed.starts_with('-') {
-                        let parts: Vec<&str> = trimmed.splitn(2, '-').collect();
-                        if parts.len() == 2 {
-                            self.add_reloc(RelocType::Abs32.elf_type(), parts[0].trim().to_string(), 0);
-                            self.emit_bytes(&0u32.to_le_bytes());
-                            continue;
-                        }
+                    // Handle symbol difference expressions: A - B
+                    // Must emit R_RISCV_ADD32 + R_RISCV_SUB32 relocation pair
+                    if let Some(result) = self.try_emit_symbol_diff(trimmed, 4) {
+                        result?;
+                        continue;
                     }
                     if is_symbol_ref(trimmed) {
                         let (sym, addend) = parse_symbol_addend(trimmed);
@@ -438,6 +501,11 @@ impl ElfWriter {
             ".quad" | ".8byte" | ".xword" | ".dword" => {
                 for part in args.split(',') {
                     let trimmed = part.trim();
+                    // Handle symbol difference expressions: A - B
+                    if let Some(result) = self.try_emit_symbol_diff(trimmed, 8) {
+                        result?;
+                        continue;
+                    }
                     if is_symbol_ref(trimmed) {
                         let (sym, addend) = parse_symbol_addend(trimmed);
                         self.add_reloc(RelocType::Abs64.elf_type(), sym, addend);
@@ -1392,7 +1460,12 @@ fn parse_section_directive(args: &str) -> (String, String, String) {
     let sec_type = if parts.len() > 2 {
         parts[2].trim().to_string()
     } else {
-        "@progbits".to_string()
+        // Default type based on section name
+        if name == ".bss" || name.starts_with(".bss.") || name.starts_with(".tbss") {
+            "@nobits".to_string()
+        } else {
+            "@progbits".to_string()
+        }
     };
     (name, flags, sec_type)
 }
@@ -1499,6 +1572,37 @@ fn is_symbol_ref(s: &str) -> bool {
     }
     // It's a symbol reference if it starts with a letter, underscore, or dot
     first.is_ascii_alphabetic() || first == '_' || first == '.'
+}
+
+/// Find the position of the '-' operator in a symbol difference expression
+/// like "sym_a - sym_b". Returns None if no valid symbol difference is found.
+/// Skips any '-' at position 0 (negative number), and handles '.' in symbol names.
+fn find_symbol_diff_minus(expr: &str) -> Option<usize> {
+    // Walk through the expression looking for ' - ' or '-' between two symbol-like tokens
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let mut i = 1; // Start at 1 to skip leading '-' (negative)
+
+    while i < len {
+        if bytes[i] == b'-' {
+            // Check if left side looks like the end of a symbol name
+            let left_char = bytes[i - 1];
+            let left_ok = left_char.is_ascii_alphanumeric() || left_char == b'_' || left_char == b'.' || left_char == b' ';
+
+            // Check if right side looks like the start of a symbol name (possibly after whitespace)
+            let right_start = expr[i + 1..].trim_start();
+            if !right_start.is_empty() {
+                let right_char = right_start.as_bytes()[0];
+                let right_ok = right_char.is_ascii_alphabetic() || right_char == b'_' || right_char == b'.';
+                if left_ok && right_ok {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    None
 }
 
 fn parse_symbol_addend(s: &str) -> (String, i64) {
