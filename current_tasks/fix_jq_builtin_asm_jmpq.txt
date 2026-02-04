@@ -1,9 +1,0 @@
-Fix x86 builtin assembler jmpq/callq/retq aliases for jq build
-
-The x86 builtin assembler does not recognize jmpq, callq, or retq as valid
-instruction mnemonics. These are standard AT&T syntax aliases for jmp, call,
-and ret on x86-64. The codegen emits "jmpq *%rax" for computed gotos (switch
-jump tables), which causes jq (and potentially other projects) to fail when
-building with MY_ASM=builtin.
-
-Fix: Add jmpq/callq/retq as aliases in the encoder's mnemonic dispatch.

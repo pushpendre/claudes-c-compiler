@@ -1,8 +1,0 @@
-LOCKED - Implementing a native x86-64 ELF linker in Rust.
-
-When MY_LD is set, the compiler will use this built-in linker instead of
-calling the system ld. The linker reads ELF .o files and .a archives, resolves
-symbols against system shared libraries (libc.so.6), handles relocations, and
-emits a dynamically-linked ELF executable.
-
-Scope: x86-64 only for now. Must pass most verify_compiler.py test cases.

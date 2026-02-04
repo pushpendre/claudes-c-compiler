@@ -1,9 +1,0 @@
-Task: Fix i686 builtin assembler to pass zlib tests
-Status: in_progress
-Started: 2026-02-04
-
-Problem: MY_ASM=builtin python3 /verify/verify_zlib.py --compiler ccc-i686
-crashes with SIGSEGV. Without MY_ASM=builtin it works fine.
-
-Plan: Debug the segfault, find encoding/relocation/ELF issues in the
-i686 builtin assembler, and fix them.

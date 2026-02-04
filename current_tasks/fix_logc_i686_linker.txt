@@ -1,3 +1,0 @@
-Fixing log.c project: i686 builtin linker causes segfault in callback test.
-x86/arm/riscv all pass. i686 fails with builtin linker (GCC asm + builtin ld = FAIL).
-The crash happens when calling a function pointer (callback) registered via log_add_callback.

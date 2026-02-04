@@ -1,8 +1,0 @@
-Implementing a native RISC-V 64-bit ELF linker in Rust.
-
-When MY_LD=builtin is set, the compiler will use this built-in linker instead of
-calling the system ld for RISC-V targets. The linker reads ELF .o files and .a
-archives, resolves symbols against system shared libraries (libc.so.6), handles
-RISC-V relocations, and emits a dynamically-linked ELF executable.
-
-Scope: RISC-V 64-bit only. Must pass most verify_compiler.py test cases.

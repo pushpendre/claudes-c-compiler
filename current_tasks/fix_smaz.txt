@@ -1,2 +1,0 @@
-Testing smaz project with builtin asm/ld on all architectures.
-Will fix any compiler/assembler/linker issues found.

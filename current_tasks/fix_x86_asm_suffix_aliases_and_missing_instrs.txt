@@ -1,9 +1,0 @@
-Fix x86 builtin assembler: add suffix aliases and missing instructions for project builds.
-
-The x86 builtin assembler fails on many projects when run with MY_ASM=builtin because:
-1. jmpq/callq not recognized (should map to jmp/call) - blocks lua, jq, etc.
-2. mov/cmp/add/sub without size suffix not handled (inline asm) - blocks mbedtls
-3. cpuid, stc, rdtsc, syscall, etc. not implemented - blocks mbedtls, libsodium
-4. rep without following string op (rep; ret pattern) - blocks libuv
-5. Various string ops (movsq, stosq, etc.) missing
-6. Various other missing instructions needed for project builds

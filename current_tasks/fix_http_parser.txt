@@ -1,2 +1,0 @@
-Testing http-parser project with MY_ASM=builtin MY_LD=builtin on all architectures.
-Will fix any compiler/assembler/linker issues found.

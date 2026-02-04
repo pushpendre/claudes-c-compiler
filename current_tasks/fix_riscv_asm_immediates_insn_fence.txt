@@ -1,8 +1,0 @@
-Fix RISC-V assembler issues:
-1. Immediate operand parsing for shift/load instructions (slli, srli, lhu with immediates)
-2. .insn directive support
-3. fscsr/frcsr CSR instructions
-4. c.nop compressed instruction
-5. fence instruction output bugs
-6. Inline asm comment stripping (/* ... */ in asm)
-7. Named operand %[tmp] handling in inline asm
