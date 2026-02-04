@@ -1,0 +1,2 @@
+Working on getting monocypher project to build and pass tests with builtin assembler and linker.
+Testing on x86, arm, riscv, i686 targets.
