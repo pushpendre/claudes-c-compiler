@@ -1,0 +1,8 @@
+Fix tinycthread: x86 and ARM linkers missing PT_TLS for .tbss-only TLS
+
+When a program uses _Thread_local variables that are zero-initialized (going into .tbss
+rather than .tdata), the x86 and ARM linkers fail to emit a PT_TLS program header.
+This causes segfaults during thread exit in glibc's RPC thread cleanup.
+
+Fix: Set tls_addr to the current file offset when only .tbss sections exist,
+so that PT_TLS is correctly emitted even without .tdata.
