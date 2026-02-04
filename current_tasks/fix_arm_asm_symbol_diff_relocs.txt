@@ -1,7 +1,0 @@
-Fix ARM assembler symbol difference relocations
-
-Port the same fix from RISC-V (commit 9b0d4ea4) to the ARM assembler:
-- Add Add32/Sub32/Add64/Sub64 to RelocType enum
-- Implement try_emit_symbol_diff() for proper .word A-B handling
-- Fix .bss default section type to @nobits in parse_section_directive
-- Improve .long/.word/.quad symbol reference handling
