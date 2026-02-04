@@ -1,0 +1,15 @@
+Task: Eliminate redundant xorl %eax, %eax instructions in peephole optimizer
+Started: 2026-02-04
+
+Problem: The accumulator-based codegen generates patterns like:
+  xorl %eax, %eax
+  movq %rax, -N(%rbp)
+  xorl %eax, %eax          # redundant - rax is already zero
+  movq %rax, -M(%rbp)
+
+The second xorl is redundant because movq %rax, -N(%rbp) doesn't modify %rax.
+
+This pattern appears ~4000 times in sqlite3.c's VdbeExec function alone.
+
+Fix: Add a pattern in combined_local_pass that tracks when %rax is known to be zero
+and skips redundant xorl %eax, %eax instructions.
