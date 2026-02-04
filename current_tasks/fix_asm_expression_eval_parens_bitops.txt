@@ -1,0 +1,6 @@
+Fix assembler expression evaluation to support:
+1. Parenthesized expressions like (8 * 16 + 8 * 8) in ARM and RISC-V assemblers
+2. Bitwise OR operator | in RISC-V assembler (for musl vfork.s)
+3. Proper operator precedence (* before +/-)
+4. Fix ARM musl linker symbol resolution for .hidden symbols from .s files
+5. Fix ARM libffi st2 vector instruction support
