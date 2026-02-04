@@ -1,0 +1,8 @@
+Implement .set/.equ directive support in ARM and RISC-V assembler ELF writers.
+
+Currently, .set/.equ is fully implemented in x86 and i686 backends (storing aliases
+in a HashMap, creating alias symbols in the ELF output, resolving relocations through
+aliases). ARM and RISC-V parse the directive but have TODO stubs in their ELF writers.
+
+This task implements the same alias functionality in ARM and RISC-V to make the
+assemblers more cohesive across all four backends.
