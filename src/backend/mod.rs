@@ -1,3 +1,4 @@
+pub(crate) mod asm_expr;      // Shared assembly expression evaluator (arithmetic, bitwise, parens)
 pub(crate) mod common;
 #[allow(dead_code)]
 pub(crate) mod elf;

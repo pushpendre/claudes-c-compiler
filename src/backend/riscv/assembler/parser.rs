@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+use crate::backend::asm_expr;
 use crate::backend::elf;
 
 /// A parsed assembly operand.
@@ -143,6 +144,10 @@ pub enum Directive {
     Cfi,
     /// Other ignorable directives: .file, .loc, .ident, etc.
     Ignored,
+    /// `.pushsection name, "flags", @type` — push current section and switch
+    PushSection(SectionInfo),
+    /// `.popsection` / `.previous` — pop section stack
+    PopSection,
     /// `.insn ...` — emit raw instruction encoding
     Insn(String),
     /// Unknown directive — preserved for forward compatibility
@@ -168,12 +173,62 @@ pub enum AsmStatement {
 }
 
 /// Parse assembly text into a list of statements.
+/// Expand .rept/.endr blocks by repeating contained lines.
+// TODO: extract expand_rept_blocks to shared module (duplicated in ARM, RISC-V, x86 parsers)
+fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = strip_comment(lines[i]).trim().to_string();
+        if trimmed.starts_with(".rept ") || trimmed.starts_with(".rept\t") {
+            let count_str = trimmed[".rept".len()..].trim();
+            let count_val = parse_int_literal(count_str)
+                .map_err(|e| format!(".rept: bad count '{}': {}", count_str, e))?;
+            // Treat negative counts as 0 (matches GNU as behavior)
+            let count = if count_val < 0 { 0usize } else { count_val as usize };
+            let mut depth = 1;
+            let mut body = Vec::new();
+            i += 1;
+            while i < lines.len() {
+                let inner = strip_comment(lines[i]).trim().to_string();
+                if inner.starts_with(".rept ") || inner.starts_with(".rept\t") {
+                    depth += 1;
+                } else if inner == ".endr" {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                body.push(lines[i]);
+                i += 1;
+            }
+            if depth != 0 {
+                return Err(".rept without matching .endr".to_string());
+            }
+            let expanded_body = expand_rept_blocks(&body)?;
+            for _ in 0..count {
+                result.extend(expanded_body.iter().cloned());
+            }
+        } else if trimmed == ".endr" {
+            // stray .endr without .rept - skip
+        } else {
+            result.push(lines[i].to_string());
+        }
+        i += 1;
+    }
+    Ok(result)
+}
+
 pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
     // Pre-process: strip C-style /* ... */ comments (may span multiple lines)
     let text = strip_c_comments(text);
 
+    // Expand .rept/.endr blocks
+    let raw_lines: Vec<&str> = text.lines().collect();
+    let expanded_lines = expand_rept_blocks(&raw_lines)?;
+
     let mut statements = Vec::new();
-    for (line_num, line) in text.lines().enumerate() {
+    for (line_num, line) in expanded_lines.iter().enumerate() {
         let line = line.trim();
 
         // Skip empty lines
@@ -450,6 +505,11 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         | ".cfi_rel_offset" | ".cfi_register" | ".cfi_return_column"
         | ".cfi_undefined" | ".cfi_same_value" | ".cfi_escape" => Directive::Cfi,
 
+        ".pushsection" => {
+            Directive::PushSection(parse_section_args(args))
+        }
+        ".popsection" | ".previous" => Directive::PopSection,
+
         // Other ignorable directives
         ".file" | ".loc" | ".ident" | ".addrsig" | ".addrsig_sym"
         | ".build_attributes" | ".eabi_attribute" => Directive::Ignored,
@@ -593,26 +653,7 @@ fn parse_data_value_int(s: &str) -> Result<i64, String> {
     if s.is_empty() {
         return Ok(0);
     }
-
-    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else {
-        (false, s)
-    };
-
-    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16)
-            .map_err(|e| format!("invalid hex: {}: {}", s, e))?
-    } else {
-        s.parse::<u64>()
-            .map_err(|e| format!("invalid integer: {}: {}", s, e))?
-    };
-
-    if negative {
-        Ok(-(val as i64))
-    } else {
-        Ok(val as i64)
-    }
+    asm_expr::parse_integer_expr(s)
 }
 
 /// Find the position of the '-' operator in a symbol difference expression
@@ -943,26 +984,7 @@ pub fn parse_int_literal(s: &str) -> Result<i64, String> {
         return Err("empty integer literal".to_string());
     }
 
-    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else {
-        (false, s)
-    };
-
-    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16)
-            .map_err(|e| format!("invalid hex literal '{}': {}", s, e))?
-    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-        u64::from_str_radix(bin, 2)
-            .map_err(|e| format!("invalid binary literal '{}': {}", s, e))?
-    } else {
-        s.parse::<u64>()
-            .map_err(|e| format!("invalid integer literal '{}': {}", s, e))?
-    };
-
-    if negative {
-        Ok(-(val as i64))
-    } else {
-        Ok(val as i64)
-    }
+    // Use the shared expression evaluator which handles parentheses,
+    // operator precedence, bitwise ops (|, &, ^, <<, >>), and arithmetic.
+    asm_expr::parse_integer_expr(s)
 }

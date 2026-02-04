@@ -89,6 +89,8 @@ pub struct ElfWriter {
     numeric_labels: HashMap<String, Vec<(String, u64)>>,
     /// Symbol aliases from .set/.equ directives
     aliases: HashMap<String, String>,
+    /// Section stack for .pushsection/.popsection
+    section_stack: Vec<String>,
 }
 
 struct PendingReloc {
@@ -271,6 +273,7 @@ impl ElfWriter {
             pcrel_hi_counter: 0,
             numeric_labels: HashMap::new(),
             aliases: HashMap::new(),
+            section_stack: Vec::new(),
         }
     }
 
@@ -410,6 +413,19 @@ impl ElfWriter {
 
     fn process_directive(&mut self, directive: &Directive) -> Result<(), String> {
         match directive {
+            Directive::PushSection(info) => {
+                self.section_stack.push(self.current_section.clone());
+                // Same logic as Directive::Section
+                return self.process_directive(&Directive::Section(info.clone()));
+            }
+            Directive::PopSection => {
+                // Restore the previous section from the stack
+                if let Some(prev) = self.section_stack.pop() {
+                    self.current_section = prev;
+                }
+                // If stack is empty, silently keep current section (matches GNU as behavior)
+                return Ok(());
+            }
             Directive::Section(info) => {
                 let sh_type = match info.sec_type.as_str() {
                     "@nobits" => SHT_NOBITS,

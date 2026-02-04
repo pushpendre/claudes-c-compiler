@@ -13,7 +13,7 @@ set.  It accepts the same textual assembly that GCC's gas would consume and
 produces ABI-compatible `.o` files that any standard AArch64 ELF linker (or
 the companion built-in linker) can link.
 
-The implementation spans roughly 5,650 lines of Rust across four files and is
+The implementation spans roughly 6,260 lines of Rust across four files and is
 organized as a clean three-stage pipeline.
 
 ```
@@ -25,14 +25,14 @@ organized as a clean three-stage pipeline.
        v
   +------------------+
   |   parser.rs       |   Stage 1: Tokenize + Parse
-  |   (1,181 lines)   |   Lines -> AsmStatement[]
+  |   (1,234 lines)   |   Lines -> AsmStatement[]
   +------------------+
        |
        | Vec<AsmStatement>
        v
   +------------------+
   |   elf_writer.rs   |   Stage 2: Process + Encode + Emit
-  |   (1,194 lines)   |   Walks statements, calls encoder,
+  |   (797 lines)     |   Walks statements, calls encoder,
   |                    |   builds sections, symbols, relocs
   +------------------+
        |         ^
@@ -40,7 +40,7 @@ organized as a clean three-stage pipeline.
        v         |
   +------------------+
   |   encoder.rs      |   Instruction Encoding Library
-  |   (3,250 lines)   |   Mnemonic + Operands -> u32 words
+  |   (4,012 lines)   |   Mnemonic + Operands -> u32 words
   +------------------+
        |
        v
@@ -50,7 +50,7 @@ organized as a clean three-stage pipeline.
 The single public entry point is:
 
 ```rust
-// mod.rs (29 lines)
+// mod.rs (221 lines)
 pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String>
 ```
 
@@ -73,8 +73,8 @@ IR; no raw text parsing happens after this point.
 | Type | Role |
 |------|------|
 | `AsmStatement` | Top-level IR node: `Label`, `Directive`, `Instruction`, or `Empty`. |
-| `AsmDirective` | Fully-typed directive variant (28 kinds, from `.section` to `.cfi_*`). |
-| `Operand` | Operand of an instruction (16 variants covering every AArch64 addressing mode). |
+| `AsmDirective` | Fully-typed directive variant (24 kinds, from `.section` to `.cfi_*`). |
+| `Operand` | Operand of an instruction (20 variants covering every AArch64 addressing mode). |
 | `SectionDirective` | Parsed `.section name, "flags", @type` triple. |
 | `DataValue` | Data that can be an integer, a symbol, a symbol+offset, or a symbol difference. |
 | `SizeExpr` | The expression in `.size sym, expr` -- either a constant or `.- sym`. |
@@ -103,12 +103,14 @@ Label(".LBB0_4")                   -- branch target
 RegArrangement { reg, arr }        -- v0.16b (NEON arrangement)
 RegLane { reg, elem_size, index }  -- v0.d[1] (NEON lane)
 RegList(Vec<Operand>)              -- {v0.16b, v1.16b}
+RegListIndexed { regs, index }     -- {v0.s, v1.s}[0] (NEON single-element)
 ```
 
 ### Parsing Algorithm
 
 ```
 parse_asm(text)
+  0. Pre-pass: expand_rept_blocks() -- flatten .rept/.endr into repeated lines
   for each line in text:
     1. Trim whitespace
     2. Strip comments (// style and @ GAS-ARM style)
@@ -118,7 +120,7 @@ parse_asm(text)
           - .L* prefixed names are recognized as local labels
           - Any text after the colon is recursively parsed
        b. Try to match "." prefix -> parse_directive()
-          - 28+ directive types, each with its own sub-parser
+          - 24 directive types, each with its own sub-parser
        c. Otherwise -> parse_instruction()
           - Split mnemonic from operand string
           - parse_operands() splits on ',' respecting [] and {} nesting
@@ -130,10 +132,11 @@ parse_asm(text)
 
 | Category | Directives |
 |----------|-----------|
-| Sections | `.section`, `.text`, `.data`, `.bss`, `.rodata` |
+| Sections | `.section`, `.text`, `.data`, `.bss`, `.rodata`, `.pushsection`, `.popsection`/`.previous` |
 | Symbols | `.globl`/`.global`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type`, `.size`, `.local`, `.comm`, `.set`/`.equ` |
 | Alignment | `.align`, `.p2align` (power-of-2), `.balign` (byte count) |
 | Data emission | `.byte`, `.short`/`.hword`/`.2byte`, `.long`/`.4byte`/`.word`, `.quad`/`.8byte`/`.xword`, `.zero`/`.space`, `.ascii`, `.asciz`/`.string` |
+| Repetition | `.rept` count / `.endr` (expanded as a pre-pass before parsing) |
 | CFI | `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa_offset`, `.cfi_offset`, and 12 more (all passed through as no-ops) |
 | Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute` |
 
@@ -196,7 +199,7 @@ The dispatch table in `encode_instruction()` maps ~120 mnemonics:
 | **Loads/Stores** | `ldr`, `str`, `ldrb`, `strb`, `ldrh`, `strh`, `ldrsw`, `ldrsb`, `ldrsh`, `ldp`, `stp`, `ldnp`, `stnp`, `ldxr`, `stxr`, `ldxrb`, `stxrb`, `ldxrh`, `stxrh`, `ldaxr`, `stlxr`, `ldaxrb`, `stlxrb`, `ldaxrh`, `stlxrh`, `ldar`, `stlr`, `ldarb`, `stlrb`, `ldarh`, `stlrh` |
 | **Address** | `adrp`, `adr` |
 | **Floating point** | `fmov`, `fadd`, `fsub`, `fmul`, `fdiv`, `fneg`, `fabs`, `fsqrt`, `fcmp`, `fcvtzs`, `fcvtzu`, `fcvtas`, `fcvtau`, `fcvtns`, `fcvtnu`, `fcvtms`, `fcvtmu`, `fcvtps`, `fcvtpu`, `ucvtf`, `scvtf`, `fcvt` |
-| **NEON/SIMD** | `cnt`, `uaddlv`, `cmeq`, `cmtst`, `uqsub`, `sqsub`, `ushr`, `sshr`, `shl`, `sli`, `ext`, `addv`, `umov`, `dup`, `ins`, `not`, `movi`, `bic`, `bsl`, `pmul`, `mla`, `mls`, `rev64`, `tbl`, `tbx`, `ld1`, `ld1r`, `st1`, `uzp1`, `uzp2`, `zip1`, `zip2`, `eor3`, `pmull`, `pmull2`, `aese`, `aesd`, `aesmc`, `aesimc` |
+| **NEON/SIMD** | `cnt`, `uaddlv`, `cmeq`, `cmtst`, `uqsub`, `sqsub`, `ushr`, `sshr`, `shl`, `sli`, `ext`, `addv`, `umov`, `dup`, `ins`, `not`, `movi`, `bic`, `bsl`, `pmul`, `mla`, `mls`, `rev64`, `tbl`, `tbx`, `ld1`, `ld1r`, `ld2`, `ld3`, `ld4`, `st1`, `st2`, `st3`, `st4`, `uzp1`, `uzp2`, `zip1`, `zip2`, `eor3`, `pmull`, `pmull2`, `aese`, `aesd`, `aesmc`, `aesimc` |
 | **System** | `nop`, `yield`, `clrex`, `dc`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
 | **Bit manipulation** | `clz`, `cls`, `rbit`, `rev`, `rev16`, `rev32` |
 | **CRC32** | `crc32b`, `crc32h`, `crc32w`, `crc32x`, `crc32cb`, `crc32ch`, `crc32cw`, `crc32cx` |
@@ -281,6 +284,7 @@ pub struct ElfWriter {
     current_section: String,              // Active section name
     sections: HashMap<String, Section>,   // All sections by name
     section_order: Vec<String>,           // Insertion order (deterministic output)
+    section_stack: Vec<String>,           // Stack for .pushsection/.popsection
     symbols: Vec<ElfSymbol>,              // Built symbol table
     labels: HashMap<String, (String, u64)>, // label -> (section, offset)
     pending_branch_relocs: Vec<PendingReloc>,  // Local branches to fix up
@@ -301,6 +305,8 @@ process_statements(statements):
     Label(name)        -> record (section, offset) in labels map
     Directive(dir)     -> process_directive():
                            Section   -> ensure_section(), update current_section
+                           PushSection -> push current_section onto section_stack, switch
+                           PopSection  -> pop section_stack, restore current_section
                            Global    -> mark in global_symbols
                            Weak      -> mark in weak_symbols
                            Hidden/Protected/Internal -> mark visibility
@@ -439,8 +445,8 @@ relaxation passes (unlike x86).  The only multi-word output is the
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | 29 | Public API: `assemble()` entry point, module declarations |
-| `parser.rs` | 1,181 | Tokenizer and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | 3,250 | Instruction encoder: mnemonic + operands -> `u32` machine code |
-| `elf_writer.rs` | 1,194 | ELF object file writer: statements -> `.o` file on disk |
-| **Total** | **5,654** | |
+| `mod.rs` | 221 | Public API: `assemble()` entry point, module declarations |
+| `parser.rs` | 1,234 | Tokenizer and parser: text -> `Vec<AsmStatement>` |
+| `encoder.rs` | 4,012 | Instruction encoder: mnemonic + operands -> `u32` machine code |
+| `elf_writer.rs` | 797 | ELF object file writer: statements -> `.o` file on disk |
+| **Total** | **6,264** | |

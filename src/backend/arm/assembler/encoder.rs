@@ -369,9 +369,15 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "rev64" => encode_neon_rev64(operands),
         "tbl" => encode_neon_tbl(operands),
         "tbx" => encode_neon_tbx(operands),
-        "ld1" => encode_neon_ld1(operands),
+        "ld1" => encode_neon_ld_st_dispatch(operands, true, 1),
         "ld1r" => encode_neon_ld1r(operands),
-        "st1" => encode_neon_st1(operands),
+        "ld2" => encode_neon_ld_st_dispatch(operands, true, 2),
+        "ld3" => encode_neon_ld_st_dispatch(operands, true, 3),
+        "ld4" => encode_neon_ld_st_dispatch(operands, true, 4),
+        "st1" => encode_neon_ld_st_dispatch(operands, false, 1),
+        "st2" => encode_neon_ld_st_dispatch(operands, false, 2),
+        "st3" => encode_neon_ld_st_dispatch(operands, false, 3),
+        "st4" => encode_neon_ld_st_dispatch(operands, false, 4),
         "uzp1" => encode_neon_zip_uzp(operands, 0b001, false),
         "uzp2" => encode_neon_zip_uzp(operands, 0b101, false),
         "zip1" => encode_neon_zip_uzp(operands, 0b011, false),
@@ -2075,6 +2081,18 @@ fn encode_adrp(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_adr(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, _) = get_reg(operands, 0)?;
+
+    // Check for immediate offset form: adr Rd, #imm
+    // TODO: validate 21-bit signed immediate range
+    if let Some(Operand::Imm(imm)) = operands.get(1) {
+        let imm = *imm;
+        // ADR: 0 immlo[1:0] 10000 immhi[18:0] Rd
+        let immlo = ((imm as u32) & 3) << 29;
+        let immhi = (((imm as u32) >> 2) & 0x7FFFF) << 5;
+        let word = immlo | (0b10000 << 24) | immhi | rd;
+        return Ok(EncodeResult::Word(word));
+    }
+
     let (sym, addend) = get_symbol(operands, 1)?;
     // ADR: 0 immlo[1:0] 10000 immhi[18:0] Rd
     let word = (0b10000 << 24) | rd;
@@ -3515,13 +3533,105 @@ fn encode_neon_ld1r(operands: &[Operand]) -> Result<EncodeResult, String> {
 }
 
 /// Encode NEON LD1 (vector load, multiple structures)
-fn encode_neon_ld1(operands: &[Operand]) -> Result<EncodeResult, String> {
-    encode_neon_ld_st(operands, true)
+/// Dispatch LD/ST1-4: choose between "multiple structures" and "single structure (element)" encoding.
+fn encode_neon_ld_st_dispatch(operands: &[Operand], is_load: bool, num_structs: u32) -> Result<EncodeResult, String> {
+    // If the first operand is a RegListIndexed, use single-element encoding
+    if let Some(Operand::RegListIndexed { .. }) = operands.first() {
+        return encode_neon_ld_st_single(operands, is_load, num_structs);
+    }
+    // Otherwise use multiple-structures encoding (only valid for ld1/st1 currently)
+    // TODO: add ld2-4/st2-4 multiple-structures encoding
+    if num_structs != 1 {
+        return Err(format!("ld{}/st{} multiple structures not yet supported", num_structs, num_structs));
+    }
+    encode_neon_ld_st(operands, is_load)
 }
 
-/// Encode NEON ST1 (vector store, multiple structures)
-fn encode_neon_st1(operands: &[Operand]) -> Result<EncodeResult, String> {
-    encode_neon_ld_st(operands, false)
+/// Encode NEON LD/ST single structure (element):
+/// st1 {v0.s}[0], [x3]
+/// st2 {v0.s, v1.s}[0], [x3]
+/// st4 {v0.s, v1.s, v2.s, v3.s}[0], [x3]
+/// ld2 {v0.s, v1.s}[0], [x3]
+// TODO: add post-index form [Xn], #imm
+fn encode_neon_ld_st_single(operands: &[Operand], is_load: bool, num_structs: u32) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err(format!("ld/st{} single element requires at least 2 operands", num_structs));
+    }
+
+    let (regs, index) = match &operands[0] {
+        Operand::RegListIndexed { regs, index } => (regs, *index),
+        _ => return Err("expected register list with index".to_string()),
+    };
+
+    if regs.len() as u32 != num_structs {
+        return Err(format!("expected {} registers in list, got {}", num_structs, regs.len()));
+    }
+    // TODO: validate that registers in the list are consecutive (ARM ISA requirement)
+
+    // Get element size and first register from the list
+    let (rt, elem_size) = match &regs[0] {
+        Operand::RegArrangement { reg, arrangement } => {
+            (parse_reg_num(reg).ok_or("invalid register in list")?, arrangement.clone())
+        }
+        _ => return Err("expected register with arrangement in list".to_string()),
+    };
+
+    // Get base register
+    let rn = match &operands[1] {
+        Operand::Mem { base, offset: 0 } => {
+            parse_reg_num(base).ok_or_else(|| format!("invalid base register: {}", base))?
+        }
+        _ => return Err("expected [Xn] memory operand".to_string()),
+    };
+
+    let l_bit = if is_load { 1u32 } else { 0u32 };
+
+    // R bit: 0 for 1,3 registers; 1 for 2,4 registers
+    let r_bit = match num_structs {
+        1 | 3 => 0u32,
+        2 | 4 => 1u32,
+        _ => return Err(format!("unsupported struct count: {}", num_structs)),
+    };
+
+    // Compute opcode, S, Q, size based on element size and index
+    let (opcode, s_bit, q_bit, size_field) = match elem_size.as_str() {
+        "b" => {
+            // opcode = 000 (1,2 regs) or 001 (3,4 regs)
+            let base_opc = if num_structs <= 2 { 0b000u32 } else { 0b001u32 };
+            // index bits: Q:S:size[1]:size[0] = 4 bits for 0-15
+            let q = (index >> 3) & 1;
+            let s = (index >> 2) & 1;
+            let sz = index & 3;
+            (base_opc, s, q, sz)
+        }
+        "h" => {
+            let base_opc = if num_structs <= 2 { 0b010u32 } else { 0b011u32 };
+            // index bits: Q:S:size[1] = 3 bits for 0-7, size[0]=0
+            let q = (index >> 2) & 1;
+            let s = (index >> 1) & 1;
+            let sz = (index & 1) << 1;
+            (base_opc, s, q, sz)
+        }
+        "s" => {
+            let base_opc = if num_structs <= 2 { 0b100u32 } else { 0b101u32 };
+            // index bits: Q:S = 2 bits for 0-3, size=00
+            let q = (index >> 1) & 1;
+            let s = index & 1;
+            (base_opc, s, q, 0b00u32)
+        }
+        "d" => {
+            let base_opc = if num_structs <= 2 { 0b100u32 } else { 0b101u32 };
+            // index bits: Q = 1 bit for 0-1, S=0, size=01
+            let q = index & 1;
+            (base_opc, 0u32, q, 0b01u32)
+        }
+        _ => return Err(format!("unsupported element size for ld/st single: {}", elem_size)),
+    };
+
+    // Encoding: Q 0011010 L R 00000 opcode S size Rn Rt
+    let word = (q_bit << 30) | (0b0011010 << 23) | (l_bit << 22) | (r_bit << 21)
+        | (opcode << 13) | (s_bit << 12) | (size_field << 10) | (rn << 5) | rt;
+    Ok(EncodeResult::Word(word))
 }
 
 /// Common encoder for LD1/ST1 (multiple structures)

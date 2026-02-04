@@ -82,6 +82,8 @@ pub struct ElfWriter {
     symbol_visibility: HashMap<String, u8>,
     /// Symbol aliases from .set/.equ directives
     aliases: HashMap<String, String>,
+    /// Section stack for .pushsection/.popsection
+    section_stack: Vec<String>,
 }
 
 struct PendingReloc {
@@ -125,6 +127,7 @@ impl ElfWriter {
             symbol_sizes: HashMap::new(),
             symbol_visibility: HashMap::new(),
             aliases: HashMap::new(),
+            section_stack: Vec::new(),
         }
     }
 
@@ -274,6 +277,11 @@ impl ElfWriter {
             AsmStatement::Empty => Ok(()),
 
             AsmStatement::Label(name) => {
+                // Default to .text if no section directive has been seen yet
+                if self.current_section.is_empty() {
+                    self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 4);
+                    self.current_section = ".text".to_string();
+                }
                 // Record label position
                 let section = self.current_section.clone();
                 let offset = self.current_offset();
@@ -295,6 +303,21 @@ impl ElfWriter {
         match dir {
             AsmDirective::Section(sec) => {
                 self.process_section_directive(sec);
+                Ok(())
+            }
+
+            AsmDirective::PushSection(sec) => {
+                self.section_stack.push(self.current_section.clone());
+                self.process_section_directive(sec);
+                Ok(())
+            }
+
+            AsmDirective::PopSection => {
+                // Restore the previous section from the stack
+                if let Some(prev) = self.section_stack.pop() {
+                    self.current_section = prev;
+                }
+                // If stack is empty, silently keep current section (matches GNU as behavior)
                 Ok(())
             }
 

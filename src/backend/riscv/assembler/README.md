@@ -103,6 +103,7 @@ Assembler {
     sections:              HashMap<String, Section>,   // ".text", ".data", ...
     section_order:         Vec<String>,                // insertion-order tracking
     current_section:       String,                     // currently active section
+    section_stack:         Vec<String>,                // saved sections for .pushsection/.popsection
     labels:                HashMap<String, (String, u64)>,  // name -> (section, offset)
     numeric_labels:        HashMap<String, Vec<(String, u64)>>,  // "1" -> [(sec, off), ...]
     symbols:               Vec<ElfSymbol>,              // accumulated symbol table
@@ -228,6 +229,8 @@ The assembler core iterates over parsed lines and handles directives inline:
 | `.align` / `.balign` / `.p2align` | Pad to alignment boundary              |
 | `.equ` / `.set`       | Define a symbol with a constant value              |
 | `.comm` / `.lcomm`    | Reserve common/local-common storage                |
+| `.pushsection` / `.popsection` / `.previous` | Push/pop section stack (save and restore active section) |
+| `.rept` / `.endr`           | Repeat enclosed lines N times (expanded during parsing) |
 | `.option push/pop/rvc/norvc` | Control RVC compression                    |
 | `.attribute` / `.file` / `.ident` | Metadata / ignored                      |
 | `.cfi_*`              | Silently consumed (CFI info not emitted)           |
