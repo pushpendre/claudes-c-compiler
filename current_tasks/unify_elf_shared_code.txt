@@ -1,0 +1,7 @@
+Extract duplicated ELF code from all 4 assembler and linker backends into a shared module.
+
+Currently every backend duplicates: ELF constants, StringTable, read/write helpers,
+write_shdr, parse_archive_members, and parse_linker_script. This is ~1500 lines of
+near-identical code across 8+ files.
+
+Plan: Create src/backend/elf.rs with shared code, update all backends to use it.
