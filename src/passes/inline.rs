@@ -208,6 +208,7 @@ fn select_inline_site(
     caller_at_hard_cap: bool,
     caller_at_absolute_cap: bool,
     caller_has_section: bool,
+    caller_is_recursive: bool,
     budget_remaining: usize,
     always_inline_budget_remaining: usize,
 ) -> Option<(InlineCallSite, usize, bool)> {
@@ -246,6 +247,12 @@ fn select_inline_site(
         let is_static_inline_eligible = callee_data.is_static_inline
             && callee_inst_count <= MAX_INLINE_INSTRUCTIONS
             && callee_data.blocks.len() <= MAX_INLINE_BLOCKS;
+        // For recursive callers, only inline tiny callees and always_inline callees.
+        // Inlining larger callees into recursive functions multiplies the stack frame
+        // increase by the recursion depth, easily causing stack overflow.
+        if caller_is_recursive && !is_tiny && !callee_data.is_always_inline {
+            continue;
+        }
         if is_tiny || (is_small && (!budget_exhausted || callee_data.is_always_inline)) || is_static_inline_eligible {
             let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
             return Some((site.clone(), callee_inst_count, use_relaxed));
@@ -258,6 +265,11 @@ fn select_inline_site(
         let callee_inst_count: usize = callee_data.blocks.iter()
             .map(|b| b.instructions.len())
             .sum();
+        // For recursive callers, skip non-tiny, non-always_inline callees.
+        // (Tiny callees were handled in the first pass.)
+        if caller_is_recursive && !callee_data.is_always_inline {
+            continue;
+        }
         // When the caller has a section attribute (e.g., .init.text),
         // allow inlining small callees even into large callers to
         // prevent section mismatch errors.
@@ -347,6 +359,22 @@ pub fn run(module: &mut IrModule) -> usize {
         }
 
         let caller_has_section = module.functions[func_idx].section.is_some();
+        // Check if the caller is directly recursive (calls itself).
+        // If so, we must be very conservative about inlining other callees
+        // into it, because each inlined callee increases the stack frame
+        // that gets multiplied by the recursion depth.
+        let caller_is_recursive = {
+            let func = &module.functions[func_idx];
+            func.blocks.iter().any(|block| {
+                block.instructions.iter().any(|inst| {
+                    if let Instruction::Call { func: callee_name, .. } = inst {
+                        callee_name == &func.name
+                    } else {
+                        false
+                    }
+                })
+            })
+        };
         let mut budget_remaining = MAX_INLINE_BUDGET_PER_CALLER;
         let mut always_inline_budget_remaining = MAX_ALWAYS_INLINE_BUDGET_PER_CALLER;
         // Iterate to handle chains of inlined calls (A calls B calls C, all small inline).
@@ -381,6 +409,7 @@ pub fn run(module: &mut IrModule) -> usize {
                 caller_at_hard_cap,
                 caller_at_absolute_cap,
                 caller_has_section,
+                caller_is_recursive,
                 budget_remaining,
                 always_inline_budget_remaining,
             );

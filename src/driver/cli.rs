@@ -285,28 +285,11 @@ impl Driver {
                 }
 
                 // Linker pass-through: -Wl,flag1,flag2,...
+                // Keep the whole -Wl argument together so that multi-part flags
+                // like -Wl,-soname,libfoo.so and -Wl,-rpath,/path stay intact.
+                // The linker code splits on commas internally.
                 arg if arg.starts_with("-Wl,") => {
-                    let parts: Vec<&str> = arg[4..].split(',').collect();
-                    let mut j = 0;
-                    while j < parts.len() {
-                        let flag = parts[j];
-                        if flag.is_empty() {
-                            j += 1;
-                            continue;
-                        }
-                        // --defsym takes the next comma-separated arg: --defsym,SYM=VAL
-                        if flag == "--defsym" {
-                            if j + 1 < parts.len() {
-                                self.linker_ordered_items.push(
-                                    format!("-Wl,--defsym={}", parts[j + 1])
-                                );
-                                j += 2;
-                                continue;
-                            }
-                        }
-                        self.linker_ordered_items.push(format!("-Wl,{}", flag));
-                        j += 1;
-                    }
+                    self.linker_ordered_items.push(arg.to_string());
                 }
 
                 // Assembler pass-through: -Wa,flag1,flag2,...

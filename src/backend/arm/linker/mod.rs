@@ -140,7 +140,10 @@ pub fn link_builtin(
                 load_file(&lib_path, &mut objects, &mut globals, &mut needed_sonames, &combined, is_static)?;
             }
         } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
-            for part in wl_arg.split(',') {
+            let parts: Vec<&str> = wl_arg.split(',').collect();
+            let mut j = 0;
+            while j < parts.len() {
+                let part = parts[j];
                 if let Some(lpath) = part.strip_prefix("-L") {
                     extra_lib_paths.push(lpath.to_string());
                 } else if let Some(lib) = part.strip_prefix("-l") {
@@ -156,7 +159,15 @@ pub fn link_builtin(
                     if let Some(eq_pos) = defsym_arg.find('=') {
                         defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                     }
+                } else if part == "--defsym" && j + 1 < parts.len() {
+                    // Two-argument form: --defsym SYM=VAL
+                    j += 1;
+                    let defsym_arg = parts[j];
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                    }
                 }
+                j += 1;
             }
         } else if !arg.starts_with('-') && Path::new(arg).exists() {
             load_file(arg, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, is_static)?;

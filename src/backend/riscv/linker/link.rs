@@ -185,7 +185,10 @@ pub fn link_builtin(
                 };
                 needed_libs.push(libname.to_string());
             } else if let Some(wl) = arg.strip_prefix("-Wl,") {
-                for part in wl.split(',') {
+                let parts: Vec<&str> = wl.split(',').collect();
+                let mut j = 0;
+                while j < parts.len() {
+                    let part = parts[j];
                     if let Some(lib) = part.strip_prefix("-l") {
                         needed_libs.push(lib.to_string());
                     } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
@@ -194,7 +197,15 @@ pub fn link_builtin(
                         if let Some(eq_pos) = defsym_arg.find('=') {
                             defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                         }
+                    } else if part == "--defsym" && j + 1 < parts.len() {
+                        // Two-argument form: --defsym SYM=VAL
+                        j += 1;
+                        let defsym_arg = parts[j];
+                        if let Some(eq_pos) = defsym_arg.find('=') {
+                            defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                        }
                     }
+                    j += 1;
                 }
             }
             i += 1;

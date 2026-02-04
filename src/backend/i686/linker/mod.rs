@@ -154,7 +154,10 @@ fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<Strin
         } else if arg == "-rdynamic" || arg == "--export-dynamic" {
             // Accepted but not currently used
         } else if let Some(wl_args) = arg.strip_prefix("-Wl,") {
-            for part in wl_args.split(',') {
+            let parts: Vec<&str> = wl_args.split(',').collect();
+            let mut j = 0;
+            while j < parts.len() {
+                let part = parts[j];
                 if let Some(libarg) = part.strip_prefix("-l") {
                     if let Some(rest) = libarg.strip_prefix(':') {
                         extra_lib_files.push(rest.to_string());
@@ -169,7 +172,15 @@ fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<Strin
                     if let Some(eq_pos) = defsym_arg.find('=') {
                         defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                     }
+                } else if part == "--defsym" && j + 1 < parts.len() {
+                    // Two-argument form: --defsym SYM=VAL
+                    j += 1;
+                    let defsym_arg = parts[j];
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                    }
                 }
+                j += 1;
             }
         } else if !arg.starts_with('-') && Path::new(arg.as_str()).exists() {
             extra_objects.push(arg.clone());

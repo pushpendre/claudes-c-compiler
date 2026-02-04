@@ -1,2 +1,0 @@
-Fixing libpng project to compile and pass tests with ccc compilers.
-Working on getting x86 target working first, then other architectures.

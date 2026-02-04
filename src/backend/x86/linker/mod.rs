@@ -161,6 +161,13 @@ pub fn link_builtin(
                     if let Some(eq_pos) = defsym_arg.find('=') {
                         defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                     }
+                } else if part == "--defsym" && j + 1 < parts.len() {
+                    // Two-argument form: --defsym SYM=VAL
+                    j += 1;
+                    let defsym_arg = parts[j];
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                    }
                 }
                 j += 1;
             }
