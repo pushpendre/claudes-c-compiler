@@ -394,6 +394,8 @@ The executable is laid out as four PT_LOAD segments plus metadata:
 |   .gnu.hash                                                          |
 |   .dynsym                                                            |
 |   .dynstr                                                            |
+|   .gnu.version   (symbol version indices, if versioning needed)      |
+|   .gnu.version_r (version requirements, if versioning needed)        |
 |   .rela.dyn                                                          |
 |   .rela.plt                                                          |
 +-----------------------------------------------------------------------+
@@ -557,6 +559,9 @@ dynamic linker (`ld-linux-x86-64.so.2`) reads at program startup:
 | `DT_SONAME` | Shared library name (shared libraries only) |
 | `DT_RPATH` / `DT_RUNPATH` | Runtime library search path (if `-rpath` specified) |
 | `DT_RELACOUNT` | Number of R_X86_64_RELATIVE entries (shared libraries) |
+| `DT_VERSYM` | Address of `.gnu.version` (if versioned symbols present) |
+| `DT_VERNEED` | Address of `.gnu.version_r` (if versioned symbols present) |
+| `DT_VERNEEDNUM` | Number of Verneed entries (if versioned symbols present) |
 | `DT_NULL` | Terminator |
 
 ### .rela.dyn Entries

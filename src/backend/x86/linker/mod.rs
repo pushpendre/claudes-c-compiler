@@ -2845,6 +2845,7 @@ fn emit_executable(
     let mut shstr_offsets: HashMap<String, u32> = HashMap::new();
     let known_names = [
         ".interp", ".gnu.hash", ".dynsym", ".dynstr",
+        ".gnu.version", ".gnu.version_r",
         ".rela.dyn", ".rela.plt", ".plt", ".dynamic",
         ".got", ".got.plt", ".init_array", ".fini_array",
         ".tdata", ".tbss", ".bss", ".shstrtab",
@@ -2889,6 +2890,7 @@ fn emit_executable(
 
     // Count total sections to determine .shstrtab index
     let mut sh_count: u16 = 5; // NULL + .interp + .gnu.hash + .dynsym + .dynstr
+    if verneed_size > 0 { sh_count += 2; } // .gnu.version + .gnu.version_r
     if rela_dyn_size > 0 { sh_count += 1; }
     if rela_plt_size > 0 { sh_count += 1; }
     if plt_size > 0 { sh_count += 1; }
@@ -2942,6 +2944,16 @@ fn emit_executable(
     // .dynstr
     write_shdr(&mut out, get_shname(".dynstr"), SHT_STRTAB, SHF_ALLOC,
                dynstr_addr, dynstr_offset, dynstr_size, 0, 0, 1, 0);
+    // .gnu.version (versym)
+    if verneed_size > 0 {
+        write_shdr(&mut out, get_shname(".gnu.version"), SHT_GNU_VERSYM, SHF_ALLOC,
+                   versym_addr, versym_offset, versym_size, dynsym_shidx, 0, 2, 2);
+    }
+    // .gnu.version_r (verneed)
+    if verneed_size > 0 {
+        write_shdr(&mut out, get_shname(".gnu.version_r"), SHT_GNU_VERNEED, SHF_ALLOC,
+                   verneed_addr, verneed_offset, verneed_size, dynstr_shidx, verneed_count, 4, 0);
+    }
     // .rela.dyn
     if rela_dyn_size > 0 {
         write_shdr(&mut out, get_shname(".rela.dyn"), SHT_RELA, SHF_ALLOC,
