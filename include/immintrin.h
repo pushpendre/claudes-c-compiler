@@ -9,6 +9,8 @@
 
 #include <wmmintrin.h>
 #include <smmintrin.h>
+#include <shaintrin.h>
+#include <bmi2intrin.h>
 #include <avxintrin.h>
 #include <avx2intrin.h>
 #include <fmaintrin.h>

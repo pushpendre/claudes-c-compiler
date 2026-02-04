@@ -78,4 +78,27 @@ _mm_shuffle_epi8(__m128i __a, __m128i __b)
     return __r;
 }
 
+/* _mm_alignr_epi8: concatenate __a (high) and __b (low) into a 32-byte
+ * intermediate, shift right by __n bytes, return the low 16 bytes (PALIGNR) */
+#define _mm_alignr_epi8(__a, __b, __n) __extension__ ({    \
+    __m128i __r_alignr;                                     \
+    unsigned char *__pa_alignr = (unsigned char *)&(__a);    \
+    unsigned char *__pb_alignr = (unsigned char *)&(__b);    \
+    unsigned char *__pr_alignr = (unsigned char *)&__r_alignr; \
+    unsigned char __tmp_alignr[32];                         \
+    for (int __i = 0; __i < 16; __i++)                     \
+        __tmp_alignr[__i] = __pb_alignr[__i];              \
+    for (int __i = 0; __i < 16; __i++)                     \
+        __tmp_alignr[16 + __i] = __pa_alignr[__i];         \
+    if ((__n) >= 32) {                                      \
+        for (int __i = 0; __i < 16; __i++)                 \
+            __pr_alignr[__i] = 0;                           \
+    } else {                                                \
+        for (int __i = 0; __i < 16; __i++)                 \
+            __pr_alignr[__i] = ((__n) + __i < 32) ?        \
+                __tmp_alignr[(__n) + __i] : 0;              \
+    }                                                       \
+    __r_alignr;                                             \
+})
+
 #endif /* _TMMINTRIN_H_INCLUDED */

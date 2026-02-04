@@ -116,7 +116,7 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         "cltd" | "cdq" | "ret" | "nop" | "ud2" | "pause"
         | "mfence" | "lfence" | "sfence" | "clflush"
         | "ldmxcsr" | "stmxcsr"
-        | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp"
+        | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp" | "xgetbv"
         // Base ALU/shift mnemonics whose last letter is NOT a size suffix
         | "sub" | "sbb" | "add" | "and" | "shl" | "rol" | "xadd"
         | "insb" | "insw" | "insl" | "outsb" | "outsw" | "outsl"
@@ -335,6 +335,7 @@ impl InstructionEncoder {
             "cpuid" => { self.bytes.extend_from_slice(&[0x0F, 0xA2]); Ok(()) }
             "rdtsc" => { self.bytes.extend_from_slice(&[0x0F, 0x31]); Ok(()) }
             "rdtscp" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xF9]); Ok(()) }
+            "xgetbv" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xD0]); Ok(()) }
             "syscall" => { self.bytes.extend_from_slice(&[0x0F, 0x05]); Ok(()) }
             "sysenter" => { self.bytes.extend_from_slice(&[0x0F, 0x34]); Ok(()) }
             "hlt" => { self.bytes.push(0xF4); Ok(()) }
