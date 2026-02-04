@@ -1,0 +1,8 @@
+Fix QEMU serial console output miscompilation
+
+The QEMU x86_64-softmmu binary compiles and links, and --version/-cpu help work,
+but serial console output from the guest is not displayed. When running with
+-nographic or -serial file:..., the guest kernel's serial output (console=ttyS0)
+is never written to the output fd.
+
+Goal: Identify and fix the miscompilation causing missing serial output.
