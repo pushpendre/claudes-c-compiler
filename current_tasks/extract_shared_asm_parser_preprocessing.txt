@@ -1,0 +1,12 @@
+Extract shared assembler parser preprocessing into a common module.
+
+The ARM, RISC-V, and x86 parsers all duplicate:
+- strip_c_comments()
+- split_on_semicolons()
+- expand_rept_blocks() and helpers (collect_block_body, is_rept_start, is_irp_start, is_block_start)
+- expand_macros() / expand_macros_with() / MacroDef / split_macro_args()
+- eval_if_condition() and .if/.else/.endif handling
+- strip_comment() (with minor differences in comment characters)
+
+Both ARM and RISC-V parsers have TODO comments about this.
+Goal: Create a shared asm_preprocessing module, update all 3 parsers to use it.
