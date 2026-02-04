@@ -60,6 +60,9 @@ pub const SHT_INIT_ARRAY: u32 = 14;
 pub const SHT_FINI_ARRAY: u32 = 15;
 pub const SHT_PREINIT_ARRAY: u32 = 16;
 pub const SHT_GROUP: u32 = 17;
+
+/// COMDAT group flag: sections in this group are deduplicated by the linker.
+pub const GRP_COMDAT: u32 = 1;
 pub const SHT_GNU_HASH: u32 = 0x6fff_fff6;
 pub const SHT_GNU_VERSYM: u32 = 0x6fff_ffff;
 pub const SHT_GNU_VERNEED: u32 = 0x6fff_fffe;
@@ -634,14 +637,16 @@ pub fn get_standard_linker_symbols(addrs: &LinkerSymbolAddresses) -> Vec<LinkerD
 /// - `*COM*` → `SHN_COMMON` (0xFFF2) for COMMON symbols
 /// - `*UND*` or empty → `SHN_UNDEF` (0) for undefined symbols
 /// - Otherwise, looks up the section in the content section list (1-based index)
-pub fn section_index(section_name: &str, content_sections: &[String]) -> u16 {
+/// `shndx_offset` is the number of section headers before the content sections
+/// (typically 1 for NULL, or 1 + num_groups when COMDAT groups are present).
+pub fn section_index(section_name: &str, content_sections: &[String], shndx_offset: u16) -> u16 {
     if section_name == "*COM*" {
         SHN_COMMON
     } else if section_name == "*UND*" || section_name.is_empty() {
         SHN_UNDEF
     } else {
         content_sections.iter().position(|s| s == section_name)
-            .map(|i| (i + 1) as u16)
+            .map(|i| (i as u16) + shndx_offset)
             .unwrap_or(SHN_UNDEF)
     }
 }
@@ -703,6 +708,8 @@ pub struct ObjSection {
     pub sh_addralign: u64,
     /// Relocations targeting this section.
     pub relocs: Vec<ObjReloc>,
+    /// If this section is part of a COMDAT group, the group signature symbol name.
+    pub comdat_group: Option<String>,
 }
 
 /// A relocation entry in a relocatable object file.
@@ -771,11 +778,40 @@ pub fn write_relocatable_object(
     let reloc_sh_type = if use_rela { SHT_RELA } else { SHT_REL };
     let alignment_mask = if is_32bit { 3usize } else { 7usize }; // 4 or 8 byte alignment
 
+    // ── Collect COMDAT groups ──
+    // Map: group_name -> list of member content section names
+    let mut comdat_groups: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let mut group_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut group_order: Vec<String> = Vec::new();
+        for sec_name in section_order {
+            if let Some(section) = sections.get(sec_name) {
+                if let Some(ref group_name) = section.comdat_group {
+                    group_map.entry(group_name.clone()).or_insert_with(|| {
+                        group_order.push(group_name.clone());
+                        Vec::new()
+                    }).push(sec_name.clone());
+                }
+            }
+        }
+        for gname in group_order {
+            if let Some(members) = group_map.remove(&gname) {
+                comdat_groups.push((gname, members));
+            }
+        }
+    }
+    let num_groups = comdat_groups.len();
+
     // ── Build string tables ──
     let mut shstrtab = StringTable::new();
     let mut strtab = StringTable::new();
 
     let content_sections: &[String] = section_order;
+
+    // Add group section names to shstrtab
+    for _ in &comdat_groups {
+        shstrtab.add(".group");
+    }
 
     // Add section names to shstrtab
     for sec_name in content_sections {
@@ -799,6 +835,8 @@ pub fn write_relocatable_object(
 
     // ── Build symbol table entries ──
     let mut sym_entries: Vec<SymEntry> = Vec::new();
+    // Content sections start at shdr index: NULL + num_groups + content_index
+    let content_shndx_offset = (num_groups + 1) as u16;
 
     // NULL symbol (index 0)
     sym_entries.push(SymEntry {
@@ -813,7 +851,7 @@ pub fn write_relocatable_object(
             st_name: strtab.offset_of(sec_name),
             st_info: (STB_LOCAL << 4) | STT_SECTION,
             st_other: 0,
-            st_shndx: (i + 1) as u16,
+            st_shndx: content_shndx_offset + i as u16,
             st_value: 0,
             st_size: 0,
         });
@@ -834,7 +872,7 @@ pub fn write_relocatable_object(
 
     for sym in &local_syms {
         let name_offset = strtab.add(&sym.name);
-        let shndx = section_index(&sym.section_name, content_sections);
+        let shndx = section_index(&sym.section_name, content_sections, content_shndx_offset);
         sym_entries.push(SymEntry {
             st_name: name_offset,
             st_info: (sym.binding << 4) | sym.sym_type,
@@ -847,7 +885,7 @@ pub fn write_relocatable_object(
 
     for sym in &global_syms {
         let name_offset = strtab.add(&sym.name);
-        let shndx = section_index(&sym.section_name, content_sections);
+        let shndx = section_index(&sym.section_name, content_sections, content_shndx_offset);
         sym_entries.push(SymEntry {
             st_name: name_offset,
             st_info: (sym.binding << 4) | sym.sym_type,
@@ -858,8 +896,32 @@ pub fn write_relocatable_object(
         });
     }
 
+    // ── Build COMDAT group section data ──
+    // Each group section contains: GRP_COMDAT flag (u32) + member section indices (u32 each)
+    let mut group_section_data: Vec<Vec<u8>> = Vec::new();
+    for (_group_name, members) in &comdat_groups {
+        let mut data = Vec::with_capacity(4 + 4 * members.len());
+        data.extend_from_slice(&GRP_COMDAT.to_le_bytes());
+        for member_name in members {
+            // Find the section header index of this member
+            let member_idx = content_sections.iter().position(|s| s == member_name)
+                .map(|i| content_shndx_offset as u32 + i as u32)
+                .unwrap_or(0);
+            data.extend_from_slice(&member_idx.to_le_bytes());
+        }
+        group_section_data.push(data);
+    }
+
     // ── Calculate layout ──
     let mut offset = ehdr_size;
+
+    // Group section offsets (come first, before content sections)
+    let mut group_offsets: Vec<usize> = Vec::new();
+    for gdata in &group_section_data {
+        offset = (offset + 3) & !3; // align to 4 bytes
+        group_offsets.push(offset);
+        offset += gdata.len();
+    }
 
     // Content section offsets
     let mut section_offsets: Vec<usize> = Vec::new();
@@ -905,10 +967,10 @@ pub fn write_relocatable_object(
     offset = (offset + alignment_mask) & !alignment_mask;
     let shdr_offset = offset;
 
-    // Total section count: NULL + content + relocs + symtab + strtab + shstrtab
-    let num_sections = 1 + content_sections.len() + reloc_section_names.len() + 3;
+    // Total section count: NULL + groups + content + relocs + symtab + strtab + shstrtab
+    let num_sections = 1 + num_groups + content_sections.len() + reloc_section_names.len() + 3;
     let shstrtab_idx = num_sections - 1;
-    let symtab_shndx = 1 + content_sections.len() + reloc_section_names.len();
+    let symtab_shndx = 1 + num_groups + content_sections.len() + reloc_section_names.len();
 
     // ── Write ELF ──
     let total_size = shdr_offset + num_sections * shdr_size;
@@ -955,6 +1017,14 @@ pub fn write_relocatable_object(
     }
 
     debug_assert_eq!(elf.len(), ehdr_size);
+
+    // ── Write group section data ──
+    for (gi, gdata) in group_section_data.iter().enumerate() {
+        while elf.len() < group_offsets[gi] {
+            elf.push(0);
+        }
+        elf.extend_from_slice(gdata);
+    }
 
     // ── Write content section data ──
     for (i, sec_name) in content_sections.iter().enumerate() {
@@ -1023,6 +1093,16 @@ pub fn write_relocatable_object(
     if is_32bit {
         // NULL
         write_shdr32(&mut elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+        // Group sections (COMDAT)
+        for (gi, (group_name, _members)) in comdat_groups.iter().enumerate() {
+            let sh_name = shstrtab.offset_of(".group");
+            // sh_link = symtab index, sh_info = symbol index of group signature
+            let sig_sym_idx = find_symbol_index_shared(group_name, &sym_entries, &strtab, content_sections);
+            write_shdr32(&mut elf, sh_name, SHT_GROUP, 0,
+                        0, group_offsets[gi] as u32, group_section_data[gi].len() as u32,
+                        symtab_shndx as u32, sig_sym_idx,
+                        4, 4);
+        }
         // Content sections
         for (i, sec_name) in content_sections.iter().enumerate() {
             let section = sections.get(sec_name).unwrap();
@@ -1043,7 +1123,7 @@ pub fn write_relocatable_object(
                     let sh_size = (section.relocs.len() * reloc_entry_size) as u32;
                     write_shdr32(&mut elf, sh_name, reloc_sh_type, 0,
                                 0, sh_offset, sh_size,
-                                symtab_shndx as u32, (i + 1) as u32,
+                                symtab_shndx as u32, content_shndx_offset as u32 + i as u32,
                                 4, reloc_entry_size as u32);
                     reloc_idx += 1;
                 }
@@ -1063,6 +1143,15 @@ pub fn write_relocatable_object(
     } else {
         // NULL
         write_shdr64(&mut elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+        // Group sections (COMDAT)
+        for (gi, (group_name, _members)) in comdat_groups.iter().enumerate() {
+            let sh_name = shstrtab.offset_of(".group");
+            let sig_sym_idx = find_symbol_index_shared(group_name, &sym_entries, &strtab, content_sections);
+            write_shdr64(&mut elf, sh_name, SHT_GROUP, 0,
+                        0, group_offsets[gi] as u64, group_section_data[gi].len() as u64,
+                        symtab_shndx as u32, sig_sym_idx,
+                        4, 4);
+        }
         // Content sections
         for (i, sec_name) in content_sections.iter().enumerate() {
             let section = sections.get(sec_name).unwrap();
@@ -1083,7 +1172,7 @@ pub fn write_relocatable_object(
                     let sh_size = (section.relocs.len() * reloc_entry_size) as u64;
                     write_shdr64(&mut elf, sh_name, reloc_sh_type, SHF_INFO_LINK,
                                 0, sh_offset, sh_size,
-                                symtab_shndx as u32, (i + 1) as u32,
+                                symtab_shndx as u32, content_shndx_offset as u32 + i as u32,
                                 8, reloc_entry_size as u64);
                     reloc_idx += 1;
                 }
@@ -1817,6 +1906,7 @@ impl ElfWriterBase {
                 data: Vec::new(),
                 sh_addralign: align,
                 relocs: Vec::new(),
+                comdat_group: None,
             });
             self.section_order.push(name.to_string());
         }

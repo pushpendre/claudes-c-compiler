@@ -19,7 +19,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | sundown | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | termbox | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | dash    | PASS | FAIL | PASS | FAIL | Fixed x86: COPY reloc weak alias resolution (environ/__environ) |
-| cmark   | PASS | FAIL (i686 group info) | PASS | PASS | Fixed x86/riscv asm octal escape parsing (\0 prefix consumed too early) |
+| cmark   | PASS | FAIL (i686 codegen) | PASS | PASS | Fixed x86/riscv asm octal escape parsing (\0 prefix consumed too early); i686 builds now (COMDAT fix) but segfaults (codegen bug) |
 | Duktape | PASS | PASS | PASS | PASS | Passes all architectures out of the box |
 | Wren    | PASS | TODO | TODO | TODO | Passes x86 (minor flaky timing tests, pass on retry) |
 | json-c  | PASS | FAIL (asm issue) | PASS | PASS | Fixed i686 linker local symbol collision (GOTOFF relocations); i686 passes with GCC asm + builtin LD; builtin asm still has issues |
@@ -75,4 +75,6 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | lzf | PASS | TODO | TODO | TODO | Passes x86 |
 | whetstone | PASS | TODO | TODO | TODO | Passes x86 |
 | dhrystone | PASS | TODO | TODO | TODO | Passes x86 |
+| tdb     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| jansson | PASS | FAIL (i686 codegen) | PASS | PASS | Fixed i686 asm: SHT_GROUP/COMDAT, R_386_GOTPC reloc; i686 still fails (codegen issue in hashtable.c/value.c) |
 | cc65    | TODO | TODO | PASS | TODO | Fixed ARM asm: preserve original case for condition code/barrier symbol names (CS was lowercased to cs) |

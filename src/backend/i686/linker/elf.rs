@@ -1005,8 +1005,44 @@ pub fn link_builtin(
         None // Non-allocated section, skip
     }
 
+    // ── COMDAT group deduplication ──────────────────────────────────────────
+    // Scan for SHT_GROUP sections and build a set of sections to skip
+    // (from duplicate COMDAT groups).
+    let mut comdat_skip: HashSet<(usize, usize)> = HashSet::new(); // (obj_idx, input_section_idx)
+    {
+        let mut seen_groups: HashSet<String> = HashSet::new();
+        for (obj_idx, obj) in inputs.iter().enumerate() {
+            for sec in obj.sections.iter() {
+                if sec.sh_type != SHT_GROUP { continue; }
+                // Group data: first u32 is flags, rest are member section indices
+                if sec.data.len() < 4 { continue; }
+                let flags = read_u32(&sec.data, 0);
+                if flags & 1 == 0 { continue; } // Not GRP_COMDAT
+                // The group signature is the symbol at index sec.info
+                let sig_name = if (sec.info as usize) < obj.symbols.len() {
+                    obj.symbols[sec.info as usize].name.clone()
+                } else {
+                    continue;
+                };
+                if !seen_groups.insert(sig_name) {
+                    // Duplicate COMDAT group - skip all member sections
+                    let mut off = 4;
+                    while off + 4 <= sec.data.len() {
+                        let member_idx = read_u32(&sec.data, off) as usize;
+                        comdat_skip.insert((obj_idx, member_idx));
+                        off += 4;
+                    }
+                }
+            }
+        }
+    }
+
     for (obj_idx, obj) in inputs.iter().enumerate() {
         for sec in obj.sections.iter() {
+            // Skip sections from duplicate COMDAT groups
+            if comdat_skip.contains(&(obj_idx, sec.input_index)) {
+                continue;
+            }
             let out_name = match output_section_name(&sec.name, sec.flags, sec.sh_type) {
                 Some(n) => n,
                 None => continue,

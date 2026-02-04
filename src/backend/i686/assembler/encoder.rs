@@ -1246,14 +1246,32 @@ impl InstructionEncoder {
             (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 if size == 2 { self.bytes.push(0x66); }
+                // For _GLOBAL_OFFSET_TABLE_, use R_386_GOTPC relocation (GOT + A - P).
+                // The addend A = offset from instruction start to the immediate field,
+                // so the result equals GOT - instruction_start (matching the PC set by
+                // __x86.get_pc_thunk).
                 if dst_num == 0 {
                     self.bytes.push(0x05 + alu_op * 8);
                 } else {
                     self.bytes.push(0x81);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
                 }
-                self.add_relocation(sym, R_386_32, 0);
-                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                let (reloc_type, addend) = if sym == "_GLOBAL_OFFSET_TABLE_" {
+                    // R_386_GOTPC: GOT + A - P.  We want result = GOT - insn_start.
+                    // insn_start is where thunk put the PC.  P = reloc site = current pos.
+                    // So A = P - insn_start = number of opcode bytes already pushed.
+                    let imm_offset = if size == 2 {
+                        if dst_num == 0 { 2i64 } else { 3i64 }
+                    } else {
+                        if dst_num == 0 { 1i64 } else { 2i64 }
+                    };
+                    (R_386_GOTPC, imm_offset)
+                } else {
+                    (R_386_32, 0i64)
+                };
+                self.add_relocation(sym, reloc_type, addend);
+                // Write zero placeholder; elf_writer patches addend into data for REL format
+                self.bytes.extend_from_slice(&0i32.to_le_bytes());
                 Ok(())
             }
             (Operand::Register(src), Operand::Register(dst)) => {

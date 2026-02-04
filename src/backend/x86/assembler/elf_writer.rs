@@ -66,6 +66,8 @@ struct Section {
     /// Index in the final section header table.
     #[allow(dead_code)]
     index: usize,
+    /// COMDAT group name, if this section is part of a COMDAT group.
+    comdat_group: Option<String>,
 }
 
 #[derive(Clone)]
@@ -247,7 +249,7 @@ impl ElfWriter {
         self.emit_elf()
     }
 
-    fn get_or_create_section(&mut self, name: &str, section_type: u32, flags: u64) -> usize {
+    fn get_or_create_section(&mut self, name: &str, section_type: u32, flags: u64, comdat_group: Option<String>) -> usize {
         if let Some(&idx) = self.section_map.get(name) {
             return idx;
         }
@@ -262,6 +264,7 @@ impl ElfWriter {
             jumps: Vec::new(),
             org_regions: Vec::new(),
             index: 0, // will be set later
+            comdat_group,
         });
         self.section_map.insert(name.to_string(), idx);
         idx
@@ -274,7 +277,7 @@ impl ElfWriter {
 
     fn switch_section(&mut self, dir: &SectionDirective) {
         let (section_type, flags) = parse_section_flags(&dir.name, dir.flags.as_deref(), dir.section_type.as_deref());
-        let idx = self.get_or_create_section(&dir.name, section_type, flags);
+        let idx = self.get_or_create_section(&dir.name, section_type, flags, dir.comdat_group.clone());
         self.current_section = Some(idx);
     }
 
@@ -461,7 +464,7 @@ impl ElfWriter {
     fn ensure_section(&mut self) -> Result<(), String> {
         if self.current_section.is_none() {
             // Default to .text
-            let idx = self.get_or_create_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
+            let idx = self.get_or_create_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, None);
             self.current_section = Some(idx);
         }
         Ok(())
@@ -986,6 +989,7 @@ impl ElfWriter {
                 data: sec.data.clone(),
                 sh_addralign: sec.alignment,
                 relocs,
+                comdat_group: sec.comdat_group.clone(),
             });
         }
 

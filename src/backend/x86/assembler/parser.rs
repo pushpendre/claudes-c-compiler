@@ -83,9 +83,12 @@ pub struct SectionDirective {
     pub name: String,
     pub flags: Option<String>,
     pub section_type: Option<String>,
-    /// For sections like `__patchable_function_entries,"awo",@progbits,.LPFE0`
-    #[allow(dead_code)]
+    /// For sections with linked-to or group info (4th arg), e.g.
+    /// `__patchable_function_entries,"awo",@progbits,.LPFE0`
     pub extra: Option<String>,
+    /// COMDAT group name from `.section name,"axG",@progbits,group_name,comdat`
+    /// Set when flags contain 'G' and a 5th argument is "comdat".
+    pub comdat_group: Option<String>,
 }
 
 /// Symbol kind from `.type` directive.
@@ -448,24 +451,28 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             flags: None,
             section_type: None,
             extra: None,
+            comdat_group: None,
         })),
         ".data" => Ok(AsmItem::Section(SectionDirective {
             name: ".data".to_string(),
             flags: None,
             section_type: None,
             extra: None,
+            comdat_group: None,
         })),
         ".bss" => Ok(AsmItem::Section(SectionDirective {
             name: ".bss".to_string(),
             flags: None,
             section_type: None,
             extra: None,
+            comdat_group: None,
         })),
         ".rodata" => Ok(AsmItem::Section(SectionDirective {
             name: ".rodata".to_string(),
             flags: None,
             section_type: None,
             extra: None,
+            comdat_group: None,
         })),
         ".globl" | ".global" => Ok(AsmItem::Global(args.trim().to_string())),
         ".weak" => Ok(AsmItem::Weak(args.trim().to_string())),
@@ -623,11 +630,34 @@ fn parse_section_directive(args: &str) -> Result<AsmItem, String> {
     let section_type = parts.get(2).map(|s| s.trim().to_string());
     let extra = parts.get(3).map(|s| s.trim().to_string());
 
+    // If the flags contain 'G' (SHF_GROUP), the 4th arg is the group signature
+    // name and the 5th arg should be "comdat".
+    let comdat_group = if let Some(ref f) = flags {
+        if f.contains('G') {
+            if let Some(ref group_name) = extra {
+                let fifth = parts.get(4).map(|s| s.trim().to_string());
+                if fifth.as_deref() == Some("comdat") || fifth.is_none() {
+                    // Accept both explicit "comdat" and implicit (GNU as default)
+                    Some(group_name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(AsmItem::Section(SectionDirective {
         name,
         flags,
         section_type,
         extra,
+        comdat_group,
     }))
 }
 

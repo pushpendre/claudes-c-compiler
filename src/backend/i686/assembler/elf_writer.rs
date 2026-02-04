@@ -57,6 +57,8 @@ struct Section {
     jumps: Vec<JumpInfo>,
     /// `.org` padding regions that may need adjustment after jump relaxation.
     org_regions: Vec<OrgInfo>,
+    /// COMDAT group name, if this section is part of a COMDAT group.
+    comdat_group: Option<String>,
 }
 
 #[derive(Clone)]
@@ -143,7 +145,7 @@ impl ElfWriter {
         self.emit_elf()
     }
 
-    fn get_or_create_section(&mut self, name: &str, section_type: u32, flags: u32) -> usize {
+    fn get_or_create_section(&mut self, name: &str, section_type: u32, flags: u32, comdat_group: Option<String>) -> usize {
         if let Some(&idx) = self.section_map.get(name) {
             return idx;
         }
@@ -157,6 +159,7 @@ impl ElfWriter {
             relocations: Vec::new(),
             jumps: Vec::new(),
             org_regions: Vec::new(),
+            comdat_group,
         });
         self.section_map.insert(name.to_string(), idx);
         idx
@@ -169,7 +172,7 @@ impl ElfWriter {
 
     fn switch_section(&mut self, dir: &SectionDirective) {
         let (section_type, flags64) = parse_section_flags(&dir.name, dir.flags.as_deref(), dir.section_type.as_deref());
-        let idx = self.get_or_create_section(&dir.name, section_type, flags64 as u32);
+        let idx = self.get_or_create_section(&dir.name, section_type, flags64 as u32, dir.comdat_group.clone());
         self.current_section = Some(idx);
     }
 
@@ -349,7 +352,7 @@ impl ElfWriter {
 
     fn ensure_section(&mut self) -> Result<(), String> {
         if self.current_section.is_none() {
-            let idx = self.get_or_create_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
+            let idx = self.get_or_create_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, None);
             self.current_section = Some(idx);
         }
         Ok(())
@@ -609,6 +612,7 @@ impl ElfWriter {
                 data,
                 sh_addralign: sec.alignment as u64,
                 relocs,
+                comdat_group: sec.comdat_group.clone(),
             });
         }
 

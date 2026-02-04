@@ -1,3 +1,0 @@
-Task: Get tdb project passing with our compiler (all architectures if possible, at least x86)
-Status: In progress
-What: Test the tdb (trivial database from Samba) project against ccc-x86 and fix any failures.
