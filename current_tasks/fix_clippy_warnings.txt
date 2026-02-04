@@ -1,0 +1,7 @@
+Fix all clippy warnings across the codebase.
+
+11 warnings:
+- manual_range_contains in x86 assembler parser and riscv assembler parser
+- collapsible_if in x86 linker (4 instances)
+- identity_op in arm assembler encoder
+- unnecessary_cast in arm assembler elf_writer (4 instances)
