@@ -1,0 +1,7 @@
+Fix libmpg123 project for x86.
+
+Missing x86 assembler instructions:
+- cmpnleps (SSE comparison pseudo-op)
+- vmovlhps (AVX 3-operand move)
+- vmovddup (AVX duplicate double)
+- vcmpnleps (AVX comparison pseudo-op)
