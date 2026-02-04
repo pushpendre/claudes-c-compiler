@@ -1,0 +1,11 @@
+Fix SQLite ARM window function OVER clause runtime parse error.
+
+The compiled SQLite binary for ARM fails to parse SQL window functions like:
+  SELECT id, amount, SUM(amount) OVER (ORDER BY id) as running FROM sales;
+Produces: near "(": syntax error
+
+This is a codegen correctness bug - the SQLite SQL parser is compiled
+incorrectly for ARM, causing it to fail to recognize the OVER keyword
+in window function syntax.
+
+Started 2026-02-04.
