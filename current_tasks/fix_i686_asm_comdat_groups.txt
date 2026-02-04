@@ -1,6 +1,0 @@
-Fix i686 (and x86-64) assembler to emit proper SHT_GROUP sections for COMDAT groups.
-Currently, sections with "axG" flags like .text.__x86.get_pc_thunk.bx get the SHF_GROUP flag
-set but no actual SHT_GROUP section is created in the ELF output. This causes ar/ranlib to
-complain about "no group info" and linker errors about multiple definitions.
-Root cause of jansson, brotli, tree-sitter, and other i686 project failures.
-Started 2026-02-04.
