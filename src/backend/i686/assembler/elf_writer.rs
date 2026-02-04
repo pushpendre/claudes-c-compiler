@@ -32,18 +32,26 @@ struct JumpInfo {
     relaxed: bool,
 }
 
-/// Tracks an `.org` directive's target for post-relaxation fixup.
-/// When jump relaxation shortens instructions before/within org regions,
-/// we need to recalculate padding to maintain the correct absolute position.
+/// Tracks an alignment or .org marker within a section.
+/// Used to re-pad after jump relaxation shrinks instructions.
 #[derive(Clone, Debug)]
-struct OrgInfo {
-    /// Offset in section data where the org directive was processed.
-    /// This is where NOP padding was (or would be) inserted.
-    data_offset: usize,
-    /// The label whose position anchors this org target.
-    base_label: String,
-    /// The offset from the base label (org target = label_pos + base_offset).
-    base_offset: i64,
+struct AlignMarker {
+    /// Offset in the section data where padding starts.
+    offset: usize,
+    /// Number of padding bytes that were originally inserted.
+    padding: usize,
+    /// The kind of alignment: Align(n) for .balign n, or Org for a label-relative position.
+    kind: AlignMarkerKind,
+}
+
+#[derive(Clone, Debug)]
+enum AlignMarkerKind {
+    /// .balign N — pad to N-byte boundary
+    Align(u32),
+    /// .org label + offset — advance to a fixed position.
+    /// Stores the label name and the constant offset so the target can be
+    /// recomputed after relaxation shifts labels.
+    Org { label: String, addend: i64 },
 }
 
 /// Tracks a section being built.
@@ -55,8 +63,8 @@ struct Section {
     alignment: u32,
     relocations: Vec<ElfRelocation>,
     jumps: Vec<JumpInfo>,
-    /// `.org` padding regions that may need adjustment after jump relaxation.
-    org_regions: Vec<OrgInfo>,
+    /// Alignment and .org markers for post-relaxation fixup
+    align_markers: Vec<AlignMarker>,
     /// COMDAT group name, if this section is part of a COMDAT group.
     comdat_group: Option<String>,
 }
@@ -158,7 +166,7 @@ impl ElfWriter {
             alignment: if flags & SHF_EXECINSTR != 0 { 16 } else { 1 },
             relocations: Vec::new(),
             jumps: Vec::new(),
-            org_regions: Vec::new(),
+            align_markers: Vec::new(),
             comdat_group,
         });
         self.section_map.insert(name.to_string(), idx);
@@ -256,6 +264,14 @@ impl ElfWriter {
                     let current = section.data.len() as u32;
                     let aligned = (current + align - 1) & !(align - 1);
                     let padding = (aligned - current) as usize;
+                    // Record alignment marker for post-relaxation fixup
+                    if padding > 0 && align > 1 {
+                        section.align_markers.push(AlignMarker {
+                            offset: current as usize,
+                            padding,
+                            kind: AlignMarkerKind::Align(align),
+                        });
+                    }
                     if section.flags & SHF_EXECINSTR != 0 {
                         section.data.extend(std::iter::repeat_n(0x90, padding));
                     } else {
@@ -294,15 +310,18 @@ impl ElfWriter {
                         return Err(format!(".org: unknown symbol {}", sym));
                     };
                     let current = self.sections[sec_idx].data.len() as u32;
-                    // Record org region for post-relaxation fixup (always, even if no padding needed now)
-                    if !sym.is_empty() {
-                        self.sections[sec_idx].org_regions.push(OrgInfo {
-                            data_offset: current as usize,
-                            base_label: sym.clone(),
-                            base_offset: *offset,
-                        });
-                    }
+                    // Record .org marker for post-relaxation fixup.
+                    // Store the label + addend so the target can be recomputed
+                    // after jump relaxation shifts label positions.
                     if target > current {
+                        self.sections[sec_idx].align_markers.push(AlignMarker {
+                            offset: current as usize,
+                            padding: (target - current) as usize,
+                            kind: AlignMarkerKind::Org {
+                                label: sym.clone(),
+                                addend: *offset,
+                            },
+                        });
                         let padding = (target - current) as usize;
                         let fill = if self.sections[sec_idx].flags & SHF_EXECINSTR != 0 { 0x90u8 } else { 0u8 };
                         self.sections[sec_idx].data.extend(std::iter::repeat_n(fill, padding));
@@ -861,10 +880,10 @@ impl ElfWriter {
                         }
                     }
 
-                    // Update org region data offsets
-                    for org in self.sections[sec_idx].org_regions.iter_mut() {
-                        if org.data_offset > offset {
-                            org.data_offset -= shrink;
+                    // Update alignment marker offsets
+                    for marker in self.sections[sec_idx].align_markers.iter_mut() {
+                        if marker.offset > offset {
+                            marker.offset -= shrink;
                         }
                     }
 
@@ -876,12 +895,11 @@ impl ElfWriter {
                 if !any_relaxed { break; }
             }
 
-            // Fix up .org padding regions after jump relaxation.
-            // When jumps before an .org region are shortened, the code before
-            // the padding shrinks, but the padding stays the same size. We need
-            // to expand the padding so that code after it remains at the correct
-            // absolute position (relative to the base label).
-            self.fixup_org_regions(sec_idx);
+            // Post-relaxation fixup: re-pad alignment markers that were broken
+            // by jump relaxation. When a jump shrinks, the nop padding before
+            // a subsequent .balign/.org is now too small. We scan alignment
+            // markers and insert additional nops where needed.
+            self.fixup_alignment_markers(sec_idx);
 
             // Resolve short jump displacements
             let mut local_labels: HashMap<String, usize> = HashMap::new();
@@ -913,175 +931,114 @@ impl ElfWriter {
         }
     }
 
-    /// Fix up `.org` regions after jump relaxation.
+    /// Re-pad alignment markers that were broken by jump relaxation.
     ///
-    /// When jump relaxation shortens instructions, the NOP padding from
-    /// `.balign` directives that precede `.org` directives may now be
-    /// too large or too small. This method finds the NOP bytes before each
-    /// `.org` target and adjusts them so that code after the `.org` point
-    /// is at the correct absolute position (relative to the base label).
-    fn fixup_org_regions(&mut self, sec_idx: usize) {
-        let org_count = self.sections[sec_idx].org_regions.len();
-        if org_count == 0 {
+    /// When a jump instruction is relaxed (shrunk from 5 to 2 bytes), the
+    /// subsequent nop padding bytes are not adjusted. This function scans
+    /// all alignment markers in a section and either inserts additional nops
+    /// (when padding is too small) or removes excess nops (when padding is
+    /// too large, e.g. a .balign overshot a subsequent .org target).
+    fn fixup_alignment_markers(&mut self, sec_idx: usize) {
+        if self.sections[sec_idx].align_markers.is_empty() {
             return;
         }
 
-        // Sort org regions by data_offset (ascending)
-        self.sections[sec_idx].org_regions.sort_by_key(|o| o.data_offset);
+        let is_exec = self.sections[sec_idx].flags & SHF_EXECINSTR != 0;
+        let fill_byte = if is_exec { 0x90u8 } else { 0u8 };
 
-        // Process from first to last. When we insert/remove bytes for an
-        // org region, it shifts all subsequent regions' positions. We update
-        // their data_offsets accordingly so the next iteration uses correct values.
-        for org_idx in 0..org_count {
-            let org = &self.sections[sec_idx].org_regions[org_idx];
-            let base_label = org.base_label.clone();
-            let base_offset = org.base_offset;
-            let data_offset = org.data_offset;
+        let mut marker_idx = 0;
+        loop {
+            if marker_idx >= self.sections[sec_idx].align_markers.len() {
+                break;
+            }
+            let current_offset = self.sections[sec_idx].align_markers[marker_idx].offset;
+            let kind = self.sections[sec_idx].align_markers[marker_idx].kind.clone();
 
-            // Look up the (post-relaxation) position of the base label
-            let label_pos = if let Some(&(lbl_sec, lbl_off)) = self.label_positions.get(base_label.as_str()) {
-                if lbl_sec != sec_idx {
-                    continue;
+            let needed_end = match &kind {
+                AlignMarkerKind::Align(align) => {
+                    let a = *align as usize;
+                    if a <= 1 { marker_idx += 1; continue; }
+                    (current_offset + a - 1) & !(a - 1)
                 }
-                lbl_off as usize
-            } else {
-                continue;
+                AlignMarkerKind::Org { label, addend } => {
+                    if label.is_empty() {
+                        *addend as usize
+                    } else if let Some(&(l_sec, l_off)) = self.label_positions.get(label.as_str()) {
+                        if l_sec == sec_idx {
+                            (l_off as i64 + *addend) as usize
+                        } else {
+                            marker_idx += 1; continue;
+                        }
+                    } else {
+                        marker_idx += 1; continue;
+                    }
+                }
             };
 
-            let target = (label_pos as i64 + base_offset) as usize;
-
-            if data_offset == target {
-                // Already at the right position, no adjustment needed
-                continue;
-            }
-
-            let is_exec = self.sections[sec_idx].flags & SHF_EXECINSTR != 0;
-            let fill_byte: u8 = if is_exec { 0x90 } else { 0x00 };
-
-            if data_offset > target {
-                // Current position is past the target. We need to remove
-                // NOP padding bytes before this point to move it back.
-                // Find NOP bytes immediately before data_offset and remove some.
-                let excess = data_offset - target;
-                let data = &self.sections[sec_idx].data;
-
-                // Count how many consecutive fill bytes precede data_offset
-                let mut nop_count = 0;
-                while nop_count < data_offset && data[data_offset - 1 - nop_count] == fill_byte {
-                    nop_count += 1;
-                }
-
-                if nop_count >= excess {
-                    // Remove `excess` NOP bytes from right before data_offset
-                    let remove_start = data_offset - excess;
-                    self.sections[sec_idx].data.drain(remove_start..data_offset);
-
-                    // Adjust all offsets after the removed region
-                    Self::adjust_offsets_after_remove(
-                        &mut self.label_positions,
-                        &mut self.numeric_label_positions,
-                        &mut self.sections[sec_idx],
-                        sec_idx, remove_start, excess,
-                    );
-                    // Update later org regions
-                    for later_idx in (org_idx + 1)..org_count {
-                        if self.sections[sec_idx].org_regions[later_idx].data_offset > remove_start {
-                            self.sections[sec_idx].org_regions[later_idx].data_offset -= excess;
-                        }
-                    }
-                    self.sections[sec_idx].org_regions[org_idx].data_offset = target;
-                }
+            let needed_padding = if needed_end > current_offset {
+                needed_end - current_offset
             } else {
-                // Current position is before the target. Insert NOP padding.
-                let deficit = target - data_offset;
-                let insert_pos = data_offset;
-                self.sections[sec_idx].data.splice(
-                    insert_pos..insert_pos,
-                    std::iter::repeat_n(fill_byte, deficit),
-                );
+                0
+            };
 
-                // Adjust all offsets at and after the insertion point
-                Self::adjust_offsets_after_insert(
-                    &mut self.label_positions,
-                    &mut self.numeric_label_positions,
-                    &mut self.sections[sec_idx],
-                    sec_idx, insert_pos, deficit,
-                );
-                // Update later org regions
-                for later_idx in (org_idx + 1)..org_count {
-                    if self.sections[sec_idx].org_regions[later_idx].data_offset >= insert_pos {
-                        self.sections[sec_idx].org_regions[later_idx].data_offset += deficit;
-                    }
-                }
-                self.sections[sec_idx].org_regions[org_idx].data_offset = target;
+            // Use the stored padding size rather than counting consecutive fill bytes.
+            // Counting 0x90 bytes greedily is wrong because subsequent code may also
+            // contain 0x90 (nop) bytes (e.g., trampoline code tables with nop padding
+            // between entries). The stored `padding` field is the exact count of fill
+            // bytes originally emitted at this marker location.
+            let existing_padding = self.sections[sec_idx].align_markers[marker_idx].padding;
+
+            if needed_padding > existing_padding {
+                // Need MORE padding: insert additional fill bytes
+                let insert_at = current_offset + existing_padding;
+                let extra = needed_padding - existing_padding;
+                let insert_bytes = vec![fill_byte; extra];
+                self.sections[sec_idx].data.splice(insert_at..insert_at, insert_bytes);
+                self.shift_after(sec_idx, insert_at, extra as i64, marker_idx);
+            } else if needed_padding < existing_padding {
+                // Need LESS padding: remove excess fill bytes
+                let remove_count = existing_padding - needed_padding;
+                let remove_start = current_offset + needed_padding;
+                let remove_end = remove_start + remove_count;
+                self.sections[sec_idx].data.drain(remove_start..remove_end);
+                self.shift_after(sec_idx, remove_start, -(remove_count as i64), marker_idx);
             }
+
+            marker_idx += 1;
         }
     }
 
-    /// Adjust all tracked offsets after inserting `count` bytes at `pos`.
-    /// Items at `pos` and after are shifted forward.
-    fn adjust_offsets_after_insert(
-        label_positions: &mut HashMap<String, (usize, u32)>,
-        numeric_label_positions: &mut HashMap<String, Vec<(usize, u32)>>,
-        section: &mut Section,
-        sec_idx: usize,
-        pos: usize,
-        count: usize,
-    ) {
-        for (_, lbl_pos) in label_positions.iter_mut() {
-            if lbl_pos.0 == sec_idx && (lbl_pos.1 as usize) >= pos {
-                lbl_pos.1 += count as u32;
+    /// Shift all labels, relocations, jumps, and subsequent alignment markers
+    /// in a section after an insertion or removal at `at_offset`.
+    /// `delta` is positive for insertions and negative for removals.
+    fn shift_after(&mut self, sec_idx: usize, at_offset: usize, delta: i64, current_marker_idx: usize) {
+        if delta == 0 { return; }
+        for (_, pos) in self.label_positions.iter_mut() {
+            if pos.0 == sec_idx && (pos.1 as usize) >= at_offset {
+                pos.1 = (pos.1 as i64 + delta) as u32;
             }
         }
-        for (_, positions) in numeric_label_positions.iter_mut() {
-            for lbl_pos in positions.iter_mut() {
-                if lbl_pos.0 == sec_idx && (lbl_pos.1 as usize) >= pos {
-                    lbl_pos.1 += count as u32;
+        for (_, positions) in self.numeric_label_positions.iter_mut() {
+            for pos in positions.iter_mut() {
+                if pos.0 == sec_idx && (pos.1 as usize) >= at_offset {
+                    pos.1 = (pos.1 as i64 + delta) as u32;
                 }
             }
         }
-        for reloc in section.relocations.iter_mut() {
-            if (reloc.offset as usize) >= pos {
-                reloc.offset += count as u32;
+        for reloc in self.sections[sec_idx].relocations.iter_mut() {
+            if (reloc.offset as usize) >= at_offset {
+                reloc.offset = (reloc.offset as i64 + delta) as u32;
             }
         }
-        for jump in section.jumps.iter_mut() {
-            if jump.offset >= pos {
-                jump.offset += count;
+        for jump in self.sections[sec_idx].jumps.iter_mut() {
+            if jump.offset >= at_offset {
+                jump.offset = (jump.offset as i64 + delta) as usize;
             }
         }
-    }
-
-    /// Adjust all tracked offsets after removing `count` bytes starting at `pos`.
-    /// Items after `pos + count` are shifted backward by `count`.
-    fn adjust_offsets_after_remove(
-        label_positions: &mut HashMap<String, (usize, u32)>,
-        numeric_label_positions: &mut HashMap<String, Vec<(usize, u32)>>,
-        section: &mut Section,
-        sec_idx: usize,
-        pos: usize,
-        count: usize,
-    ) {
-        for (_, lbl_pos) in label_positions.iter_mut() {
-            if lbl_pos.0 == sec_idx && (lbl_pos.1 as usize) > pos {
-                lbl_pos.1 -= count as u32;
-            }
-        }
-        for (_, positions) in numeric_label_positions.iter_mut() {
-            for lbl_pos in positions.iter_mut() {
-                if lbl_pos.0 == sec_idx && (lbl_pos.1 as usize) > pos {
-                    lbl_pos.1 -= count as u32;
-                }
-            }
-        }
-        for reloc in section.relocations.iter_mut() {
-            if (reloc.offset as usize) > pos {
-                reloc.offset -= count as u32;
-            }
-        }
-        for jump in section.jumps.iter_mut() {
-            if jump.offset > pos {
-                jump.offset -= count;
+        for i in (current_marker_idx + 1)..self.sections[sec_idx].align_markers.len() {
+            if self.sections[sec_idx].align_markers[i].offset >= at_offset {
+                self.sections[sec_idx].align_markers[i].offset =
+                    (self.sections[sec_idx].align_markers[i].offset as i64 + delta) as usize;
             }
         }
     }

@@ -1,2 +1,0 @@
-Testing and fixing brieflz project compilation and tests across all architectures.
-Started: 2026-02-04

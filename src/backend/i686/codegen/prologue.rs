@@ -1,6 +1,6 @@
 //! I686Codegen: prologue/epilogue and stack frame operations.
 
-use crate::ir::reexports::{IrFunction, Value};
+use crate::ir::reexports::{Instruction, IrFunction, Value};
 use crate::common::types::IrType;
 use crate::backend::generation::{
     is_i128_type, calculate_stack_space_common, run_regalloc_and_merge_clobbers,
@@ -241,11 +241,63 @@ impl I686Codegen {
             self.fastcall_stack_cleanup = 0;
         }
 
+        // Build a map of param_idx -> ParamRef dest Value for fast lookup.
+        // Used to handle the case where param alloca was eliminated by mem2reg
+        // but the register allocator assigned a callee-saved register.
+        let mut paramref_dests: Vec<Option<Value>> = vec![None; func.params.len()];
+        if self.is_fastcall {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let Instruction::ParamRef { dest, param_idx, .. } = inst {
+                        if *param_idx < paramref_dests.len() {
+                            paramref_dests[*param_idx] = Some(*dest);
+                        }
+                    }
+                }
+            }
+        }
+
         let stack_base: i64 = 8;
         let mut fastcall_reg_idx = 0usize;
 
         for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
+
+            // Pre-store optimization for fastcall register params: when the param's
+            // alloca was eliminated (by mem2reg) but the ParamRef dest is register-
+            // allocated to a callee-saved register, store the fastcall ABI register
+            // (%ecx/%edx) directly to the assigned physical register. This is critical
+            // because:
+            // 1. Dead alloca means no stack slot exists for this param
+            // 2. %ecx/%edx are caller-saved and will be clobbered
+            // 3. We must save the value NOW, before any other code runs
+            // 4. emit_param_ref will see param_pre_stored and skip code generation
+            if self.is_fastcall && fastcall_reg_idx < fastcall_reg_count {
+                let param_ty = func.params[i].ty;
+                if self.is_fastcall_reg_eligible(param_ty) {
+                    let has_alloca_slot = find_param_alloca(func, i)
+                        .and_then(|(dest, _)| self.state.get_slot(dest.0))
+                        .is_some();
+                    if !has_alloca_slot {
+                        let src_reg = if fastcall_reg_idx == 0 { "%ecx" } else { "%edx" };
+                        if let Some(paramref_dest) = paramref_dests[i] {
+                            if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
+                                // Store directly to the callee-saved register
+                                let dest_reg = phys_reg_name(phys_reg);
+                                emit!(self.state, "    movl {}, %{}", src_reg, dest_reg);
+                                self.state.param_pre_stored.insert(i);
+                            } else if let Some(slot) = self.state.get_slot(paramref_dest.0) {
+                                // Value was spilled to a stack slot
+                                let slot_ref = self.slot_ref(slot);
+                                emit!(self.state, "    movl {}, {}", src_reg, slot_ref);
+                                self.state.param_pre_stored.insert(i);
+                            }
+                        }
+                        fastcall_reg_idx += 1;
+                        continue;
+                    }
+                }
+            }
 
             let (slot, ty, dest_id) = if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
@@ -434,6 +486,13 @@ impl I686Codegen {
 
     pub(super) fn emit_param_ref_impl(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
         use crate::backend::call_abi::ParamClass;
+
+        // If this param was pre-stored in the prologue (fastcall register param
+        // with eliminated alloca), the value is already in the correct physical
+        // register or stack slot. No code generation needed.
+        if self.state.param_pre_stored.contains(&param_idx) {
+            return;
+        }
 
         if param_idx < self.state.param_alloca_slots.len() {
             if let Some((alloca_slot, _alloca_ty)) = self.state.param_alloca_slots[param_idx] {

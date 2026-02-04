@@ -220,7 +220,7 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         | "fabs" | "fsqrt" | "frndint" | "f2xm1" | "fscale" | "fpatan" | "fprem" | "fprem1"
         | "fyl2x" | "fyl2xp1" | "fptan" | "fsin" | "fcos" | "fxtract" | "fnclex" | "fxch"
         | "fadd" | "fmul" | "fsub" | "fdiv" | "fnstenv" | "fldenv" | "fnstsw"
-        | "ldmxcsr" | "stmxcsr" | "wbinvd" | "invd"
+        | "ldmxcsr" | "stmxcsr" | "wbinvd" | "invd" | "rdsspq" | "rdsspd"
         | "pushf" | "pushfq" | "popf" | "popfq" | "int3"
         | "movsq" | "stosq" | "movsw" | "stosw" | "lodsb" | "lodsw" | "lodsd" | "lodsq"
         | "scasb" | "scasw" | "scasd" | "scasq" | "cmpsb" | "cmpsw" | "cmpsd" | "cmpsq" => return None,
@@ -458,6 +458,35 @@ impl InstructionEncoder {
             "leave" | "leaveq" => { self.bytes.push(0xC9); Ok(()) }
             "ud2" => { self.bytes.extend_from_slice(&[0x0F, 0x0B]); Ok(()) }
             "endbr64" => { self.bytes.extend_from_slice(&[0xF3, 0x0F, 0x1E, 0xFA]); Ok(()) }
+            // CET shadow stack: rdsspq %r64, rdsspd %r32
+            "rdsspq" => {
+                if let Some(Operand::Register(reg)) = ops.first() {
+                    let rm = reg_num(&reg.name).ok_or_else(|| format!("unknown register: {}", reg.name))?;
+                    self.bytes.push(0xF3);
+                    // REX.W prefix (with REX.B if needed for r8-r15)
+                    let rex_b = if needs_rex_ext(&reg.name) { 1 } else { 0 };
+                    self.bytes.push(0x48 | rex_b);
+                    self.bytes.extend_from_slice(&[0x0F, 0x1E]);
+                    self.bytes.push(0xC8 | rm);
+                    Ok(())
+                } else {
+                    Err(format!("rdsspq requires a 64-bit register operand"))
+                }
+            }
+            "rdsspd" => {
+                if let Some(Operand::Register(reg)) = ops.first() {
+                    let rm = reg_num(&reg.name).ok_or_else(|| format!("unknown register: {}", reg.name))?;
+                    self.bytes.push(0xF3);
+                    if needs_rex_ext(&reg.name) {
+                        self.bytes.push(0x41);
+                    }
+                    self.bytes.extend_from_slice(&[0x0F, 0x1E]);
+                    self.bytes.push(0xC8 | rm);
+                    Ok(())
+                } else {
+                    Err(format!("rdsspd requires a 32-bit register operand"))
+                }
+            }
             "pause" => { self.bytes.extend_from_slice(&[0xF3, 0x90]); Ok(()) }
             "mfence" => { self.bytes.extend_from_slice(&[0x0F, 0xAE, 0xF0]); Ok(()) }
             "lfence" => { self.bytes.extend_from_slice(&[0x0F, 0xAE, 0xE8]); Ok(()) }

@@ -1795,7 +1795,7 @@ pub fn escape_string(s: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\t' => result.push_str("\\t"),
             '\r' => result.push_str("\\r"),
-            '\0' => result.push_str("\\0"),
+            '\0' => result.push_str("\\000"),
             c if c.is_ascii_graphic() || c == ' ' => result.push(c),
             c => {
                 // Emit the raw byte value (char as u8), not UTF-8 encoding

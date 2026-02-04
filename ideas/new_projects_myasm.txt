@@ -78,3 +78,17 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | tdb     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | jansson | PASS | FAIL (i686 codegen) | PASS | PASS | Fixed i686 asm: SHT_GROUP/COMDAT, R_386_GOTPC reloc; i686 still fails (codegen issue in hashtable.c/value.c) |
 | cc65    | TODO | TODO | PASS | TODO | Fixed ARM asm: preserve original case for condition code/barrier symbol names (CS was lowercased to cs) |
+| brieflz | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| nettle  | PASS | TODO | TODO | TODO | Fixed x86 asm: added rdsspq/rdsspd (CET shadow stack) instructions; fixed escape_string \0 -> \000 to prevent octal escape consuming adjacent digits |
+| tinn    | PASS | TODO | TODO | TODO | Passes x86 |
+| tinycbor | PASS | TODO | TODO | TODO | Passes x86 |
+| brotli  | PASS | FAIL | SKIP | FAIL | x86 passes; i686/riscv fail; no arm check script |
+| msgpack-c | PASS | TODO | TODO | TODO | Passes x86 |
+| Lua     | PASS | TODO | TODO | TODO | Passes x86 |
+| samurai | PASS | TODO | TODO | TODO | Passes x86 |
+| cmocka  | PASS | TODO | TODO | TODO | Passes x86 |
+| gawk    | PASS | TODO | TODO | TODO | Passes x86 |
+| mawk    | PASS | TODO | TODO | TODO | Passes x86 |
+| rc      | PASS | TODO | TODO | TODO | Passes x86 |
+| s7      | PASS | TODO | TODO | TODO | Passes x86 |
+| wolfssl | PASS | TODO | TODO | TODO | Passes x86 |
