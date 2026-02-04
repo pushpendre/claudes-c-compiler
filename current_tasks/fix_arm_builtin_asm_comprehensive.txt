@@ -1,0 +1,1 @@
+Fix ARM builtin assembler: adrp symbol disambiguation, .arch directives, missing instructions (cneg/ubfx/smull/mneg/hint/stnp/pmul/tbx/mla/bge), NEON arrangement syntax, and shift operand parsing. ~59 test failures to fix.
