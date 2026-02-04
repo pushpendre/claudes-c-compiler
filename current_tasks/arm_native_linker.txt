@@ -1,0 +1,7 @@
+Implementing a native AArch64 ELF linker in Rust.
+
+When MY_LD=builtin is set, the compiler will use this built-in linker instead of
+calling the system ld. The linker reads ELF .o files and .a archives, resolves
+symbols, handles AArch64 relocations, and emits a statically-linked ELF executable.
+
+Scope: AArch64 only. Must pass most verify_compiler.py test cases with -static.
