@@ -1,0 +1,14 @@
+Fix MY_ASM=builtin assembler version probe for kernel build
+
+When MY_ASM=builtin is set, the kernel build system probes the assembler version
+by running: $CC -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null
+
+It expects the output to contain "GNU assembler ... <version>" so it can parse
+the assembler version. Our builtin assembler silently succeeds without outputting
+anything, causing as-version.sh to fail with "unknown assembler invoked".
+
+Fix: When assembler_extra_args contains --version and MY_ASM=builtin, print a
+GNU-compatible version string to stdout before assembling. This satisfies the
+kernel's Kconfig assembler version check.
+
+Status: in_progress
