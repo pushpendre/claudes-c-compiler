@@ -461,11 +461,11 @@ impl InstructionEncoder {
             "fisttpq" => self.encode_x87_mem(ops, &[0xDD], 1),
             "fisttpl" => self.encode_x87_mem(ops, &[0xDB], 1),
             "faddp" => { self.bytes.extend_from_slice(&[0xDE, 0xC1]); Ok(()) }
-            "fsubrp" => { self.bytes.extend_from_slice(&[0xDE, 0xE1]); Ok(()) }
-            "fsubp" => { self.bytes.extend_from_slice(&[0xDE, 0xE9]); Ok(()) }
+            "fsubrp" => { self.bytes.extend_from_slice(&[0xDE, 0xE9]); Ok(()) }
+            "fsubp" => { self.bytes.extend_from_slice(&[0xDE, 0xE1]); Ok(()) }
             "fmulp" => { self.bytes.extend_from_slice(&[0xDE, 0xC9]); Ok(()) }
-            "fdivrp" => { self.bytes.extend_from_slice(&[0xDE, 0xF1]); Ok(()) }
-            "fdivp" => { self.bytes.extend_from_slice(&[0xDE, 0xF9]); Ok(()) }
+            "fdivrp" => { self.bytes.extend_from_slice(&[0xDE, 0xF9]); Ok(()) }
+            "fdivp" => { self.bytes.extend_from_slice(&[0xDE, 0xF1]); Ok(()) }
             "fchs" => { self.bytes.extend_from_slice(&[0xD9, 0xE0]); Ok(()) }
             "fabs" => { self.bytes.extend_from_slice(&[0xD9, 0xE1]); Ok(()) }
             "fsqrt" => { self.bytes.extend_from_slice(&[0xD9, 0xFA]); Ok(()) }
