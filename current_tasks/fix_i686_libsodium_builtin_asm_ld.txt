@@ -1,0 +1,8 @@
+Fix i686 builtin assembler and linker for libsodium project.
+
+Issues found:
+- pushfl instruction not handled in i686 assembler
+- Likely popfl also needed
+- Need to test with both MY_ASM=builtin and MY_LD=builtin
+
+Goal: Make libsodium pass with MY_ASM=builtin MY_LD=builtin on i686.
