@@ -1,0 +1,6 @@
+Fix builtin assembler/linker failures for x86:
+1. Add .pushsection/.popsection directive support (needed by libsodium, libffi)
+2. Add fnstsw instruction encoding (needed by musl)
+3. Fix redis SIGSEGV with builtin linker
+4. Fix mbedtls AES SIGSEGV with builtin linker
+5. Fix postgres shared library linking ("No such file or directory")
