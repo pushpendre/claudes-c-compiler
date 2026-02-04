@@ -115,7 +115,8 @@ is essential for working on any phase.
 semantic distinctions that matter for type checking, sizeof, and ABI:
 
 ```
-CType::Void, Bool, Char, UChar, Short, UShort, Int, UInt,
+CType::Void, Bool,
+       Char, UChar, Short, UShort, Int, UInt,
        Long, ULong, LongLong, ULongLong, Int128, UInt128,
        Float, Double, LongDouble,
        ComplexFloat, ComplexDouble, ComplexLongDouble,
@@ -125,6 +126,10 @@ CType::Void, Bool, Char, UChar, Short, UShort, Int, UInt,
        Struct(RcStr), Union(RcStr), Enum(EnumType),
        Vector(Box<CType>, usize)
 ```
+
+All 27 variants are shown above: 20 primitive scalar types, 3 complex types,
+and 4 compound type constructors (Pointer, Array, Function, Vector) plus
+Struct, Union, and Enum.
 
 CType distinguishes `int` from `long` even when the underlying sizes match
 (e.g., both are 32 bits on ILP32), because C requires them to be distinct
@@ -198,14 +203,46 @@ hardcoded assumptions from leaking into phase-specific code.
 
 The largest module in `common/`. Contains:
 
-**CType enum** -- All C-level types, from `Void` through `Vector`. Struct and
-union variants carry an `RcStr` (reference-counted string) key that indexes
-into a `StructLayout` table. This makes cloning a struct type a cheap
+**CType enum** -- All 27 C-level type variants, from `Void` through `Vector`.
+Struct and union variants carry an `RcStr` (reference-counted string) key that
+indexes into a `StructLayout` table. This makes cloning a struct type a cheap
 refcount bump instead of a heap allocation.
 
-**IrType enum** -- Flat machine-level types. Methods include `size()`,
-`align()`, `is_signed()`, `is_unsigned()`, `is_float()`, `is_long_double()`,
-and `is_128bit()`.
+CType has an extensive public method surface (20+ methods):
+- Size/alignment: `size()`, `size_ctx(ctx)`, `align_ctx(ctx)`,
+  `preferred_align_ctx(ctx)` -- the `_ctx` variants accept a
+  `StructLayoutProvider` to resolve struct/union sizes.
+- Classification: `is_integer()`, `is_signed()`, `is_unsigned()`,
+  `is_floating()`, `is_complex()`, `is_arithmetic()`, `is_vector()`,
+  `is_pointer_like()`, `is_function_pointer()`, `is_struct_or_union()`.
+- Type arithmetic: `usual_arithmetic_conversion(lhs, rhs)` -- implements C11
+  6.3.1.8 usual arithmetic conversions. `integer_rank()` -- returns the
+  integer conversion rank per C11 6.3.1.1. `integer_promoted()` -- promotes
+  sub-int types to `int`. `conditional_composite_type(then, else)` -- merges
+  types for the ternary operator.
+- Complex support: `complex_component_type()` -- returns the component type
+  (e.g., `Float` for `ComplexFloat`).
+- Pointer/function introspection: `get_function_type()`,
+  `func_ptr_return_type(strict)`, `vector_info()`.
+- Display: implements `std::fmt::Display` for user-friendly C type names in
+  diagnostics (e.g., `unsigned long *`, `void (*)(int, double)`).
+
+**IrType enum** -- Flat machine-level types (15 variants). Methods:
+- `size()`, `align()` -- target-dependent size and alignment.
+- `is_signed()`, `is_unsigned()`, `is_integer()`, `is_float()`,
+  `is_long_double()`, `is_128bit()`.
+- `to_unsigned()` -- converts signed variants to unsigned (e.g., I32 to U32).
+- `truncate_i64(val)` -- truncates an i64 to the width of this type, then
+  sign-extends back, implementing C truncation semantics.
+- `from_ctype(ct)` -- converts a CType to the corresponding IrType.
+
+**RcLayout type alias** -- `Rc<StructLayout>`. Cloning is a cheap reference
+count increment instead of deep-copying all field names, types, and offsets.
+This eliminates the most expensive cloning in the lowering phase.
+
+**StructField struct** -- Input description of a field for layout computation:
+name, CType, optional bitfield width, optional per-field alignment override,
+and per-field `is_packed` flag.
 
 **StructLayout** -- Computed layout of a struct or union: field offsets,
 total size, alignment, and `is_union` / `is_transparent_union` flags.
@@ -221,10 +258,33 @@ follows the System V ABI rules, including:
 A `StructLayoutBuilder` handles the stateful layout algorithm, tracking the
 current byte offset, maximum alignment, and bitfield accumulation state.
 
-**EnumType** -- Stores variant name/value pairs and a `is_packed` flag. The
-`packed_size()` method computes the minimum integer size needed to hold all
-variant values (1, 2, 4, or 8 bytes), or returns 4 for non-packed enums
-(with a GCC extension to use 8 bytes for values exceeding 32-bit range).
+StructLayout public methods:
+- Construction: `for_struct_with_packing(fields, max_field_align, ctx)`,
+  `for_union_with_packing(fields, max_field_align, ctx)`, `empty()`,
+  `empty_union()`, `empty_rc()`, `empty_union_rc()`.
+- ABI classification: `classify_sysv_eightbytes(ctx)` -- System V AMD64 ABI
+  eightbyte classification for register passing. Returns a vector of
+  `EightbyteClass` values (one per eightbyte).
+  `classify_riscv_float_fields(ctx)` -- RISC-V LP64D floating-point calling
+  convention classification. Returns `Option<RiscvFloatClass>`.
+- Field resolution: `resolve_init_field(designator, idx, ctx)` and
+  `resolve_init_field_idx(...)` -- resolve designated initializer field names,
+  including drill-down into anonymous struct/union members. Returns
+  `InitFieldResolution` (Direct or AnonymousMember).
+  `field_offset(name, ctx)`, `field_layout(name)`,
+  `field_offset_with_bitfield(...)`.
+- Analysis: `has_pointer_fields(ctx)` -- recursively checks for pointer fields.
+
+**InitFieldResolution enum** -- Result of resolving a designated initializer:
+`Direct(usize)` for a field found at a given index, or
+`AnonymousMember { anon_field_idx, inner_name }` when the field is inside an
+anonymous struct/union member.
+
+**EnumType** -- Stores an optional `name: Option<String>`, variant name/value
+pairs, and a `is_packed` flag. The `packed_size()` method computes the minimum
+integer size needed to hold all variant values (1, 2, 4, or 8 bytes), or
+returns 4 for non-packed enums (with a GCC extension to use 8 bytes for
+values exceeding 32-bit range).
 
 **FunctionType** -- Return type, parameter list with optional names, and
 variadic flag.
@@ -234,9 +294,16 @@ variadic flag.
   with a `merge()` method implementing the standard merging rules: NoClass
   yields to anything, Integer dominates, and Sse merges with itself.
 - `RiscvFloatClass` -- RISC-V LP64D hardware floating-point calling convention
-  classification. Variants: `OneFloat`, `TwoFloats`, `FloatAndInt`,
-  `IntAndFloat` -- each carrying field-level details like whether a component
-  is `double` vs `float`, and the byte offsets and sizes of components.
+  classification. Variants:
+  - `OneFloat { is_double }` -- a single float or double field.
+  - `TwoFloats { lo_is_double, hi_is_double }` -- two float/double fields
+    (two booleans indicating whether each is double).
+  - `FloatAndInt { float_is_double, float_offset, int_offset, int_size }` --
+    one float/double followed by one integer, with byte offsets and the
+    integer's size.
+  - `IntAndFloat { float_is_double, int_offset, int_size, float_offset }` --
+    one integer followed by one float/double, with byte offsets and the
+    integer's size.
 - `AddressSpace` -- GCC named address space extension for x86 segment-relative
   addressing: `Default`, `SegGs` (`__seg_gs`), `SegFs` (`__seg_fs`).
 
@@ -245,12 +312,16 @@ sizes and alignments for struct types without depending on the lowering module.
 Both `TypeContext` (in sema) and `FxHashMap<String, RcLayout>` implement this
 trait.
 
+**align_up() function** -- Aligns an offset up to the next multiple of a given
+alignment. Used throughout layout computation.
+
 **Target helpers** -- `set_target_ptr_size()`, `target_ptr_size()`,
 `target_is_32bit()`, `set_target_long_double_is_f128()`,
 `target_long_double_is_f128()`, `target_int_ir_type()`, `widened_op_type()`.
-The `widened_op_type()` function returns the machine-word type for arithmetic
-widening: on LP64 everything widens to I64, while on i686 most types widen to
-I32 but I64/U64 stay at I64 (requiring register pairs).
+The `widened_op_type()` function returns the widened type for integer
+arithmetic: on LP64 everything widens to I64, while on i686 most types widen
+to I32 but I64/U64 stay at I64 (requiring register pairs). Float types, Void,
+and I128/U128 pass through unchanged.
 
 ### error.rs -- Diagnostic Infrastructure
 
@@ -268,6 +339,12 @@ source snippets, caret highlighting, and ANSI color output.
 - Optional explicit location string (for preprocessor-phase diagnostics
   where the SourceManager is not yet available)
 
+Diagnostic builder methods:
+- Constructors: `error(msg)`, `warning(msg)`, `warning_with_kind(msg, kind)`,
+  `note(msg)`.
+- Chainable modifiers: `with_span(span)`, `with_note(diag)`,
+  `with_fix_hint(text)`, `with_location(file, line, col)`.
+
 **WarningKind** -- Enumeration of warning categories matching GCC flag names:
 `Undeclared`, `ImplicitFunctionDeclaration`, `Cpp`, `ReturnType`. Each
 variant maps to a `-W<name>` flag (e.g., `-Wimplicit-function-declaration`).
@@ -277,10 +354,15 @@ warning (undeclared variables are now hard errors).
 
 **WarningConfig** -- Per-warning enabled/disabled and error-promotion state.
 Processes CLI flags left-to-right so that later flags override earlier ones:
-`-Wall -Wno-return-type` enables all warnings except `return-type`. Supports:
+`-Wall -Wno-return-type` enables all warnings except `return-type`. The
+`process_flag()` method handles the full set of supported flags:
 - `-Werror` (global promotion of all warnings to errors)
+- `-Wno-error` (global demotion, clears the `-Werror` flag)
 - `-Werror=<name>` (per-warning promotion, which also implicitly enables it)
 - `-Wno-error=<name>` (demotion of a specific warning back from error)
+- `-Wall` (enable the standard warning set)
+- `-Wextra` (enable additional warnings, superset of `-Wall`)
+- `-W<name>` (enable a specific warning by name)
 - `-Wno-<name>` (disable a specific warning entirely)
 
 **ColorMode** -- Three modes matching `-fdiagnostics-color={auto,always,never}`.
@@ -289,28 +371,45 @@ bold red for errors, bold magenta for warnings, bold cyan for notes, bold green
 for carets and fix-it hints, bold white for file:line:col locations.
 
 **DiagnosticEngine** -- Central diagnostic collector. Tracks error and warning
-counts, holds a `WarningConfig` and optional `SourceManager` reference. Emits
+counts, holds a `WarningConfig` and an owned `Option<SourceManager>`. Emits
 diagnostics to stderr with source snippets and include-chain traces (GCC-style
 "In file included from X:Y:" headers, with deduplication to avoid repeating the
 same chain for consecutive errors in the same included file). The source manager
 is attached after preprocessing creates it, so early-phase diagnostics use
 explicit location strings instead.
 
+DiagnosticEngine convenience methods:
+- `error(msg, span)`, `warning(msg, span)`, `warning_with_kind(msg, span, kind)`
+  -- shorthand methods that construct a Diagnostic and emit it in one call.
+- `has_errors()`, `error_count()`, `warning_count()` -- query counts.
+- `take_source_manager()` -- transfers ownership of the source manager out
+  (e.g., for passing to codegen for debug info).
+
+**Macro expansion traces** -- When a diagnostic occurs on a line produced by
+macro expansion, the engine calls `render_macro_expansion_trace()` to emit
+"note: in expansion of macro 'X'" messages. The `is_uninteresting_macro()`
+filter suppresses noise from ubiquitous predefined macros (`NULL`, `INT_MAX`,
+`__builtin_*`, etc.), showing only user-defined macros likely relevant to the
+error. Traces are limited to 3 levels of nesting.
+
 ### source.rs -- Source Location Tracking
 
 Maps byte offsets in compiler output back to original source file locations.
 
-**Span** -- A byte-offset range (`start`, `end`, `file_id`) in source code.
-Compact (12 bytes) and cheap to copy. A `Span::dummy()` constructor provides
-a zero-valued placeholder for generated code.
+**Span** -- A byte-offset range (`start`, `end`, `file_id`) in source code,
+all stored as `u32`. Compact (12 bytes) and cheap to copy. Constructors:
+`Span::new(start, end, file_id)` and `Span::dummy()` (zero-valued placeholder
+for generated code).
 
 **SourceLocation** -- Human-readable location: filename, line number, column.
 Implements `Display` as `file:line:col`.
 
-**SourceManager** -- Resolves spans to locations. Operates in two modes:
+**SourceManager** -- Resolves spans to locations. Holds a `Vec<SourceFile>`
+(supporting multiple files via `add_file()`). Operates in two modes:
 
-1. *Simple mode*: A single file registered via `add_file()`. Spans are resolved
-   by binary-searching a precomputed line-offset table.
+1. *Simple mode*: Files registered via `add_file()`. Spans are resolved
+   by binary-searching a precomputed line-offset table within the file
+   identified by `span.file_id`.
 2. *Line-map mode*: Preprocessed output with embedded `# linenum "filename"`
    markers. The line map is built by `build_line_map()` and maps byte offsets
    in the preprocessed stream back to original source files and line numbers.
@@ -325,9 +424,23 @@ The source manager also tracks:
   of macro 'X'" diagnostic notes. Stored sorted by preprocessed line number
   for binary search lookup.
 
+Public methods beyond `add_file()` and `resolve_span()`:
+- `get_content(file_id)` -- returns the raw source text for a file.
+- `get_source_line(span)` -- returns the full source line text containing the
+  span start position (for error snippet display).
+- `get_include_chain(filename)` -- walks the include origin chain from a file
+  back to the main source file.
+- `set_macro_expansions(expansions)` -- stores macro expansion metadata
+  collected by the preprocessor.
+- `get_macro_expansion_at(span)` -- looks up macro expansion info for a span
+  via binary search.
+- `build_line_map()` -- scans preprocessed output for line markers and builds
+  the mapping tables.
+
 Internally, filenames are deduplicated into a table indexed by `u16`, so
-`LineMapEntry` structs are compact (10 bytes: `pp_offset` as u32 +
-`filename_idx` as u16 + `orig_line` as u32) even for large translation units.
+`LineMapEntry` structs are compact (12 bytes: `pp_offset` as u32 +
+`filename_idx` as u16 + 2 bytes padding + `orig_line` as u32) even for large
+translation units.
 
 ### symbol_table.rs -- Scoped Symbol Table
 
@@ -358,7 +471,9 @@ and lowering.
 handles all shared cases:
 
 - 22 primitive C types (Void through ComplexLongDouble)
-- Pointer, Array, and FunctionPointer construction
+- Pointer, Array, FunctionPointer, and BareFunction construction (BareFunction
+  produces `CType::Function` directly, not wrapped in a Pointer -- this is
+  used for `typeof` on function names)
 - TypeofType and AutoType
 
 Only four cases differ between sema and lowering and must be implemented by
@@ -378,6 +493,22 @@ compile-time evaluation of array dimension expressions.
 This design guarantees that the mapping from `TypeSpecifier::Int` to
 `CType::Int` (and all 21 other primitives) is defined in exactly one place.
 
+**`build_full_ctype(ctx, type_spec, derived)`** -- A public function (~140
+lines) that builds a complete CType from a TypeSpecifier and a
+DerivedDeclarator chain. This is the single canonical implementation of the
+C "inside-out" declarator rule, used by both sema and lowering. It handles:
+- Simple pointer and array chains (`int **p`, `int arr[3][4]`)
+- Function pointer declarators (`int (*fp)(int)`)
+- Arrays of function pointers (`int (*fp[10])(void)`)
+- Nested function pointer return types (`Page *(*fetch)(int)`)
+- Bare function declarators (`int main(int, char**)`)
+
+The function identifies the function-pointer "core" in the declarator list,
+folds prefix pointer declarators into the return type, processes the core and
+any trailing declarators, then applies outer array wrappers from the prefix.
+Helper functions `find_function_pointer_core()` and
+`convert_param_decls_to_ctypes()` support the implementation.
+
 ### const_arith.rs -- Constant Arithmetic Primitives
 
 Low-level arithmetic functions for compile-time constant evaluation with
@@ -396,14 +527,30 @@ Key internal helpers:
 - `bool_to_i64(b)` -- Convert boolean to 0/1.
 
 Key evaluators:
+- `eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned, lhs_unsigned, rhs_unsigned)`
+  -- (public) Top-level dispatch entry point for all constant binary
+  evaluation. Dispatches to float, i128, or i64 paths based on operand types.
 - `eval_const_binop_int(op, l, r, is_32bit, is_unsigned)` -- (module-private)
   Integer binary operations (add, sub, mul, div, mod, shifts, bitwise,
   comparisons) with wrapping, division-by-zero checking, and proper width
   truncation.
-- `eval_const_binop_float(op, l, r)` -- (public) Floating-point binary
-  operations on f64 values.
-- Additional helpers for i128 operations and long double constant arithmetic,
-  delegating to the `long_double` module for full-precision results.
+- `eval_const_binop_float(op, lhs, rhs)` -- (public) Floating-point binary
+  operations on `&IrConst` parameters. Handles F32, F64, and LongDouble
+  formats: for LongDouble, uses full-precision f128 software arithmetic or
+  x87 80-bit inline assembly depending on the target. For F32/F64, uses
+  native Rust arithmetic. Comparison and logical operations always return
+  `IrConst::I64`.
+- `eval_const_binop_i128(op, lhs, rhs, ...)` -- (module-private) Native i128
+  arithmetic for `__int128` operations.
+- `negate_const(val)` -- (public) Unary negation with sub-int promotion.
+  For LongDouble, negates by flipping the sign bit in the f128 bytes directly,
+  preserving full 112-bit precision.
+- `bitnot_const(val)` -- (public) Bitwise NOT with sub-int promotion to i32.
+- `is_zero_expr(expr)` -- (public) Detects zero-literal expressions (0 or
+  cast of 0), used for offsetof pattern detection (`&((type*)0)->member`).
+- `truncate_and_extend_bits(bits, target_width, target_signed)` -- (public)
+  Raw bit truncation to a target width and optional sign-extension back to
+  64 bits, used for evaluating cast chains at compile time.
 
 ### const_eval.rs -- Shared Constant Expression Evaluation
 
@@ -417,20 +564,34 @@ evaluation logic for:
 
 - **Literal evaluation** (`eval_literal`) -- Converts `Expr::IntLiteral`,
   `Expr::FloatLiteral`, `Expr::CharLiteral`, and all other literal kinds to
-  `IrConst` values. Integer literals produce `IrConst::I32` when the value
-  fits in 32 bits, otherwise `IrConst::I64`. Char literals are sign-extended
-  from `signed char` to `int`, matching GCC behavior. Long double literals
-  produce `IrConst::long_double_with_bytes` with full-precision byte storage.
+  `IrConst` values. `IntLiteral` produces `IrConst::I32` when the value fits
+  in 32 bits, otherwise `IrConst::I64`. Other integer literal kinds
+  (`LongLiteral`, `LongLongLiteral`, `UIntLiteral`, `ULongLiteral`,
+  `ULongLongLiteral`) always produce `IrConst::I64`. Char literals are
+  sign-extended from `signed char` to `int`, matching GCC behavior. Long
+  double literals produce `IrConst::long_double_with_bytes` with full-precision
+  byte storage.
 
-- **Builtin constant folding** -- Evaluates `__builtin_bswap`,
-  `__builtin_clz`, and similar builtins at compile time when their arguments
-  are constants.
+- **Builtin constant folding** (`eval_builtin_call`) -- Evaluates
+  `__builtin_bswap`, `__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`,
+  `__builtin_ffs`, `__builtin_parity`, `__builtin_clrsb`, and similar
+  builtins at compile time when their arguments are constants. Also handles
+  `__builtin_nan`/`__builtin_inf`/`__builtin_huge_val` families for
+  float/double/long-double NaN and infinity constants. The `l` suffix variants
+  (e.g., `__builtin_clzl`) are target-aware, using 32-bit or 64-bit
+  operations based on `target_is_32bit()`.
 
-- **Sub-int promotion** -- Handles unary operations on types narrower than
-  `int`, applying C integer promotion rules.
+- **Sub-int promotion** (`promote_sub_int`) -- Handles unary operations on
+  types narrower than `int` (I8/I16), applying C integer promotion rules with
+  correct zero-extension for unsigned types.
 
-- **Bit-width evaluation through cast chains** -- Tracks type width through
-  sequences of casts.
+- **IrConst-to-bits conversion** (`irconst_to_bits`) -- Converts an IrConst
+  to raw u64 bits for bit-level operations.
+
+- **Binary operations with type parameters** (`eval_binop_with_types`) --
+  Wraps `const_arith::eval_const_binop` with C usual arithmetic conversion
+  logic (C11 6.3.1.8). For shifts, only the LHS type determines the result
+  type (C11 6.5.7); for other ops, the wider of both types is used.
 
 Functions that require caller-specific state (global address resolution,
 sizeof/alignof, binary operations with type inference) remain in the
@@ -466,6 +627,7 @@ by both x87 and f128 parsing paths.
 **Format conversion:**
 - `x87_bytes_to_f128_bytes(x87)` -- Convert x87 80-bit to IEEE binary128.
 - `x87_bytes_to_f64(bytes)` -- Convert x87 80-bit to f64.
+- `x87_to_f64(bytes)` -- Convenience alias for `x87_bytes_to_f64`.
 - `f128_bytes_to_x87_bytes(f128_bytes)` -- Convert IEEE binary128 to x87.
 - `f128_bytes_to_f64(f128_bytes)` -- Convert IEEE binary128 to f64.
 - `f64_to_x87_bytes_simple(val)` -- Convert f64 to x87 bytes.
@@ -491,19 +653,29 @@ then call the appropriate `f128_bytes_to_*` function.
 These functions use `fld` / `fstp` x87 FPU instructions via Rust inline
 assembly to perform operations at full 80-bit precision on x86-64 hosts:
 - `x87_add(a, b)`, `x87_sub(a, b)`, `x87_mul(a, b)`, `x87_div(a, b)`
-- `x87_rem(a, b)` -- Uses `fprem1` for IEEE remainder.
-- `x87_neg(a)` -- Uses `fchs`.
-- `x87_cmp(a, b)` -- Uses `fucomip` for unordered comparison. Returns
-  negative, zero, or positive (following the C `strcmp` convention).
+- `x87_rem(a, b)` -- Uses `fprem` (not `fprem1`) with a loop that checks the
+  C2 status bit for partial remainders, ensuring correct results even for
+  large quotients.
+- `x87_neg(a)` -- Negates by flipping the sign bit with a pure Rust
+  bit-flip (`result[9] ^= 0x80`). No inline assembly is used.
+- `x87_cmp(a, b)` -- Uses `fucompp` + `fnstsw ax` for unordered comparison.
+  Decodes the x87 status word condition codes (C0, C2, C3) to return: -1 if
+  a < b, 0 if equal, 1 if a > b, or `i32::MIN` for unordered (NaN)
+  comparisons.
 
 On non-x86 hosts cross-compiling for x86, fallback software implementations
-are provided.
+are provided (lossy, via f64 approximation).
 
 **f128 arithmetic (pure Rust software implementation):**
 For AArch64/RISC-V targets (or cross-compilation on non-x86 hosts), all
 binary128 operations are implemented in pure Rust without inline assembly:
-- `f128_add(a, b)`, `f128_sub(a, b)`, `f128_mul(a, b)`, `f128_div(a, b)`
-- `f128_rem(a, b)`, `f128_cmp(a, b)`
+- `f128_add(a, b)`, `f128_sub(a, b)`, `f128_mul(a, b)`, `f128_div(a, b)` --
+  Full 112-bit mantissa precision with correct rounding.
+- `f128_rem(a, b)` -- Falls back to a lossy f64 approximation for the
+  remainder computation. This is acceptable because remainder is rarely used
+  in long double constant folding; the special cases (NaN, infinity, zero)
+  are handled correctly.
+- `f128_cmp(a, b)` -- Returns -1, 0, 1, or `i32::MIN` for unordered (NaN).
 
 These decompose the 128-bit representation into sign, exponent, and mantissa
 components using shared `f128_decompose` helpers, then perform the operation
@@ -544,18 +716,20 @@ resolution after inlining), cfg_simplify (dead block detection), and the
 backend (operand emission).
 
 **`constraint_is_immediate_only(constraint)`** -- Returns `true` for
-constraints that accept only compile-time constants (`"i"`, `"n"`, `"e"`,
-and x86-specific letters like `"K"`, `"M"`, `"G"`, `"H"`, `"J"`, `"L"`,
-`"O"`). Returns `false` for multi-alternative constraints that also accept
-registers or memory (`"ri"`, `"g"`, `"Ir"`, etc.).
+constraints that accept only compile-time constants (`"i"`, `"I"`, `"n"`,
+`"N"`, `"e"`, `"E"`, and x86-specific letters like `"K"`, `"M"`, `"G"`,
+`"H"`, `"J"`, `"L"`, `"O"`). Returns `false` for multi-alternative
+constraints that also accept registers or memory (`"ri"`, `"g"`, `"Ir"`,
+etc.).
 
-The function strips output/early-clobber modifiers (`=`, `+`, `&`, `%`)
-before classification, and rejects named operand references (`[name]`).
-It checks that at least one immediate-class letter is present, and that no
-register-class letters (`r`, `q`, `a`, `b`, `c`, `d`, etc.), memory-class
-letters (`m`, `o`, `V`, `p`, `Q`), or general-class letters (`g`) appear.
-Numeric digit references (operand reuse constraints) also cause a `false`
-return.
+The function strips output/early-clobber/commutative modifiers (`=`, `+`,
+`&`, `%`) before classification, and rejects named operand references
+(`[name]`). It checks that at least one immediate-class letter is present,
+and that no GP register-class letters (`r`, `q`, `R`, `l`), FP/SIMD
+register-class letters (`x`, `v`, `Y`), specific register letters (`a`, `b`,
+`c`, `d`, `S`, `D`), memory-class letters (`m`, `o`, `V`, `p`, `Q`), or
+general-class letters (`g`) appear. Numeric digit references (operand reuse
+constraints) also cause a `false` return.
 
 ### fx_hash.rs -- Fast Non-Cryptographic Hash
 
