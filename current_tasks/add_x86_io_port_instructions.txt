@@ -1,0 +1,9 @@
+Adding missing x86 I/O port instructions to the assembler for kernel build support.
+
+Instructions to add:
+- outsl/insl as aliases for outsd/insd (AT&T long suffix)
+- outb/outw/outl: OUT al/ax/eax, dx (port I/O with register operands)
+- inb/inw/inl: IN dx, al/ax/eax (port I/O with register operands)
+- Also: outb/inb with immediate port number
+
+These are needed for the x86 tinyconfig kernel build (lib/iomap.o, drivers/tty/serial/8250).
