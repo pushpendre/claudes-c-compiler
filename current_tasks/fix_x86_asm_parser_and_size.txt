@@ -1,5 +1,0 @@
-Fix x86 assembler parser and .size directive issues:
-1. parse_integer_expr can't handle i64::MIN (-9223372036854775808) - overflows during negation
-2. Symbol+offset expressions (e.g., GD_struct+128) not parsed as symbol+addend in data values and memory operands
-3. .size directive uses end-of-section instead of current position for .-symbol expressions
-4. Forward numeric label references (1f, 2f) not handled correctly

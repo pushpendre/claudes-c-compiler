@@ -97,6 +97,8 @@ pub enum SizeExpr {
 pub enum DataValue {
     Integer(i64),
     Symbol(String),
+    /// symbol + offset (e.g., `.quad GD_struct+128`)
+    SymbolOffset(String, i64),
     /// symbol - symbol (e.g., `.long .LBB3 - .Ljt_0`)
     SymbolDiff(String, String),
 }
@@ -183,6 +185,8 @@ pub enum Displacement {
     None,
     Integer(i64),
     Symbol(String),
+    /// Symbol with an addend offset: symbol+offset or symbol-offset (e.g., GD_struct+128(%rip))
+    SymbolAddend(String, i64),
     /// Symbol with relocation modifier: symbol@GOT, symbol@GOTPCREL, symbol@TPOFF, etc.
     SymbolMod(String, String),
 }
@@ -780,6 +784,20 @@ fn parse_displacement(s: &str) -> Result<Displacement, String> {
         return Ok(Displacement::SymbolMod(sym, modifier));
     }
 
+    // Check for symbol+offset or symbol-offset (e.g., GD_struct+128)
+    // Look for + or - that separates symbol from offset (skip first char for .-prefixed labels)
+    for (i, c) in s.char_indices().skip(1) {
+        if c == '+' || c == '-' {
+            let sym = s[..i].trim();
+            let offset_str = &s[i..]; // includes the sign
+            if let Ok(offset) = parse_integer_expr(offset_str) {
+                if !sym.is_empty() && !sym.contains(' ') {
+                    return Ok(Displacement::SymbolAddend(sym.to_string(), offset));
+                }
+            }
+        }
+    }
+
     // Plain symbol
     Ok(Displacement::Symbol(s.to_string()))
 }
@@ -822,10 +840,35 @@ fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
             continue;
         }
 
+        // Check for symbol+offset or symbol-offset (e.g., GD_struct+128, arr+33)
+        if let Some(val) = parse_symbol_offset(trimmed) {
+            vals.push(val);
+            continue;
+        }
+
         // Symbol reference
         vals.push(DataValue::Symbol(trimmed.to_string()));
     }
     Ok(vals)
+}
+
+/// Parse symbol+offset or symbol-offset expressions (e.g., GD_struct+128).
+/// Returns a DataValue::SymbolOffset if the string matches this pattern.
+fn parse_symbol_offset(s: &str) -> Option<DataValue> {
+    // Look for + or - that separates symbol from offset
+    // Don't match the leading character (could be .-prefixed label)
+    for (i, c) in s.char_indices().skip(1) {
+        if c == '+' || c == '-' {
+            let sym = s[..i].trim();
+            let offset_str = &s[i..]; // includes the sign
+            if let Ok(offset) = parse_integer_expr(offset_str) {
+                if !sym.is_empty() && !sym.contains(' ') {
+                    return Some(DataValue::SymbolOffset(sym.to_string(), offset));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Parse an integer expression (decimal, hex, octal, negative).
@@ -835,6 +878,11 @@ fn parse_integer_expr(s: &str) -> Result<i64, String> {
         return Err("empty integer".to_string());
     }
 
+    // Try parsing the entire string first (handles i64::MIN correctly)
+    if let Ok(val) = s.parse::<i64>() {
+        return Ok(val);
+    }
+
     let (negative, s) = if s.starts_with('-') {
         (true, &s[1..])
     } else {
@@ -842,8 +890,13 @@ fn parse_integer_expr(s: &str) -> Result<i64, String> {
     };
 
     let val = if s.starts_with("0x") || s.starts_with("0X") {
-        i64::from_str_radix(&s[2..], 16)
-            .map_err(|_| format!("bad hex: {}", s))?
+        // Parse as u64 to handle values like 0x8000000000000000
+        let uval = u64::from_str_radix(&s[2..], 16)
+            .map_err(|_| format!("bad hex: {}", s))?;
+        if negative {
+            return Ok(-(uval as i64));
+        }
+        return Ok(uval as i64);
     } else if s.starts_with("0b") || s.starts_with("0B") {
         i64::from_str_radix(&s[2..], 2)
             .map_err(|_| format!("bad binary: {}", s))?
@@ -851,8 +904,14 @@ fn parse_integer_expr(s: &str) -> Result<i64, String> {
         i64::from_str_radix(s, 8)
             .map_err(|_| format!("bad octal: {}", s))?
     } else {
-        s.parse::<i64>()
-            .map_err(|_| format!("bad integer: {}", s))?
+        // Try parsing unsigned decimal as u64, then cast (for large values)
+        if let Ok(uval) = s.parse::<u64>() {
+            if negative {
+                return Ok(-(uval as i64));
+            }
+            return Ok(uval as i64);
+        }
+        return Err(format!("bad integer: {}", s));
     };
 
     Ok(if negative { -val } else { val })

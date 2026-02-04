@@ -201,7 +201,21 @@ impl ElfWriter {
                 self.pending_types.insert(name.clone(), *kind);
             }
             AsmItem::Size(name, expr) => {
-                self.pending_sizes.insert(name.clone(), expr.clone());
+                // Resolve .-symbol immediately to capture the current position
+                match expr {
+                    SizeExpr::CurrentMinusSymbol(start_sym) => {
+                        if let Some(&(sec_idx, start_off)) = self.label_positions.get(start_sym) {
+                            let current_off = self.sections[sec_idx].data.len() as u32;
+                            let size = (current_off - start_off) as u64;
+                            self.pending_sizes.insert(name.clone(), SizeExpr::Constant(size));
+                        } else {
+                            self.pending_sizes.insert(name.clone(), expr.clone());
+                        }
+                    }
+                    _ => {
+                        self.pending_sizes.insert(name.clone(), expr.clone());
+                    }
+                }
             }
             AsmItem::Label(name) => {
                 self.ensure_section()?;
@@ -356,6 +370,17 @@ impl ElfWriter {
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat(0).take(size));
                 }
+                DataValue::SymbolOffset(sym, addend) => {
+                    let offset = self.sections[sec_idx].data.len() as u32;
+                    self.sections[sec_idx].relocations.push(ElfRelocation {
+                        offset,
+                        symbol: sym.clone(),
+                        reloc_type: R_386_32,
+                        addend: *addend as i32,
+                    });
+                    let section = &mut self.sections[sec_idx];
+                    section.data.extend(std::iter::repeat(0).take(size));
+                }
                 DataValue::SymbolDiff(a, _b) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
                     self.sections[sec_idx].relocations.push(ElfRelocation {
@@ -389,6 +414,17 @@ impl ElfWriter {
                         symbol: sym.clone(),
                         reloc_type: R_386_32,
                         addend: 0,
+                    });
+                    let section = &mut self.sections[sec_idx];
+                    section.data.extend(std::iter::repeat(0).take(8));
+                }
+                DataValue::SymbolOffset(sym, addend) => {
+                    let offset = self.sections[sec_idx].data.len() as u32;
+                    self.sections[sec_idx].relocations.push(ElfRelocation {
+                        offset,
+                        symbol: sym.clone(),
+                        reloc_type: R_386_32,
+                        addend: *addend as i32,
                     });
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat(0).take(8));
@@ -462,7 +498,17 @@ impl ElfWriter {
     }
 
     fn emit_elf(mut self) -> Result<Vec<u8>, String> {
-        // Resolve sizes
+        // Relax jumps first - this changes label positions and section data
+        self.relax_jumps();
+
+        // Update symbol values from label_positions after relaxation
+        for (name, &(_, offset)) in &self.label_positions {
+            if let Some(&sym_idx) = self.symbol_map.get(name) {
+                self.symbols[sym_idx].value = offset;
+            }
+        }
+
+        // Resolve sizes (after relaxation so positions are final)
         for (name, expr) in &self.pending_sizes {
             if let Some(&sym_idx) = self.symbol_map.get(name) {
                 let size = match expr {
@@ -479,9 +525,6 @@ impl ElfWriter {
                 self.symbols[sym_idx].size = size;
             }
         }
-
-        // Relax jumps
-        self.relax_jumps();
 
         // Resolve internal relocations
         self.resolve_internal_relocations();

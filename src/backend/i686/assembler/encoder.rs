@@ -376,6 +376,10 @@ impl InstructionEncoder {
                 self.add_relocation(sym, R_386_32, 0);
                 (0i64, true)
             }
+            Displacement::SymbolAddend(sym, addend) => {
+                self.add_relocation(sym, R_386_32, *addend);
+                (0i64, true)
+            }
             Displacement::SymbolMod(sym, modifier) => {
                 let reloc_type = match modifier.as_str() {
                     "GOT" => R_386_GOT32,

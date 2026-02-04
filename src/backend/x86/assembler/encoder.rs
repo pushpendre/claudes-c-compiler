@@ -568,6 +568,10 @@ impl InstructionEncoder {
                         self.add_relocation(sym, R_X86_64_PC32, -4);
                         self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                     }
+                    Displacement::SymbolAddend(sym, addend) => {
+                        self.add_relocation(sym, R_X86_64_PC32, *addend - 4);
+                        self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                    }
                     Displacement::SymbolMod(sym, modifier) => {
                         let reloc_type = match modifier.as_str() {
                             "GOTPCREL" => R_X86_64_GOTPCREL,
@@ -595,6 +599,10 @@ impl InstructionEncoder {
             Displacement::Integer(v) => (*v, false),
             Displacement::Symbol(sym) => {
                 self.add_relocation(sym, R_X86_64_32S, 0);
+                (0i64, true)
+            }
+            Displacement::SymbolAddend(sym, addend) => {
+                self.add_relocation(sym, R_X86_64_32S, *addend);
                 (0i64, true)
             }
             Displacement::SymbolMod(sym, modifier) => {
