@@ -1,0 +1,16 @@
+Fix linker to parse INPUT(...) directives in GNU linker scripts
+
+Currently parse_linker_script only handles GROUP(...) but not INPUT(...).
+Files like /usr/lib/x86_64-linux-gnu/libncurses.so contain:
+  INPUT(libncurses.so.6 -ltinfo)
+
+This causes projects that link with -lncurses (like nano) to fail with:
+  ccc: error: /usr/lib/x86_64-linux-gnu/libncurses.so: not a valid ELF object or archive
+
+Fix:
+1. Extend parse_linker_script to also recognize INPUT(...) directives
+2. Handle -l flags in INPUT directives (resolve them as library references)
+3. Handle relative paths (resolve from library search paths)
+4. Apply fix across all backends (x86, i686, arm, riscv)
+
+Started: 2026-02-04
