@@ -1,0 +1,15 @@
+Fix ARM builtin assembler: auto-shift immediates > 4095 with lsl #12
+
+Problem: When the assembly contains `sub sp, sp, #4096`, the ARM assembler
+encodes this as `sub sp, sp, #0` because 4096 (0x1000) doesn't fit in the
+12-bit immediate field and gets masked to 0. GCC's assembler automatically
+encodes this as `sub sp, sp, #1, lsl #12`.
+
+This affects stack probing code for large stack frames, causing infinite loops
+or segfaults when running with MY_ASM=builtin.
+
+Fix: In encode_add_sub(), when an immediate > 4095 has its low 12 bits all zero
+and the shifted value (imm >> 12) fits in 12 bits, automatically set the sh=1
+(lsl #12) flag in the encoding.
+
+This fixes zlib (and likely other projects) with MY_ASM=builtin on ARM.
