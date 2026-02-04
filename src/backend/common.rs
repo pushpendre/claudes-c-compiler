@@ -262,18 +262,28 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
         let is_disabled = matches!(lower.as_str(), "0" | "false" | "no" | "off" | "");
 
         if !is_disabled {
-            // For x86-64, use the built-in native linker.
+            // For x86-64 and i686, use the built-in native linker.
             // This avoids requiring an external ld binary entirely.
-            if config.expected_elf_machine == 62 && !is_shared && !is_relocatable {
-                return link_builtin_x86(
-                    object_files, output_path, user_args,
-                    is_nostdlib, is_static,
-                );
+            // Both architectures use the same pattern: CRT/library discovery
+            // via DirectLdArchConfig, then delegate to the native linker.
+            if !is_shared && !is_relocatable {
+                if config.expected_elf_machine == 62 {
+                    return link_builtin_x86(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+                if config.expected_elf_machine == 3 {
+                    return link_builtin_i686(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
             }
 
-            // Resolve the actual ld binary path. If the value is a boolean-like flag
-            // ("1", "true", "yes"), auto-detect the correct ld for the target arch.
-            // Otherwise use the provided value as the ld binary path.
+            // For other architectures, resolve ld path and use direct ld invocation.
+            // If the value is a boolean-like flag ("1", "true", "yes"),
+            // auto-detect the correct ld for the target arch.
             let ld_path = resolve_ld_path(ld_val, config.expected_elf_machine)?;
 
             if let Some(arch_config) = get_direct_ld_config(config.expected_elf_machine) {
@@ -552,41 +562,44 @@ fn find_crt_dir(arch: &DirectLdArchConfig) -> Option<String> {
     None
 }
 
-/// Link using the built-in native x86-64 ELF linker.
+/// Resolve CRT objects and library paths for a built-in linker using DirectLdArchConfig.
 ///
-/// This is the fully native path: no external ld binary is needed. The linker
-/// reads ELF .o files and .a archives, resolves symbols against system shared
-/// libraries (libc.so.6), handles relocations, and produces a dynamically-linked
-/// ELF executable. Activated by MY_LD=1/true/yes/on/builtin for x86-64 targets.
-fn link_builtin_x86(
-    object_files: &[&str],
-    output_path: &str,
+/// This shared helper is used by both `link_builtin_x86` and `link_builtin_i686`
+/// to avoid duplicating CRT/library discovery logic. Returns:
+/// - `crt_before`: CRT objects to link before user objects
+/// - `crt_after`: CRT objects to link after user objects
+/// - `lib_paths`: Combined library search paths (user -L first, then system paths)
+/// - `needed_libs`: Default libraries to link
+struct BuiltinLinkSetup {
+    crt_before: Vec<String>,
+    crt_after: Vec<String>,
+    lib_paths: Vec<String>,
+    needed_libs: Vec<String>,
+}
+
+fn resolve_builtin_link_setup(
+    arch: &DirectLdArchConfig,
     user_args: &[String],
     is_nostdlib: bool,
-    _is_static: bool,
-) -> Result<(), String> {
-    use crate::backend::x86::linker;
-
-    let arch = &DIRECT_LD_X86_64;
+) -> BuiltinLinkSetup {
     let gcc_lib_dir = find_gcc_lib_dir(arch);
     let crt_dir = find_crt_dir(arch);
 
-    let mut all_lib_paths: Vec<&str> = Vec::new();
-
-    // Add GCC and CRT library paths
+    // System library paths
+    let mut system_lib_paths: Vec<String> = Vec::new();
     if let Some(ref gcc) = gcc_lib_dir {
-        all_lib_paths.push(gcc);
+        system_lib_paths.push(gcc.clone());
     }
     if let Some(ref crt) = crt_dir {
-        all_lib_paths.push(crt);
+        system_lib_paths.push(crt.clone());
     }
     for dir in arch.system_lib_dirs {
         if std::path::Path::new(dir).exists() {
-            all_lib_paths.push(dir);
+            system_lib_paths.push(dir.to_string());
         }
     }
 
-    // Add user-provided -L paths from args
+    // User-provided -L paths from args
     let mut user_lib_paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < user_args.len() {
@@ -610,7 +623,7 @@ fn link_builtin_x86(
         i += 1;
     }
 
-    // Collect CRT objects
+    // CRT objects
     let mut crt_before: Vec<String> = Vec::new();
     let mut crt_after: Vec<String> = Vec::new();
 
@@ -631,25 +644,84 @@ fn link_builtin_x86(
     }
 
     // Default libraries
-    let needed_libs: Vec<&str> = if !is_nostdlib {
-        vec!["gcc", "c", "m"]
+    let needed_libs: Vec<String> = if !is_nostdlib {
+        vec!["gcc".to_string(), "c".to_string(), "m".to_string()]
     } else {
         vec![]
     };
 
-    // Combine library paths: user paths first, then system paths
-    let mut combined_lib_paths: Vec<&str> = user_lib_paths.iter().map(|s| s.as_str()).collect();
-    combined_lib_paths.extend_from_slice(&all_lib_paths);
+    // Combined paths: user first, then system
+    let mut lib_paths: Vec<String> = user_lib_paths;
+    lib_paths.extend(system_lib_paths);
 
-    let crt_before_refs: Vec<&str> = crt_before.iter().map(|s| s.as_str()).collect();
-    let crt_after_refs: Vec<&str> = crt_after.iter().map(|s| s.as_str()).collect();
+    BuiltinLinkSetup { crt_before, crt_after, lib_paths, needed_libs }
+}
+
+/// Link using the built-in native x86-64 ELF linker.
+///
+/// This is the fully native path: no external ld binary is needed. The linker
+/// reads ELF .o files and .a archives, resolves symbols against system shared
+/// libraries (libc.so.6), handles relocations, and produces a dynamically-linked
+/// ELF executable.
+pub(crate) fn link_builtin_x86(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    is_nostdlib: bool,
+    _is_static: bool,
+) -> Result<(), String> {
+    use crate::backend::x86::linker;
+
+    let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, is_nostdlib);
+
+    let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+    let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();
+    let crt_before_refs: Vec<&str> = setup.crt_before.iter().map(|s| s.as_str()).collect();
+    let crt_after_refs: Vec<&str> = setup.crt_after.iter().map(|s| s.as_str()).collect();
 
     linker::link_builtin(
         object_files,
         output_path,
         user_args,
-        &combined_lib_paths,
-        &needed_libs,
+        &lib_path_refs,
+        &needed_lib_refs,
+        &crt_before_refs,
+        &crt_after_refs,
+    )
+}
+
+/// Link using the built-in native i686 ELF linker.
+///
+/// Parallel to `link_builtin_x86`: uses `DIRECT_LD_I686` for CRT/library
+/// discovery, then delegates to the i686 native linker.
+pub(crate) fn link_builtin_i686(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    is_nostdlib: bool,
+    _is_static: bool,
+) -> Result<(), String> {
+    use crate::backend::i686::linker;
+
+    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_I686, user_args, is_nostdlib);
+
+    // The i686 builtin linker scans shared libraries for dynamic symbol resolution.
+    // Unlike the x86-64 linker which resolves libgcc via libgcc_s.so.1, the i686
+    // environment uses libgcc.a (static archive) linked through CRT objects. Only
+    // libc and libm need dynamic symbol scanning.
+    setup.needed_libs.retain(|lib| lib != "gcc");
+
+    let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+    let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();
+    let crt_before_refs: Vec<&str> = setup.crt_before.iter().map(|s| s.as_str()).collect();
+    let crt_after_refs: Vec<&str> = setup.crt_after.iter().map(|s| s.as_str()).collect();
+
+    linker::link_builtin(
+        object_files,
+        output_path,
+        user_args,
+        &lib_path_refs,
+        &needed_lib_refs,
         &crt_before_refs,
         &crt_after_refs,
     )

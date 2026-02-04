@@ -673,17 +673,28 @@ type SectionMap = HashMap<(usize, usize), (usize, u32)>;
 
 // ── Main link function ───────────────────────────────────────────────────────
 
-pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
+/// Entry point for the built-in i686 linker, matching the x86-64 linker API.
+///
+/// CRT objects, library paths, and needed libraries are resolved by the caller
+/// (common.rs), keeping the linker itself focused on ELF linking logic.
+pub fn link_builtin(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    lib_paths: &[&str],
+    needed_libs: &[&str],
+    crt_objects_before: &[&str],
+    crt_objects_after: &[&str],
+) -> Result<(), String> {
     let is_nostdlib = user_args.iter().any(|a| a == "-nostdlib");
-    let is_shared = user_args.iter().any(|a| a == "-shared");
     let is_static = user_args.iter().any(|a| a == "-static");
 
-    // Parse user-provided library flags
+    // Parse user-provided flags from args
     let mut extra_libs: Vec<String> = Vec::new();
     let mut extra_lib_files: Vec<String> = Vec::new(); // -l:filename (exact filenames)
-    let mut lib_paths: Vec<String> = Vec::new();
+    let mut extra_lib_paths: Vec<String> = Vec::new();
     let mut extra_objects: Vec<String> = Vec::new();
-    let mut rdynamic = false;
+    let mut _rdynamic = false;
 
     let mut i = 0;
     while i < user_args.len() {
@@ -693,17 +704,15 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
         } else if arg.starts_with("-l") {
             let libarg = &arg[2..];
             if libarg.starts_with(':') {
-                // -l:filename - search for exact filename in library paths
                 extra_lib_files.push(libarg[1..].to_string());
             } else {
                 extra_libs.push(libarg.to_string());
             }
         } else if arg.starts_with("-L") {
-            lib_paths.push(arg[2..].to_string());
+            extra_lib_paths.push(arg[2..].to_string());
         } else if arg == "-rdynamic" || arg == "--export-dynamic" {
-            rdynamic = true;
+            _rdynamic = true;
         } else if arg.starts_with("-Wl,") {
-            // Parse -Wl, flags
             for part in arg[4..].split(',') {
                 if part.starts_with("-l") {
                     let libarg = &part[2..];
@@ -713,9 +722,9 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
                         extra_libs.push(libarg.to_string());
                     }
                 } else if part.starts_with("-L") {
-                    lib_paths.push(part[2..].to_string());
+                    extra_lib_paths.push(part[2..].to_string());
                 } else if part == "--export-dynamic" || part == "-export-dynamic" {
-                    rdynamic = true;
+                    _rdynamic = true;
                 }
             }
         } else if arg.ends_with(".o") || arg.ends_with(".a") {
@@ -724,46 +733,20 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
         i += 1;
     }
 
-    // System library search paths for i386
-    let system_lib_dirs = vec![
-        "/usr/lib/i386-linux-gnu".to_string(),
-        "/lib/i386-linux-gnu".to_string(),
-        "/usr/i686-linux-gnu/lib".to_string(),
-        "/usr/lib32".to_string(),
-        "/lib32".to_string(),
-    ];
+    // Build combined library search paths: user paths (from args) + caller-provided paths
+    let all_lib_dirs: Vec<String> = extra_lib_paths.iter().cloned()
+        .chain(lib_paths.iter().map(|s| s.to_string()))
+        .collect();
 
-    // Collect CRT objects
+    // Collect all objects in link order: CRT before, user objects, CRT after
     let mut all_objects: Vec<String> = Vec::new();
 
-    if !is_nostdlib && !is_shared {
-        // Find CRT directory
-        let crt_dirs = [
-            "/usr/lib/i386-linux-gnu",
-            "/usr/i686-linux-gnu/lib",
-            "/usr/lib32",
-            "/lib/i386-linux-gnu",
-        ];
-        let crt_dir = crt_dirs.iter().find(|d| Path::new(d).join("crt1.o").exists())
-            .ok_or_else(|| "cannot find i386 CRT objects (crt1.o)".to_string())?;
-
-        // Find GCC CRT directory (crtbegin.o, crtend.o)
-        let gcc_crt_dirs = [
-            "/usr/lib/gcc-cross/i686-linux-gnu/13",
-            "/usr/lib/gcc-cross/i686-linux-gnu/12",
-            "/usr/lib/gcc/i686-linux-gnu/13",
-            "/usr/lib/gcc/i686-linux-gnu/12",
-        ];
-        let gcc_dir = gcc_crt_dirs.iter().find(|d| Path::new(d).join("crtbegin.o").exists());
-
-        all_objects.push(format!("{}/crt1.o", crt_dir));
-        all_objects.push(format!("{}/crti.o", crt_dir));
-        if let Some(gd) = gcc_dir {
-            all_objects.push(format!("{}/crtbegin.o", gd));
+    for path in crt_objects_before {
+        if Path::new(path).exists() {
+            all_objects.push(path.to_string());
         }
     }
 
-    // Add user object files
     for obj in object_files {
         all_objects.push(obj.to_string());
     }
@@ -771,40 +754,16 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
         all_objects.push(obj.clone());
     }
 
-    // Add closing CRT objects
-    if !is_nostdlib && !is_shared {
-        let gcc_crt_dirs = [
-            "/usr/lib/gcc-cross/i686-linux-gnu/13",
-            "/usr/lib/gcc-cross/i686-linux-gnu/12",
-            "/usr/lib/gcc/i686-linux-gnu/13",
-            "/usr/lib/gcc/i686-linux-gnu/12",
-        ];
-        let gcc_dir = gcc_crt_dirs.iter().find(|d| Path::new(d).join("crtend.o").exists());
-        let crt_dirs = [
-            "/usr/lib/i386-linux-gnu",
-            "/usr/i686-linux-gnu/lib",
-            "/usr/lib32",
-            "/lib/i386-linux-gnu",
-        ];
-        let crt_dir = crt_dirs.iter().find(|d| Path::new(d).join("crtn.o").exists());
-
-        if let Some(gd) = gcc_dir {
-            all_objects.push(format!("{}/crtend.o", gd));
-        }
-        if let Some(cd) = crt_dir {
-            all_objects.push(format!("{}/crtn.o", cd));
+    for path in crt_objects_after {
+        if Path::new(path).exists() {
+            all_objects.push(path.to_string());
         }
     }
 
     // Add libc_nonshared.a (contains at_quick_exit, atexit, etc.)
     // This must be linked as a static archive alongside libc.so.6
     if !is_nostdlib && !is_static {
-        let nonshared_dirs = [
-            "/usr/lib/i386-linux-gnu",
-            "/usr/i686-linux-gnu/lib",
-            "/usr/lib32",
-        ];
-        for dir in &nonshared_dirs {
+        for dir in lib_paths {
             let path = format!("{}/libc_nonshared.a", dir);
             if Path::new(&path).exists() {
                 all_objects.push(path);
@@ -820,23 +779,18 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
     let mut static_lib_objects: Vec<String> = Vec::new();
 
     if !is_static {
-        let mut libs_to_scan: Vec<String> = Vec::new();
-        if !is_nostdlib {
-            libs_to_scan.push("c".to_string());
-            libs_to_scan.push("m".to_string());
-        }
+        // Start with caller-provided needed_libs, then add user-specified ones
+        let mut libs_to_scan: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
         libs_to_scan.extend(extra_libs.iter().cloned());
 
-        let all_lib_dirs: Vec<&str> = lib_paths.iter().map(|s| s.as_str())
-            .chain(system_lib_dirs.iter().map(|s| s.as_str()))
-            .collect();
+        let all_lib_refs: Vec<&str> = all_lib_dirs.iter().map(|s| s.as_str()).collect();
 
         for lib in &libs_to_scan {
             // Try to find the shared library file (.so, .so.N, .so.N.N, etc.)
             let mut found = false;
-            if !is_static {
-                let so_base = format!("lib{}.so", lib);
-                'dir_search: for dir in &all_lib_dirs {
+            let so_base = format!("lib{}.so", lib);
+            {
+                'dir_search: for dir in &all_lib_refs {
                     // Build candidate list: lib{name}.so, then scan for lib{name}.so.N
                     let mut candidates: Vec<String> = vec![format!("{}/{}", dir, so_base)];
                     // Also try common versioned names
@@ -883,28 +837,24 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
             // If no .so found, try to find a static archive (.a)
             if !found {
                 let ar_filename = format!("lib{}.a", lib);
-                for dir in &all_lib_dirs {
+                for dir in &all_lib_refs {
                     let path = format!("{}/{}", dir, ar_filename);
                     if Path::new(&path).exists() {
-                        // Add as a static archive to be linked
                         static_lib_objects.push(path);
                         found = true;
                         break;
                     }
                 }
             }
-            // It's ok if we can't find a lib; linker will error on undefined symbols
         }
     }
 
     // Handle -l flags in static linking mode
     if is_static && !extra_libs.is_empty() {
-        let all_lib_dirs: Vec<&str> = lib_paths.iter().map(|s| s.as_str())
-            .chain(system_lib_dirs.iter().map(|s| s.as_str()))
-            .collect();
+        let all_lib_refs: Vec<&str> = all_lib_dirs.iter().map(|s| s.as_str()).collect();
         for lib in &extra_libs {
             let ar_filename = format!("lib{}.a", lib);
-            for dir in &all_lib_dirs {
+            for dir in &all_lib_refs {
                 let path = format!("{}/{}", dir, ar_filename);
                 if Path::new(&path).exists() {
                     static_lib_objects.push(path);
@@ -916,11 +866,9 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
 
     // Handle -l:filename (exact filename search in library paths)
     {
-        let all_lib_dirs: Vec<&str> = lib_paths.iter().map(|s| s.as_str())
-            .chain(system_lib_dirs.iter().map(|s| s.as_str()))
-            .collect();
+        let all_lib_refs: Vec<&str> = all_lib_dirs.iter().map(|s| s.as_str()).collect();
         for filename in &extra_lib_files {
-            for dir in &all_lib_dirs {
+            for dir in &all_lib_refs {
                 let path = format!("{}/{}", dir, filename);
                 if Path::new(&path).exists() {
                     if filename.ends_with(".a") || filename.ends_with(".o") {

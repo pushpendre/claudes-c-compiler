@@ -285,27 +285,14 @@ impl Target {
 
     /// Link object files with additional user-provided linker args.
     ///
-    /// When `MY_LD=builtin` is set and the target has a native linker
-    /// implementation, uses the built-in linker instead of shelling out
-    /// to an external tool.
+    /// When `MY_LD` is set (to "builtin", "1", "true", "yes", "on", or a path)
+    /// and the target has a native linker implementation, uses the built-in
+    /// linker instead of shelling out to an external tool.
+    ///
+    /// Both x86-64 and i686 use the same dispatch pattern: CRT/library discovery
+    /// happens in common.rs via `DirectLdArchConfig`, then delegates to the
+    /// architecture-specific native linker.
     pub(crate) fn link_with_args(&self, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
-        // Check if we should use the built-in linker
-        if let Ok(ref val) = std::env::var("MY_LD") {
-            if val == "builtin" {
-                match self {
-                    Target::I686 => {
-                        return i686::linker::link(object_files, output_path, user_args);
-                    }
-                    // TODO: add builtin linker for other targets
-                    _ => {
-                        return Err(format!(
-                            "MY_LD=builtin: no built-in linker for {} yet",
-                            self.triple()
-                        ));
-                    }
-                }
-            }
-        }
         common::link_with_args(&self.linker_config(), object_files, output_path, user_args)
     }
 }
