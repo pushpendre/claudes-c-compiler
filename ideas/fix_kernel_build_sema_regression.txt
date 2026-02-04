@@ -1,0 +1,16 @@
+Fix kernel build regression: GEN_BINARY_RMWcc / init_on_free macro expansion
+
+Both x86 and RISC-V kernel builds fail on HEAD (post-commit db5607c8).
+
+x86 error: GEN_BINARY_RMWcc_5 implicit declaration in arch/x86/include/asm/bitops.h
+RISC-V error: init_on_free undeclared in include/linux/mm.h
+
+These are macro expansion / preprocessor issues that appeared after the sema
+anonymous struct counter fix (db5607c8). The kernel built and booted
+successfully at commit b784ad5f.
+
+This is a CRITICAL regression since kernel compilation is a key test case.
+The issue may be in the preprocessor's handling of complex macro expansions
+involving token pasting, stringification, or nested macro calls.
+
+Priority: HIGH - blocks kernel CI.
