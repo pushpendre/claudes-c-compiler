@@ -1,0 +1,15 @@
+Implementing native i686 assembler (MY_ASM=builtin support for i686 target).
+
+This creates src/backend/i686/assembler/ with:
+- mod.rs: entry point (assemble function)
+- parser.rs: reuses x86 parser types
+- encoder.rs: i686 instruction encoder (no REX, 32-bit default, i386 relocation types)
+- elf_writer.rs: 32-bit ELF object file writer (ELFCLASS32, EM_386, Elf32 structures)
+
+Key differences from x86-64 assembler:
+- No REX prefix (only 8 registers: eax..edi)
+- 32-bit ELF format (different header/symbol/relocation sizes)
+- R_386_* relocation types instead of R_X86_64_*
+- No RIP-relative addressing
+- pushl/popl instead of pushq/popq (default 32-bit operand size)
+- .code16gcc support for kernel boot code
