@@ -1,0 +1,10 @@
+Task: Improve i686 builtin linker (MY_LD=builtin)
+
+Fixing multiple bugs in the i686 native ELF32 linker:
+1. -l flag handling to search for static archives (.a) when no shared library (.so) is found
+2. GNU version symbol handling for non-GLIBC libraries (e.g., libz, libpthread)
+3. Shared library search to handle .so.N variants (not just .so.6)
+4. Support for -l:filename syntax (exact filename library search)
+
+These fixes enable the builtin linker to correctly link projects like
+libpng, libuv, libffi, and musl.
