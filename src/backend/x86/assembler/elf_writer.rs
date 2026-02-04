@@ -59,6 +59,9 @@ struct ElfRelocation {
     /// For symbol-difference relocations (.long a - b), stores the `b` symbol.
     /// The ELF writer resolves this: addend += offset_in_section - offset_of(b)
     diff_symbol: Option<String>,
+    /// Size of the data to patch (1 for .byte, 2 for .2byte, 4 for .long, 8 for .quad).
+    /// Used by resolve_internal_relocations to know how many bytes to write.
+    patch_size: u8,
 }
 
 /// Symbol info collected during assembly.
@@ -209,6 +212,13 @@ fn resolve_numeric_labels(items: &[AsmItem]) -> Vec<AsmItem> {
             AsmItem::SkipExpr(expr, fill) => {
                 let new_expr = resolve_numeric_refs_in_expr(expr, i, &defs);
                 result.push(AsmItem::SkipExpr(new_expr, *fill));
+            }
+            AsmItem::Org(sym, offset) => {
+                if let Some(resolved) = resolve_numeric_name(sym, i, &defs) {
+                    result.push(AsmItem::Org(resolved, *offset));
+                } else {
+                    result.push(item.clone());
+                }
             }
             _ => result.push(item.clone()),
         }
@@ -607,10 +617,7 @@ impl ElfWriter {
                 self.emit_data_values(vals, 1)?;
             }
             AsmItem::Short(vals) => {
-                let section = self.current_section_mut()?;
-                for v in vals {
-                    section.data.extend_from_slice(&v.to_le_bytes());
-                }
+                self.emit_data_values(vals, 2)?;
             }
             AsmItem::Long(vals) => {
                 self.emit_data_values(vals, 4)?;
@@ -621,6 +628,33 @@ impl ElfWriter {
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
                 section.data.extend(std::iter::repeat_n(0u8, *n as usize));
+            }
+            AsmItem::Org(sym, offset) => {
+                if let Some(sec_idx) = self.current_section {
+                    let current = self.sections[sec_idx].data.len() as u64;
+                    let target = if sym.is_empty() {
+                        *offset as u64
+                    } else if let Some(&(label_sec, label_off)) = self.label_positions.get(sym.as_str()) {
+                        if label_sec == sec_idx {
+                            (label_off as i64 + offset) as u64
+                        } else {
+                            return Err(format!(".org symbol {} not in current section", sym));
+                        }
+                    } else if let Some((label_sec, label_off)) = self.resolve_numeric_label(sym, current, sec_idx) {
+                        if label_sec == sec_idx {
+                            (label_off as i64 + offset) as u64
+                        } else {
+                            return Err(format!(".org symbol {} not in current section", sym));
+                        }
+                    } else {
+                        return Err(format!(".org: unknown symbol {}", sym));
+                    };
+                    if target > current {
+                        let padding = (target - current) as usize;
+                        let fill = if self.sections[sec_idx].flags & SHF_EXECINSTR != 0 { 0x90u8 } else { 0u8 };
+                        self.sections[sec_idx].data.extend(std::iter::repeat(fill).take(padding));
+                    }
+                }
             }
             AsmItem::SkipExpr(expr, fill) => {
                 // Record a deferred skip - will be evaluated after all labels are known
@@ -736,6 +770,26 @@ impl ElfWriter {
                     }
                 }
                 DataValue::Symbol(sym) => {
+                    // Resolve .set aliases: if sym is a `.set` alias for a label-difference
+                    // expression (e.g., `.set .Lset0, .LECIE-.LSCIE`), emit as SymbolDiff.
+                    if let Some(target) = self.aliases.get(sym).cloned() {
+                        if let Some(pos) = target.find('-') {
+                            let a = target[..pos].trim().to_string();
+                            let b = target[pos+1..].trim().to_string();
+                            let offset = self.sections[sec_idx].data.len() as u64;
+                            self.sections[sec_idx].relocations.push(ElfRelocation {
+                                offset,
+                                symbol: a,
+                                reloc_type: if size <= 4 { R_X86_64_PC32 } else { R_X86_64_64 },
+                                addend: 0,
+                                diff_symbol: Some(b),
+                                patch_size: size as u8,
+                            });
+                            let section = &mut self.sections[sec_idx];
+                            section.data.extend(std::iter::repeat_n(0, size));
+                            continue;
+                        }
+                    }
                     let offset = self.sections[sec_idx].data.len() as u64;
                     let reloc_type = if size == 4 { R_X86_64_32 } else { R_X86_64_64 };
                     self.sections[sec_idx].relocations.push(ElfRelocation {
@@ -744,6 +798,7 @@ impl ElfWriter {
                         reloc_type,
                         addend: 0,
                         diff_symbol: None,
+                        patch_size: size as u8,
                     });
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat_n(0, size));
@@ -757,29 +812,46 @@ impl ElfWriter {
                         reloc_type,
                         addend: *addend,
                         diff_symbol: None,
+                        patch_size: size as u8,
                     });
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolDiff(a, b) => {
-                    if size <= 2 {
+                    let offset = self.sections[sec_idx].data.len() as u64;
+                    // Resolve .set aliases in both operands
+                    let a_resolved = self.aliases.get(a).cloned().unwrap_or_else(|| a.clone());
+                    let b_resolved = self.aliases.get(b).cloned().unwrap_or_else(|| b.clone());
+
+                    if b_resolved == "." {
+                        // `sym - .` means PC-relative: emit a PC32 relocation.
+                        self.sections[sec_idx].relocations.push(ElfRelocation {
+                            offset,
+                            symbol: a_resolved,
+                            reloc_type: R_X86_64_PC32,
+                            addend: 0,
+                            diff_symbol: None,
+                            patch_size: size as u8,
+                        });
+                        let section = &mut self.sections[sec_idx];
+                        section.data.extend(std::iter::repeat_n(0, size));
+                    } else if size <= 2 {
                         // For byte/short-sized diffs, defer resolution until after
                         // deferred skips are inserted (skip insertion shifts offsets).
-                        // Can't use relocations here since they'd try to patch 4 bytes.
-                        let offset = self.sections[sec_idx].data.len();
-                        self.deferred_byte_diffs.push((sec_idx, offset, a.clone(), b.clone(), size));
+                        let offset_usize = self.sections[sec_idx].data.len();
+                        self.deferred_byte_diffs.push((sec_idx, offset_usize, a_resolved, b_resolved, size));
                         let section = &mut self.sections[sec_idx];
                         section.data.extend(std::iter::repeat_n(0, size));
                     } else {
                         // For `.long a - b` or `.quad a - b`:
                         // Store as a relocation with diff_symbol set.
-                        let offset = self.sections[sec_idx].data.len() as u64;
                         self.sections[sec_idx].relocations.push(ElfRelocation {
                             offset,
-                            symbol: a.clone(),
+                            symbol: a_resolved,
                             reloc_type: if size == 4 { R_X86_64_PC32 } else { R_X86_64_64 },
                             addend: 0,
-                            diff_symbol: Some(b.clone()),
+                            diff_symbol: Some(b_resolved),
+                            patch_size: size as u8,
                         });
                         let section = &mut self.sections[sec_idx];
                         section.data.extend(std::iter::repeat_n(0, size));
@@ -829,6 +901,7 @@ impl ElfWriter {
                 reloc_type: reloc.reloc_type,
                 addend: reloc.addend,
                 diff_symbol: None,
+                patch_size: 4,
             });
         }
 
@@ -1625,7 +1698,7 @@ impl ElfWriter {
     /// keep their relocations so the linker can handle interposition/PLT.
     fn resolve_internal_relocations(&mut self) {
         for sec_idx in 0..self.sections.len() {
-            let mut resolved = Vec::new();
+            let mut resolved: Vec<(usize, i32, usize)> = Vec::new(); // (offset, value, patch_size)
             let mut pc8_patches: Vec<(usize, u8)> = Vec::new();
             let mut unresolved = Vec::new();
 
@@ -1642,7 +1715,7 @@ impl ElfWriter {
                             if a_sec == b_sec {
                                 // Both in same section: constant = a - b
                                 let val = a_off as i64 - b_off as i64;
-                                resolved.push((reloc.offset as usize, val as i32));
+                                resolved.push((reloc.offset as usize, val as i32, reloc.patch_size as usize));
                                 continue;
                             }
                         }
@@ -1671,12 +1744,12 @@ impl ElfWriter {
                         && (reloc.reloc_type == R_X86_64_PC32 || reloc.reloc_type == R_X86_64_PLT32)
                     {
                         // Same-section PC-relative to a local symbol: resolve now.
-                        // ELF formula: S + A - P
-                        // S = target_off (symbol value)
-                        // A = reloc.addend
-                        // P = reloc.offset (relocation position)
                         let rel = (target_off as i64) + reloc.addend - (reloc.offset as i64);
-                        resolved.push((reloc.offset as usize, rel as i32));
+                        resolved.push((reloc.offset as usize, rel as i32, reloc.patch_size as usize));
+                    } else if is_local && reloc.reloc_type == R_X86_64_32 {
+                        // Absolute reference to a local symbol
+                        let val = (target_off as i64) + reloc.addend;
+                        resolved.push((reloc.offset as usize, val as i32, reloc.patch_size as usize));
                     } else {
                         unresolved.push(reloc.clone());
                     }
@@ -1686,9 +1759,16 @@ impl ElfWriter {
             }
 
             // Patch resolved relocations into section data
-            for (offset, value) in resolved {
-                let bytes = value.to_le_bytes();
-                self.sections[sec_idx].data[offset..offset + 4].copy_from_slice(&bytes);
+            for (offset, value, psz) in resolved {
+                if psz == 1 {
+                    self.sections[sec_idx].data[offset] = value as u8;
+                } else if psz == 2 {
+                    let bytes = (value as i16).to_le_bytes();
+                    self.sections[sec_idx].data[offset..offset + 2].copy_from_slice(&bytes);
+                } else {
+                    let bytes = value.to_le_bytes();
+                    self.sections[sec_idx].data[offset..offset + 4].copy_from_slice(&bytes);
+                }
             }
             // Patch PC8 relocations (single-byte patches for loop/jrcxz)
             for (offset, value) in pc8_patches {

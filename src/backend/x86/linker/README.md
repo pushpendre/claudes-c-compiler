@@ -101,7 +101,7 @@ pub fn link_builtin(
 
 | File | Lines | Role |
 |------|-------|------|
-| `mod.rs` | ~1250 | Linker orchestration: loading, symbol resolution, section merging, PLT/GOT creation, layout, relocation application, output emission |
+| `mod.rs` | ~1400 | Linker orchestration: loading, symbol resolution, section merging, PLT/GOT creation, layout, relocation application, output emission |
 | `elf.rs` | ~675 | ELF parsing: object file reader, archive reader, shared library symbol extractor, SONAME parser, linker script parser; all ELF constants |
 
 
@@ -662,12 +662,16 @@ The PLT uses the standard lazy binding model: GOT entries initially point back
 into the PLT stub, and the dynamic linker patches them on first use.  This is
 the default behavior and does not require `DT_BIND_NOW` or `DT_FLAGS`.
 
-### 4. Minimal .gnu.hash
+### 4. .gnu.hash with Copy-Reloc Symbol Support
 
-The `.gnu.hash` section is emitted as a minimal stub (28 bytes, 1 bucket,
-0 filter bits).  This is technically valid but means the dynamic linker will
-fall back to linear search for symbol lookup.  A real hash table would improve
-startup performance for executables with many dynamic symbols.
+The `.gnu.hash` section contains a proper hash table covering all copy-reloc
+symbols (e.g. `optind`, `stderr`, `stdout`).  Non-hashed symbols (PLT imports,
+GLOB_DAT imports) are placed first in `.dynsym`, followed by hashed copy-reloc
+symbols.  The hash table includes a bloom filter (1 word, shift=6), bucket
+array, and chain array with the standard GNU hash function (DJB hash starting
+at 5381).  This is required for symbol interposition to work: the dynamic
+linker must be able to find copy-reloc symbols in the executable via `.gnu.hash`
+so that shared library references resolve to the executable's BSS copy.
 
 ### 5. Archive Selective Loading (Group Resolution)
 

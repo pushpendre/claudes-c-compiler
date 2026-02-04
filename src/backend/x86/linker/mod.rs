@@ -683,24 +683,31 @@ fn emit_executable(
     let mut dynstr = DynStrTab::new();
     for lib in needed_sonames { dynstr.add(lib); }
 
+    // Build dyn_sym_names in two parts:
+    // 1. Non-hashed symbols (PLT imports, GLOB_DAT imports) - these are undefined
+    // 2. Hashed symbols (copy-reloc symbols) - these are defined and must be
+    //    findable through .gnu.hash so the dynamic linker can redirect references
     let mut dyn_sym_names: Vec<String> = Vec::new();
     for name in plt_names {
         if !dyn_sym_names.contains(name) { dyn_sym_names.push(name.clone()); }
     }
     for (name, is_plt) in got_entries {
         if !name.is_empty() && !*is_plt && !dyn_sym_names.contains(name) {
-            // Only add to dynamic symbol table if it's actually a dynamic symbol
             if let Some(gsym) = globals.get(name) {
-                if gsym.is_dynamic {
+                if gsym.is_dynamic && !gsym.copy_reloc {
                     dyn_sym_names.push(name.clone());
                 }
             }
         }
     }
-    // Collect copy relocation symbols and add to dyn_sym_names
+    // symoffset = index of first hashed symbol (1-indexed: null symbol is index 0)
+    let gnu_hash_symoffset = 1 + dyn_sym_names.len(); // +1 for null entry
+
+    // Collect copy relocation symbols - these go AFTER non-hashed symbols
+    // and are the only symbols included in the .gnu.hash table
     let copy_reloc_syms: Vec<(String, u64)> = globals.iter()
         .filter(|(_, g)| g.copy_reloc)
-        .map(|(n, g)| (n.clone(), g.size.max(8)))
+        .map(|(n, g)| (n.clone(), g.size))
         .collect();
     for (name, _) in &copy_reloc_syms {
         if !dyn_sym_names.contains(name) {
@@ -719,7 +726,84 @@ fn emit_executable(
     }).count();
     let rela_dyn_count = rela_dyn_glob_count + copy_reloc_syms.len();
     let rela_dyn_size = rela_dyn_count as u64 * 24;
-    let gnu_hash_size: u64 = 28;
+
+    // Build .gnu.hash table for copy-reloc symbols
+    // GNU hash function
+    fn gnu_hash(name: &[u8]) -> u32 {
+        let mut h: u32 = 5381;
+        for &b in name {
+            h = h.wrapping_mul(33).wrapping_add(b as u32);
+        }
+        h
+    }
+
+    let num_hashed = copy_reloc_syms.len();
+    let gnu_hash_nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
+    let gnu_hash_bloom_size: u32 = 1;
+    let gnu_hash_bloom_shift: u32 = 6;
+
+    // Compute hashes for hashed symbols
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names[gnu_hash_symoffset - 1..]
+        .iter()
+        .map(|name| gnu_hash(name.as_bytes()))
+        .collect();
+
+    // Build bloom filter (single 64-bit word)
+    let mut bloom_word: u64 = 0;
+    for &h in &hashed_sym_hashes {
+        let bit1 = h as u64 % 64;
+        let bit2 = (h >> gnu_hash_bloom_shift) as u64 % 64;
+        bloom_word |= 1u64 << bit1;
+        bloom_word |= 1u64 << bit2;
+    }
+
+    // Sort hashed symbols by bucket (hash % nbuckets) for proper chain grouping
+    // We need to reorder the hashed portion of dyn_sym_names
+    if num_hashed > 0 {
+        let hashed_start = gnu_hash_symoffset - 1;
+        let mut hashed_with_hash: Vec<(String, u32)> = dyn_sym_names[hashed_start..]
+            .iter()
+            .zip(hashed_sym_hashes.iter())
+            .map(|(n, &h)| (n.clone(), h))
+            .collect();
+        hashed_with_hash.sort_by_key(|(_, h)| h % gnu_hash_nbuckets);
+        for (i, (name, _)) in hashed_with_hash.iter().enumerate() {
+            dyn_sym_names[hashed_start + i] = name.clone();
+        }
+    }
+
+    // Recompute hashes after sorting
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names[gnu_hash_symoffset - 1..]
+        .iter()
+        .map(|name| gnu_hash(name.as_bytes()))
+        .collect();
+
+    // Build buckets and chains
+    let mut gnu_hash_buckets = vec![0u32; gnu_hash_nbuckets as usize];
+    let mut gnu_hash_chains = vec![0u32; num_hashed];
+    for (i, &h) in hashed_sym_hashes.iter().enumerate() {
+        let bucket = (h % gnu_hash_nbuckets) as usize;
+        if gnu_hash_buckets[bucket] == 0 {
+            gnu_hash_buckets[bucket] = (gnu_hash_symoffset + i) as u32;
+        }
+        // Chain value = hash with bit 0 indicating end of chain
+        gnu_hash_chains[i] = h & !1; // clear bit 0 (will set later for last in chain)
+    }
+    // Mark the last symbol in each bucket chain with bit 0 set
+    for bucket_idx in 0..gnu_hash_nbuckets as usize {
+        if gnu_hash_buckets[bucket_idx] == 0 { continue; }
+        let mut last_in_bucket = 0;
+        for (i, &h) in hashed_sym_hashes.iter().enumerate() {
+            if (h % gnu_hash_nbuckets) as usize == bucket_idx {
+                last_in_bucket = i;
+            }
+        }
+        gnu_hash_chains[last_in_bucket] |= 1; // set end-of-chain bit
+    }
+
+    // gnu_hash_size = header(16) + bloom(bloom_size*8) + buckets(nbuckets*4) + chains(num_hashed*4)
+    let gnu_hash_size: u64 = 16 + (gnu_hash_bloom_size as u64 * 8)
+        + (gnu_hash_nbuckets as u64 * 4) + (num_hashed as u64 * 4);
     let plt_size = if plt_names.is_empty() { 0u64 } else { 16 + 16 * plt_names.len() as u64 };
     let got_plt_count = 3 + plt_names.len();
     let got_plt_size = got_plt_count as u64 * 8;
@@ -985,11 +1069,25 @@ fn emit_executable(
     // .interp
     write_bytes(&mut out, interp_offset as usize, INTERP);
 
-    // .gnu.hash
+    // .gnu.hash - proper hash table so dynamic linker can find copy-reloc symbols
     let gh = gnu_hash_offset as usize;
-    w32(&mut out, gh, 1); w32(&mut out, gh+4, dynsym_count as u32);
-    w32(&mut out, gh+8, 1); w32(&mut out, gh+12, 0);
-    w64(&mut out, gh+16, 0); w32(&mut out, gh+24, 0);
+    w32(&mut out, gh, gnu_hash_nbuckets);
+    w32(&mut out, gh+4, gnu_hash_symoffset as u32);
+    w32(&mut out, gh+8, gnu_hash_bloom_size);
+    w32(&mut out, gh+12, gnu_hash_bloom_shift);
+    // Bloom filter
+    let bloom_off = gh + 16;
+    w64(&mut out, bloom_off, bloom_word);
+    // Buckets
+    let buckets_off = bloom_off + (gnu_hash_bloom_size as usize * 8);
+    for (i, &b) in gnu_hash_buckets.iter().enumerate() {
+        w32(&mut out, buckets_off + i * 4, b);
+    }
+    // Chains
+    let chains_off = buckets_off + (gnu_hash_nbuckets as usize * 4);
+    for (i, &c) in gnu_hash_chains.iter().enumerate() {
+        w32(&mut out, chains_off + i * 4, c);
+    }
 
     // .dynsym
     let mut ds = dynsym_offset as usize + 24; // skip null entry
@@ -998,11 +1096,13 @@ fn emit_executable(
         w32(&mut out, ds, no);
         if let Some(gsym) = globals.get(name) {
             if gsym.copy_reloc {
-                // Copy-relocated data symbol
+                // Copy-relocated data symbol: st_shndx MUST be non-zero so the
+                // dynamic linker treats this as a defined symbol and redirects
+                // all references (including glibc-internal ones) to our BSS copy.
                 if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | STT_OBJECT; out[ds+5] = 0; }
-                w16(&mut out, ds+6, 0); // shndx - dynamic linker uses value directly
+                w16(&mut out, ds+6, 1); // shndx=1 (non-UNDEF: defined in this executable)
                 w64(&mut out, ds+8, gsym.value); // st_value = BSS copy address
-                w64(&mut out, ds+16, gsym.size.max(8)); // st_size
+                w64(&mut out, ds+16, gsym.size); // st_size = actual symbol size
             } else {
                 if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | STT_FUNC; out[ds+5] = 0; }
                 w16(&mut out, ds+6, 0); w64(&mut out, ds+8, 0); w64(&mut out, ds+16, 0);

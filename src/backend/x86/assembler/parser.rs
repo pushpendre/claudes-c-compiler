@@ -31,8 +31,8 @@ pub enum AsmItem {
     Align(u32),
     /// Emit bytes: `.byte val, val, ...` (can contain label expressions)
     Byte(Vec<DataValue>),
-    /// Emit 16-bit values: `.short val, ...`
-    Short(Vec<i16>),
+    /// Emit 16-bit values: `.short val, ...` (can be symbol references)
+    Short(Vec<DataValue>),
     /// Emit 32-bit values: `.long val, ...` (can be symbol references)
     Long(Vec<DataValue>),
     /// Emit 64-bit values: `.quad val, ...` (can be symbol references)
@@ -70,6 +70,8 @@ pub enum AsmItem {
     PushSection(SectionDirective),
     /// Pop section stack and restore previous section: `.popsection`
     PopSection,
+    /// `.org` directive: advance to position symbol + offset within the section.
+    Org(String, i64),
     /// Blank line or comment-only line
     Empty,
 }
@@ -235,14 +237,59 @@ fn strip_c_comments(text: &str) -> String {
     result
 }
 
+/// Expand .rept/.endr blocks by repeating contained lines.
+fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = strip_comment(lines[i]).trim().to_string();
+        if trimmed.starts_with(".rept ") || trimmed.starts_with(".rept\t") {
+            let count_str = trimmed[".rept".len()..].trim();
+            let count = parse_integer_expr(count_str)
+                .map_err(|e| format!(".rept: bad count '{}': {}", count_str, e))? as usize;
+            let mut depth = 1;
+            let mut body = Vec::new();
+            i += 1;
+            while i < lines.len() {
+                let inner = strip_comment(lines[i]).trim().to_string();
+                if inner.starts_with(".rept ") || inner.starts_with(".rept\t") {
+                    depth += 1;
+                } else if inner == ".endr" {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                body.push(lines[i]);
+                i += 1;
+            }
+            if depth != 0 {
+                return Err(".rept without matching .endr".to_string());
+            }
+            let expanded_body = expand_rept_blocks(&body)?;
+            for _ in 0..count {
+                result.extend(expanded_body.iter().cloned());
+            }
+        } else if trimmed == ".endr" {
+            // stray .endr without .rept - skip
+        } else {
+            result.push(lines[i].to_string());
+        }
+        i += 1;
+    }
+    Ok(result)
+}
+
 /// Parse assembly text into a list of AsmItems.
 pub fn parse_asm(text: &str) -> Result<Vec<AsmItem>, String> {
     let mut items = Vec::new();
 
     // Strip C-style /* */ comments (used in hand-written assembly like musl)
     let text = strip_c_comments(text);
+    let lines: Vec<&str> = text.lines().collect();
+    let expanded = expand_rept_blocks(&lines)?;
 
-    for (line_num, line) in text.lines().enumerate() {
+    for (line_num, line) in expanded.iter().enumerate() {
         let line_num = line_num + 1; // 1-based
 
         // Strip comments (# to end of line, but not inside strings)
@@ -351,7 +398,7 @@ fn parse_line_items(line: &str) -> Result<Vec<AsmItem>, String> {
     // Parse the remaining content as a directive or instruction
     if rest.starts_with('.') {
         items.push(parse_directive(rest)?);
-    } else if rest.starts_with("lock ") || rest.starts_with("rep ") || rest.starts_with("repz ") || rest.starts_with("repnz ") {
+    } else if rest.starts_with("lock ") || rest.starts_with("rep ") || rest.starts_with("repz ") || rest.starts_with("repnz ") || rest.starts_with("notrack ") {
         items.push(parse_prefixed_instruction(rest)?);
     } else {
         items.push(parse_instruction(rest, None)?);
@@ -426,14 +473,33 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
         ".internal" => Ok(AsmItem::Internal(args.trim().to_string())),
         ".type" => parse_type_directive(args),
         ".size" => parse_size_directive(args),
-        ".align" | ".p2align" => {
-            let val: u32 = args.split(',').next().unwrap_or("1").trim()
-                .parse().map_err(|_| format!("bad alignment: {}", args))?;
-            // .p2align is power-of-2, .align on x86 gas is byte count
+        ".align" | ".p2align" | ".balign" => {
+            let val_str = args.split(',').next().unwrap_or("1").trim();
+            let val: u32 = parse_integer_expr(val_str)
+                .map_err(|_| format!("bad alignment: {}", args))? as u32;
+            // .p2align is power-of-2, .align/.balign on x86 gas is byte count
             if directive == ".p2align" {
                 Ok(AsmItem::Align(1 << val))
             } else {
                 Ok(AsmItem::Align(val))
+            }
+        }
+        ".org" => {
+            let args = args.trim();
+            if let Ok(val) = parse_integer_expr(args) {
+                Ok(AsmItem::Org(String::new(), val))
+            } else {
+                let mut sym = args.to_string();
+                let mut offset = 0i64;
+                if let Some(plus_pos) = args.find('+') {
+                    if plus_pos > 0 {
+                        sym = args[..plus_pos].trim().to_string();
+                        let offset_str = args[plus_pos + 1..].trim();
+                        offset = parse_integer_expr(offset_str)
+                            .map_err(|_| format!("bad .org offset: {}", offset_str))?;
+                    }
+                }
+                Ok(AsmItem::Org(sym, offset))
             }
         }
         ".byte" => {
@@ -441,8 +507,8 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             Ok(AsmItem::Byte(vals))
         }
         ".short" | ".value" | ".2byte" => {
-            let vals = parse_comma_separated_integers(args)?;
-            Ok(AsmItem::Short(vals.iter().map(|v| *v as i16).collect()))
+            let vals = parse_data_values(args)?;
+            Ok(AsmItem::Short(vals))
         }
         ".long" | ".4byte" => {
             let vals = parse_data_values(args)?;
@@ -614,7 +680,9 @@ fn parse_size_directive(args: &str) -> Result<AsmItem, String> {
     let name = parts[0].trim().to_string();
     let expr_str = parts[1].trim();
 
-    if let Some(rest) = expr_str.strip_prefix(".-") {
+    // Match ". - sym" or ".-sym" (current position minus symbol)
+    let normalized = expr_str.replace(' ', "");
+    if let Some(rest) = normalized.strip_prefix(".-") {
         let sym = rest.trim().to_string();
         Ok(AsmItem::Size(name, SizeExpr::CurrentMinusSymbol(sym)))
     } else {
@@ -830,11 +898,28 @@ fn parse_memory_operand(s: &str) -> Result<Operand, String> {
 fn parse_memory_inner(s: &str) -> Result<MemoryOperand, String> {
     let s = s.trim();
 
-    // Find the parenthesized part
-    if let Some(paren_start) = s.find('(') {
-        let disp_str = s[..paren_start].trim();
-        let paren_end = s.rfind(')')
+    // Find the register-enclosing parentheses: the LAST balanced (...) group.
+    // This handles nested parens in the displacement like ((6*8) + 8*16)(%rsp).
+    // We scan backwards from the end to find the matching '(' for the final ')'.
+    if let Some(paren_end) = s.rfind(')') {
+        let mut depth = 0i32;
+        let mut paren_start = None;
+        for (i, c) in s[..=paren_end].char_indices().rev() {
+            match c {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        paren_start = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let paren_start = paren_start
             .ok_or_else(|| format!("unmatched paren in memory operand: {}", s))?;
+        let disp_str = s[..paren_start].trim();
         let inner = &s[paren_start + 1..paren_end];
 
         let displacement = parse_displacement(disp_str)?;
@@ -1115,165 +1200,183 @@ fn parse_single_integer(s: &str) -> Result<i64, String> {
     Ok(if negative { -val } else { val })
 }
 
-/// Parse an integer expression with +/-, * operators.
-/// Handles expressions like `0x3fff+13`, `0x3fff-64`, `1+2+3`, `1*8`, `3*8+1`, etc.
-/// Operator precedence: * before +/-
+/// Token type for the expression evaluator.
+#[derive(Debug)]
+enum ExprToken {
+    Num(i64),
+    Op(char),
+    Op2(&'static str),
+}
+
+/// Tokenize an expression string into ExprTokens.
+fn tokenize_expr(s: &str) -> Result<Vec<ExprToken>, String> {
+    let mut tokens = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == b'(' || c == b')' || c == b'+' || c == b'-' || c == b'*'
+            || c == b'/' || c == b'%' || c == b'&' || c == b'|' || c == b'^' || c == b'~'
+        {
+            tokens.push(ExprToken::Op(c as char));
+            i += 1;
+        } else if c == b'<' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+            tokens.push(ExprToken::Op2("<<"));
+            i += 2;
+        } else if c == b'>' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+            tokens.push(ExprToken::Op2(">>"));
+            i += 2;
+        } else if c.is_ascii_digit() || (c == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')) {
+            let start = i;
+            if c == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
+                i += 2;
+                while i < bytes.len() && bytes[i].is_ascii_hexdigit() { i += 1; }
+            } else {
+                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            }
+            let num_str = &s[start..i];
+            let val = parse_single_integer(num_str)?;
+            tokens.push(ExprToken::Num(val));
+        } else {
+            return Err(format!("unexpected char '{}' in expression", c as char));
+        }
+    }
+    Ok(tokens)
+}
+
+fn eval_tokens(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    eval_or(tokens, pos)
+}
+
+fn eval_or(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_xor(tokens, pos)?;
+    while *pos < tokens.len() {
+        if matches!(&tokens[*pos], ExprToken::Op('|')) {
+            *pos += 1;
+            val |= eval_xor(tokens, pos)?;
+        } else {
+            break;
+        }
+    }
+    Ok(val)
+}
+
+fn eval_xor(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_and(tokens, pos)?;
+    while *pos < tokens.len() {
+        if matches!(&tokens[*pos], ExprToken::Op('^')) {
+            *pos += 1;
+            val ^= eval_and(tokens, pos)?;
+        } else {
+            break;
+        }
+    }
+    Ok(val)
+}
+
+fn eval_and(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_shift(tokens, pos)?;
+    while *pos < tokens.len() {
+        if matches!(&tokens[*pos], ExprToken::Op('&')) {
+            *pos += 1;
+            val &= eval_shift(tokens, pos)?;
+        } else {
+            break;
+        }
+    }
+    Ok(val)
+}
+
+fn eval_shift(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_add(tokens, pos)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            ExprToken::Op2("<<") => { *pos += 1; val <<= eval_add(tokens, pos)?; }
+            ExprToken::Op2(">>") => { *pos += 1; val >>= eval_add(tokens, pos)?; }
+            _ => break,
+        }
+    }
+    Ok(val)
+}
+
+fn eval_add(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_mul(tokens, pos)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            ExprToken::Op('+') => { *pos += 1; val += eval_mul(tokens, pos)?; }
+            ExprToken::Op('-') => { *pos += 1; val -= eval_mul(tokens, pos)?; }
+            _ => break,
+        }
+    }
+    Ok(val)
+}
+
+fn eval_mul(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    let mut val = eval_unary(tokens, pos)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            ExprToken::Op('*') => { *pos += 1; val *= eval_unary(tokens, pos)?; }
+            ExprToken::Op('/') => {
+                *pos += 1;
+                let rhs = eval_unary(tokens, pos)?;
+                if rhs == 0 { return Err("division by zero".to_string()); }
+                val /= rhs;
+            }
+            ExprToken::Op('%') => {
+                *pos += 1;
+                let rhs = eval_unary(tokens, pos)?;
+                if rhs == 0 { return Err("modulo by zero".to_string()); }
+                val %= rhs;
+            }
+            _ => break,
+        }
+    }
+    Ok(val)
+}
+
+fn eval_unary(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
+    if *pos >= tokens.len() {
+        return Err("unexpected end of expression".to_string());
+    }
+    match &tokens[*pos] {
+        ExprToken::Op('-') => { *pos += 1; Ok(-eval_unary(tokens, pos)?) }
+        ExprToken::Op('+') => { *pos += 1; eval_unary(tokens, pos) }
+        ExprToken::Op('~') => { *pos += 1; Ok(!eval_unary(tokens, pos)?) }
+        ExprToken::Op('(') => {
+            *pos += 1;
+            let val = eval_tokens(tokens, pos)?;
+            if *pos < tokens.len() && matches!(&tokens[*pos], ExprToken::Op(')')) {
+                *pos += 1;
+            }
+            Ok(val)
+        }
+        ExprToken::Num(v) => { let v = *v; *pos += 1; Ok(v) }
+        other => Err(format!("unexpected token in expression: {:?}", other)),
+    }
+}
+
+/// Parse an integer expression with full operator precedence.
+/// Supports: |, ^, &, <<, >>, +, -, *, /, %, ~, parentheses.
 fn parse_integer_expr(s: &str) -> Result<i64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty integer".to_string());
     }
-
-    // Strip outermost parentheses if present: "(expr)" -> "expr"
-    if s.starts_with('(') && s.ends_with(')') {
-        // Verify they match (not like "(a)+(b)")
-        let inner = &s[1..s.len()-1];
-        let mut depth = 0i32;
-        let mut balanced = true;
-        for c in inner.chars() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth < 0 { balanced = false; break; }
-                }
-                _ => {}
-            }
-        }
-        if balanced && depth == 0 {
-            return parse_integer_expr(inner);
-        }
-    }
-
-    // Handle bitwise OR: split on '|' at top level (not inside parens)
-    if s.contains('|') {
-        let parts = split_top_level(s, b'|');
-        if parts.len() > 1 {
-            let mut result: i64 = 0;
-            for part in &parts {
-                result |= parse_integer_expr(part)?;
-            }
-            return Ok(result);
-        }
-    }
-
-    // Handle bitwise AND: split on '&' at top level
-    if s.contains('&') {
-        let parts = split_top_level(s, b'&');
-        if parts.len() > 1 {
-            let mut result: i64 = !0;
-            for part in &parts {
-                result &= parse_integer_expr(part)?;
-            }
-            return Ok(result);
-        }
-    }
-
-    // First try as a simple integer (fast path)
+    // Fast path: try simple integer first
     if let Ok(val) = parse_single_integer(s) {
         return Ok(val);
     }
-
-    // Split on + and - (but not the leading sign or hex digits)
-    // We need to handle: 0x3fff+13, 0x3fff-64, -5+3
-    // Strategy: scan for + or - that is not inside a 0x prefix and not the leading sign
-    let bytes = s.as_bytes();
-    let mut terms: Vec<(bool, &str)> = Vec::new(); // (is_add, term)
-    let mut start = 0;
-    let mut i = 0;
-    let mut is_add = true;
-
-    // Skip leading sign
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        if bytes[i] == b'-' {
-            is_add = false;
-        }
-        i += 1;
+    let tokens = tokenize_expr(s)?;
+    if tokens.is_empty() {
+        return Err("empty expression".to_string());
     }
-
-    while i < bytes.len() {
-        // Skip past hex prefix
-        if i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i+1] == b'x' || bytes[i+1] == b'X') {
-            i += 2;
-            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
-                i += 1;
-            }
-            continue;
-        }
-
-        if bytes[i] == b'+' || bytes[i] == b'-' {
-            let term = &s[start..i];
-            if !term.is_empty() {
-                terms.push((is_add, term.trim()));
-            }
-            is_add = bytes[i] == b'+';
-            start = i + 1;
-            i += 1;
-            continue;
-        }
-        i += 1;
-    }
-
-    // Last term
-    let term = &s[start..];
-    if !term.is_empty() {
-        terms.push((is_add, term.trim()));
-    }
-
-    if terms.is_empty() {
-        return Err(format!("bad integer expression: {}", s));
-    }
-
-    let mut result: i64 = 0;
-    for (is_add, term) in &terms {
-        // Each term may contain multiplication (e.g., "3*8")
-        let val = eval_term(term)?;
-        if *is_add {
-            result = result.wrapping_add(val);
-        } else {
-            result = result.wrapping_sub(val);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Split a string on a delimiter character, respecting parentheses nesting.
-fn split_top_level(s: &str, delim: u8) -> Vec<&str> {
-    let bytes = s.as_bytes();
-    let mut parts = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0;
-    for i in 0..bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            c if c == delim && depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&s[start..]);
-    parts
-}
-
-/// Evaluate a term (handles multiplication within a term).
-/// E.g., "3*8" -> 24, "0x10" -> 16, "42" -> 42.
-fn eval_term(s: &str) -> Result<i64, String> {
-    let s = s.trim();
-    if s.contains('*') {
-        let parts: Vec<&str> = s.split('*').collect();
-        let mut result: i64 = 1;
-        for part in parts {
-            let val = parse_single_integer(part.trim())?;
-            result *= val;
-        }
-        Ok(result)
-    } else {
-        parse_single_integer(s)
-    }
+    let mut pos = 0;
+    let val = eval_tokens(&tokens, &mut pos)?;
+    Ok(val)
 }
 
 /// Parse a string literal (with escapes).

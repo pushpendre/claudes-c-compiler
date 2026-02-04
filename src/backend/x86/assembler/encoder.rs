@@ -255,6 +255,7 @@ impl InstructionEncoder {
                 "lock" => self.bytes.push(0xF0),
                 "rep" | "repz" | "repe" => self.bytes.push(0xF3),
                 "repnz" | "repne" => self.bytes.push(0xF2),
+                "notrack" => self.bytes.push(0x3E),
                 _ => return Err(format!("unknown prefix: {}", prefix)),
             }
         }

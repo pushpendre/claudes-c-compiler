@@ -497,19 +497,10 @@ impl ElfWriter {
                 }
             }
             AsmItem::Byte(vals) => {
-                let section = self.current_section_mut()?;
-                for val in vals {
-                    match val {
-                        DataValue::Integer(v) => section.data.push(*v as u8),
-                        _ => return Err("unsupported label expression in .byte for i686".to_string()),
-                    }
-                }
+                self.emit_data_values(vals, 1)?;
             }
             AsmItem::Short(vals) => {
-                let section = self.current_section_mut()?;
-                for v in vals {
-                    section.data.extend_from_slice(&v.to_le_bytes());
-                }
+                self.emit_data_values(vals, 2)?;
             }
             AsmItem::Long(vals) => {
                 self.emit_data_values(vals, 4)?;
@@ -521,6 +512,27 @@ impl ElfWriter {
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
                 section.data.extend(std::iter::repeat_n(0u8, *n as usize));
+            }
+            AsmItem::Org(sym, offset) => {
+                if let Some(sec_idx) = self.current_section {
+                    let target = if sym.is_empty() {
+                        *offset as u32
+                    } else if let Some(&(label_sec, label_off)) = self.label_positions.get(sym.as_str()) {
+                        if label_sec == sec_idx {
+                            (label_off as i64 + *offset as i64) as u32
+                        } else {
+                            return Err(format!(".org symbol {} not in current section", sym));
+                        }
+                    } else {
+                        return Err(format!(".org: unknown symbol {}", sym));
+                    };
+                    let current = self.sections[sec_idx].data.len() as u32;
+                    if target > current {
+                        let padding = (target - current) as usize;
+                        let fill = if self.sections[sec_idx].flags & SHF_EXECINSTR != 0 { 0x90u8 } else { 0u8 };
+                        self.sections[sec_idx].data.extend(std::iter::repeat(fill).take(padding));
+                    }
+                }
             }
             AsmItem::SkipExpr(expr, fill) => {
                 // i686 doesn't need deferred skip expression support (kernel uses x86-64)
@@ -627,7 +639,13 @@ impl ElfWriter {
             match val {
                 DataValue::Integer(v) => {
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend_from_slice(&(*v as i32).to_le_bytes());
+                    if size == 1 {
+                        section.data.push(*v as u8);
+                    } else if size == 2 {
+                        section.data.extend_from_slice(&(*v as i16).to_le_bytes());
+                    } else {
+                        section.data.extend_from_slice(&(*v as i32).to_le_bytes());
+                    }
                 }
                 DataValue::Symbol(sym) => {
                     let offset = self.sections[sec_idx].data.len() as u32;

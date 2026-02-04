@@ -217,6 +217,22 @@ impl Driver {
             // This is needed for headers like <cet.h> which gate assembly-specific
             // macro definitions (e.g. _CET_ENDBR) behind #ifdef __ASSEMBLER__.
             preprocessor.define_macro("__ASSEMBLER__", "1");
+            // The built-in preprocessor doesn't ship with GCC's cet.h header.
+            // When __CET__ is defined, ffitarget.h does `#include <cet.h>` which
+            // would fail. We prevent this by pre-defining _CET_H_INCLUDED (the
+            // include guard) so cet.h is skipped if encountered, then manually
+            // define _CET_ENDBR and _CET_NOTRACK with the correct values.
+            preprocessor.define_macro("_CET_H_INCLUDED", "1");
+            if self.target == crate::backend::Target::X86_64 {
+                preprocessor.define_macro("_CET_ENDBR", "endbr64");
+            } else {
+                preprocessor.define_macro("_CET_ENDBR", "endbr32");
+            }
+            preprocessor.define_macro("_CET_NOTRACK", "notrack");
+            // In assembly mode, '$' is the AT&T immediate prefix, not part of
+            // identifiers. Without this, `$FOO` is tokenized as one identifier
+            // and the macro `FOO` is never expanded.
+            preprocessor.set_asm_mode(true);
             preprocessor.set_filename(input_file);
             self.process_force_includes(&mut preprocessor)
                 .map_err(|e| format!("Preprocessing {} failed: {}", input_file, e))?;
@@ -226,6 +242,13 @@ impl Driver {
             std::fs::read_to_string(input_file)
                 .map_err(|e| format!("Cannot read {}: {}", input_file, e))?
         };
+
+        // Debug: dump preprocessed assembly to /tmp/asm_debug_<basename>.s
+        if std::env::var("CCC_ASM_DEBUG").is_ok() {
+            let basename = std::path::Path::new(input_file)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let _ = std::fs::write(format!("/tmp/asm_debug_{}.s", basename), &asm_text);
+        }
 
         let extra = self.build_asm_extra_args();
         self.target.assemble_with_extra(&asm_text, output_path, &extra)

@@ -7,3 +7,9 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | tomlc99 | PASS | FAIL (segfault in unittest) | PASS | PASS | Fixed ARM IPLT stubs gap error; riscv fixed by TLS GOT local sym fix |
 | parson  | PASS | FAIL (segfault/crash) | PASS | PASS | Fixed RISC-V local TLS GOT symbol resolution (.LANCHOR0 etc) |
 | zstd    | PASS | TODO | TODO | TODO | Fixed __ASSEMBLER__ for .S files, .pushsection/.popsection, BMI2 instrs, bitwise expr parsing |
+| 8cc     | PASS | FAIL (i686 asm undefined syms) | TODO | TODO | Fixed x86 builtin linker copy-reloc st_shndx and .gnu.hash |
+| bzip2   | PASS | FAIL (i686 asm undefined syms) | PASS | PASS | x86/arm/riscv work; i686 blocked by known i686 asm issue |
+| miniz   | PASS | FAIL (i686 asm undefined syms) | PASS | PASS | All pass except i686 |
+| utf8proc | PASS | FAIL (i686 asm undefined syms) | PASS | PASS | All pass except i686 |
+| chibicc | PASS | TODO | TODO | TODO | Passes x86 |
+| QuickJS | PASS | TODO | TODO | TODO | Passes x86 |

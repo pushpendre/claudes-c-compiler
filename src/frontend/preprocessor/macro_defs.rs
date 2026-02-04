@@ -118,6 +118,12 @@ pub struct MacroTable {
     /// Whether to track macro expansions (disabled by default for performance;
     /// enabled by the preprocessor for the main expansion pass).
     track_expansions: Cell<bool>,
+    /// Assembly preprocessing mode: when true, '$' is NOT treated as an identifier
+    /// character during macro expansion. In AT&T assembly syntax, '$' is the
+    /// immediate operand prefix (e.g., `$UNIX64_RET_LAST`), not part of the
+    /// identifier. Without this, `$FOO` is tokenized as one identifier and the
+    /// macro `FOO` is never expanded.
+    pub(super) asm_mode: bool,
 }
 
 impl MacroTable {
@@ -128,6 +134,7 @@ impl MacroTable {
             line_value: Cell::new(1),
             expanded_macros: std::cell::RefCell::new(Vec::new()),
             track_expansions: Cell::new(false),
+            asm_mode: false,
         }
     }
 
@@ -365,7 +372,7 @@ impl MacroTable {
                 i = copy_literal_bytes_to_string(bytes, i, b, &mut result);
             } else if b == BLUE_PAINT_MARKER {
                 i = Self::copy_blue_painted(bytes, i, &mut result);
-            } else if is_ident_start_byte(b) {
+            } else if is_ident_start_byte(b) && !(self.asm_mode && b == b'$') {
                 i = self.expand_identifier(text, bytes, i, &mut result, expanding);
             } else if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
                 i = Self::copy_block_comment(bytes, i, &mut result);
@@ -382,7 +389,7 @@ impl MacroTable {
                 while i < len {
                     let c = bytes[i];
                     if c == b'"' || c == b'\'' || c == BLUE_PAINT_MARKER
-                        || is_ident_start_byte(c)
+                        || (is_ident_start_byte(c) && !(self.asm_mode && c == b'$'))
                         || (c == b'/' && i + 1 < len && (bytes[i + 1] == b'*' || bytes[i + 1] == b'/'))
                         || c.is_ascii_digit()
                         || (c == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit())

@@ -560,6 +560,13 @@ impl Preprocessor {
         }
     }
 
+    /// Enable assembly preprocessing mode. In this mode, '$' is not treated
+    /// as an identifier character during macro expansion, so that AT&T assembly
+    /// immediates like `$MACRO_NAME` correctly expand the macro.
+    pub fn set_asm_mode(&mut self, asm_mode: bool) {
+        self.macros.asm_mode = asm_mode;
+    }
+
     /// Set the filename for __FILE__ and __BASE_FILE__ macros and set as the base include directory.
     pub fn set_filename(&mut self, filename: &str) {
         self.filename = filename.to_string();
