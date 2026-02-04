@@ -1,1 +1,0 @@
-fix sqlite ARM: window function OVER clause parse error in compiled binary

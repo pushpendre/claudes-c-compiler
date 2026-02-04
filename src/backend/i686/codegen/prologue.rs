@@ -306,7 +306,7 @@ impl I686Codegen {
                                     self.state.param_pre_stored.insert(i);
                                 }
                             } else if let Some(slot) = self.state.get_slot(paramref_dest.0) {
-                                // Value was spilled to a stack slot
+                                // Value was spilled to a stack slot - no register conflict
                                 let slot_ref = self.slot_ref(slot);
                                 emit!(self.state, "    movl {}, {}", src_reg, slot_ref);
                                 self.state.param_pre_stored.insert(i);
