@@ -1,0 +1,7 @@
+Fix x86 assembler: handle parenthesized register in inl/inb/inw instructions.
+
+The x86 assembler's encode_in function doesn't handle the parenthesized register form
+like `inl (%dx), %eax`. The `(%dx)` gets parsed as a Memory operand with base=dx and
+offset=0, but encode_in only matches Register and Immediate operand forms. Need to add
+a match arm that recognizes a Memory operand with a base register and zero offset as
+equivalent to the bare register form for in/inb/inw/inl instructions.
