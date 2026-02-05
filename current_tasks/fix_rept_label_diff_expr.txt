@@ -1,0 +1,17 @@
+Fix .rept directive count expression with backward label references.
+
+When .rept count is an expression involving backward label differences
+like (662b-661b)/4, the assembler fails to evaluate it because the
+expression evaluator only handles numeric constants, not label references.
+This causes .rept to repeat 0 times instead of the correct count.
+
+This affects the Linux kernel's alternative_else_nop_endif macro which
+uses: nops (662b-661b) / AARCH64_INSN_SIZE
+
+The fix: track numeric label byte positions during .rept expansion
+and substitute them into expressions before evaluation.
+
+Affects ARM and RISC-V assemblers (both use .rept with label diffs).
+x86 may also be affected.
+
+Started: 2026-02-05
