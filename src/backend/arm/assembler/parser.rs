@@ -561,15 +561,65 @@ fn parse_macro_directive(trimmed: &str) -> (String, Vec<String>, Vec<Option<Stri
     let mut defaults = Vec::new();
     let mut has_vararg = false;
     if !params_str.is_empty() {
-        for raw in params_str.split([',', ' ', '\t']) {
+        // GAS allows spaces around '=' in macro parameter defaults:
+        //   .macro foo enable = 1    =>  param "enable", default "1"
+        // First try comma-separated specs, then handle space-separated with '=' merging.
+        let specs: Vec<&str> = if params_str.contains(',') {
+            params_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        } else {
+            // Space-separated: merge "name = value" triples into single specs.
+            let tokens: Vec<&str> = params_str.split_whitespace().collect();
+            let mut merged: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < tokens.len() {
+                if i + 2 < tokens.len() && tokens[i + 1] == "=" {
+                    merged.push(format!("{}={}", tokens[i], tokens[i + 2]));
+                    i += 3;
+                } else if i + 1 < tokens.len() && tokens[i + 1].starts_with('=') {
+                    merged.push(format!("{}{}", tokens[i], tokens[i + 1]));
+                    i += 2;
+                } else {
+                    merged.push(tokens[i].to_string());
+                    i += 1;
+                }
+            }
+            // Convert to a form we can iterate
+            // We'll handle this below using the merged vector directly
+            let mut specs_out = Vec::new();
+            for m in &merged {
+                specs_out.push(m.as_str());
+            }
+            // Since we can't return borrowed refs to local merged vec,
+            // process directly here
+            for m in &merged {
+                let s = m.trim();
+                if s.is_empty() { continue; }
+                if let Some(eq_pos) = s.find('=') {
+                    params.push(s[..eq_pos].to_string());
+                    defaults.push(Some(s[eq_pos + 1..].to_string()));
+                } else if let Some(colon_pos) = s.find(':') {
+                    let qualifier = &s[colon_pos + 1..];
+                    if qualifier.eq_ignore_ascii_case("vararg") {
+                        has_vararg = true;
+                    }
+                    params.push(s[..colon_pos].to_string());
+                    defaults.push(None);
+                } else {
+                    params.push(s.to_string());
+                    defaults.push(None);
+                }
+            }
+            return (name.to_string(), params, defaults, has_vararg);
+        };
+        for raw in &specs {
             let s = raw.trim();
             if s.is_empty() {
                 continue;
             }
             // Handle param=default or param:req syntax
             if let Some(eq_pos) = s.find('=') {
-                params.push(s[..eq_pos].to_string());
-                defaults.push(Some(s[eq_pos + 1..].to_string()));
+                params.push(s[..eq_pos].trim().to_string());
+                defaults.push(Some(s[eq_pos + 1..].trim().to_string()));
             } else if let Some(colon_pos) = s.find(':') {
                 let qualifier = &s[colon_pos + 1..];
                 if qualifier.eq_ignore_ascii_case("vararg") {

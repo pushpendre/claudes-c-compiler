@@ -511,6 +511,14 @@ impl Driver {
                 arg if arg.starts_with("-march=") => {
                     self.riscv_march = Some(arg["-march=".len()..].to_string());
                 }
+                "-mlittle-endian" => {
+                    // ARM64 target indicator: only arm64-gcc accepts -mlittle-endian.
+                    // This allows `ccc -mlittle-endian` to build ARM code without
+                    // requiring the binary to be named aarch64-linux-gnu-ccc.
+                    if self.target == Target::X86_64 {
+                        self.target = Target::Aarch64;
+                    }
+                }
                 "-mno-relax" => self.riscv_no_relax = true,
                 arg if arg.starts_with("-mregparm=") => {
                     let n: u8 = arg["-mregparm=".len()..].parse().unwrap_or(0);
