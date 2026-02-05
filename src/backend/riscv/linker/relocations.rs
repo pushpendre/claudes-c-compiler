@@ -1,12 +1,18 @@
-//! RISC-V relocation types and instruction patching.
+//! RISC-V linker shared types and utilities.
 //!
-//! Contains all RISC-V-specific relocation constants and functions that patch
-//! instruction encodings with resolved addresses. These are architecture-specific
-//! and cannot be shared with other backends.
+//! This module provides all the building blocks used by `link.rs` for both
+//! executable and shared library linking:
 //!
-//! The RISC-V ISA has several instruction formats (R/I/S/B/U/J) plus compressed
-//! (CB/CJ) variants, each with different immediate bit layouts. The `patch_*`
-//! functions handle encoding the resolved offsets/addresses into these formats.
+//! - **Relocation constants**: All `R_RISCV_*` values from the ELF psABI spec.
+//! - **Instruction patching**: `patch_{u,i,s,b,j,cb,cj}_type` functions that
+//!   encode resolved addresses into RISC-V instruction formats.
+//! - **Symbol resolution**: `resolve_symbol_value`, `got_sym_key`,
+//!   `find_hi20_value` for AUIPC/LO12 relocation pairing.
+//! - **Shared types**: `GlobalSym`, `MergedSection`, `InputSecRef`.
+//! - **ELF writing helpers**: `write_shdr`, `write_phdr`, `write_phdr_at`,
+//!   `align_up`, `pad_to`.
+//! - **Utility functions**: `build_gnu_hash`, `find_versioned_soname`,
+//!   `resolve_archive_members`, `output_section_name`, `section_order`.
 
 use std::collections::HashMap;
 use super::elf_read::*;
@@ -616,5 +622,53 @@ pub fn section_order(name: &str, flags: u64) -> u64 {
         _ if flags & SHF_EXECINSTR != 0 => 150,
         _ if flags & SHF_WRITE == 0 => 300,
         _ => 600,
+    }
+}
+
+/// Decode a ULEB128 value from data at offset.
+#[allow(dead_code)]
+pub fn decode_uleb128(data: &[u8], off: usize) -> u64 {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    let mut i = off;
+    while i < data.len() {
+        let byte = data[i];
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        i += 1;
+    }
+    result
+}
+
+/// Encode a ULEB128 value in place, reusing the same number of bytes as the
+/// existing ULEB128 at that offset.
+#[allow(dead_code)]
+pub fn encode_uleb128_in_place(data: &mut [u8], off: usize, value: u64) {
+    // Count how many bytes the existing ULEB128 occupies.
+    let mut num_bytes = 0;
+    let mut i = off;
+    while i < data.len() {
+        num_bytes += 1;
+        if data[i] & 0x80 == 0 {
+            break;
+        }
+        i += 1;
+    }
+    // Encode the new value in the same number of bytes.
+    let mut val = value;
+    for j in 0..num_bytes {
+        let idx = off + j;
+        if idx >= data.len() {
+            break;
+        }
+        let mut byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if j < num_bytes - 1 {
+            byte |= 0x80;
+        }
+        data[idx] = byte;
     }
 }

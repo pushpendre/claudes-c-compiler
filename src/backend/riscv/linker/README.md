@@ -138,12 +138,12 @@ A separate 5-phase pipeline (with sub-phases) produces `ET_DYN` shared objects:
 
 ## File Inventory
 
-| File              | Lines  | Role                                                          |
-|-------------------|--------|---------------------------------------------------------------|
-| `mod.rs`          | ~22    | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
-| `link.rs`         | ~4600  | Core linker: `link_builtin` (~2465 lines) and `link_shared` (~2000 lines) |
-| `relocations.rs`  | ~620   | Relocation constants, instruction patching, shared types (GlobalSym, MergedSection, InputSecRef), and utility functions used by both linking modes |
-| `elf_read.rs`     | ~90    | Re-exports shared linker_common types; delegates ELF parsing to shared infrastructure |
+| File              | Lines | Role                                                          |
+|-------------------|-------|---------------------------------------------------------------|
+| `mod.rs`          | ~22   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
+| `link.rs`         | ~3900 | Core linker: `link_builtin` (executable) and `link_shared` (shared library). Imports all shared types and helpers from `relocations.rs`. |
+| `relocations.rs`  | ~670  | Shared building blocks: relocation constants, instruction patching (`patch_*`), symbol resolution (`resolve_symbol_value`, `find_hi20_value`), shared types (`GlobalSym`, `MergedSection`, `InputSecRef`), ELF writing helpers (`write_shdr`, `write_phdr`, `align_up`, `pad_to`), and utility functions (`build_gnu_hash`, `resolve_archive_members`, `output_section_name`, `section_order`) |
+| `elf_read.rs`     | ~90   | Re-exports shared linker_common types; delegates ELF parsing to shared infrastructure |
 
 ## Key Data Structures
 
@@ -587,13 +587,14 @@ The final phase writes the complete ELF executable:
 
 ### 1. Two-function architecture
 
-The linker has two main entry points: `link_builtin` (for executables, ~2465
-lines) and `link_shared` (for shared libraries, ~2000 lines), each organized
-as a linear pipeline with clearly labeled phases. Shared types, relocation
-constants, instruction patching functions, and utility helpers are factored into
-`relocations.rs` to avoid duplication between the two functions. Each main
-function reads top-to-bottom as a pipeline with no callbacks, trait objects,
-or complex control flow.
+The linker has two main entry points: `link_builtin` (for executables, ~2400
+lines) and `link_shared` (for shared libraries, ~1500 lines) in `link.rs`,
+each organized as a linear pipeline with clearly labeled phases. All shared
+types (`GlobalSym`, `MergedSection`, `InputSecRef`), relocation constants
+(`R_RISCV_*`), instruction patching functions (`patch_*`), symbol resolution
+helpers, and ELF writing utilities live in `relocations.rs` and are imported
+by `link.rs`. Each main function reads top-to-bottom as a pipeline with no
+callbacks, trait objects, or complex control flow.
 
 ### 2. In-memory linking
 
