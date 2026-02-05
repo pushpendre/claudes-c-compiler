@@ -532,6 +532,14 @@ impl InstructionEncoder {
             "wbinvd" => { self.bytes.extend_from_slice(&[0x0F, 0x09]); Ok(()) }
             "invd" => { self.bytes.extend_from_slice(&[0x0F, 0x08]); Ok(()) }
 
+            // VMX instructions
+            "vmcall" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xC1]); Ok(()) }
+            "vmlaunch" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xC2]); Ok(()) }
+            "vmresume" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xC3]); Ok(()) }
+            "vmxoff" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xC4]); Ok(()) }
+            "vmmcall" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xD9]); Ok(()) }
+            "vmfunc" => { self.bytes.extend_from_slice(&[0x0F, 0x01, 0xD4]); Ok(()) }
+
             // No-ops and misc
             "nop" => { self.bytes.push(0x90); Ok(()) }
             "hlt" => { self.bytes.push(0xF4); Ok(()) }
@@ -780,10 +788,11 @@ impl InstructionEncoder {
             // PCLMULQDQ
             "pclmulqdq" => self.encode_sse_op_imm8(ops, &[0x66, 0x0F, 0x3A, 0x44]),
 
-            // Non-temporal stores
+            // Non-temporal stores and loads
             "movnti" | "movntil" => self.encode_movnti(ops),
             "movntiq" => self.encode_movnti_q(ops),
             "movntdq" => self.encode_sse_store(ops, &[0x66, 0x0F, 0xE7]),
+            "movntdqa" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0x2A]),
             "movntpd" => self.encode_sse_store(ops, &[0x66, 0x0F, 0x2B]),
 
             // CRC32

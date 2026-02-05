@@ -1445,8 +1445,8 @@ impl<A: X86Arch> ElfWriterCore<A> {
         }
     }
 
-    /// Shift all labels, relocations, jumps, and subsequent alignment markers
-    /// in a section after an insertion or removal at `at_offset`.
+    /// Shift all labels, relocations, jumps, alignment markers, deferred skips,
+    /// and deferred byte diffs in a section after an insertion or removal at `at_offset`.
     fn shift_offsets_after(&mut self, sec_idx: usize, at_offset: usize, delta: i64, current_marker_idx: usize) {
         if delta == 0 { return; }
         for (_, pos) in self.label_positions.iter_mut() {
@@ -1475,6 +1475,17 @@ impl<A: X86Arch> ElfWriterCore<A> {
             if self.sections[sec_idx].align_markers[i].offset >= at_offset {
                 self.sections[sec_idx].align_markers[i].offset =
                     (self.sections[sec_idx].align_markers[i].offset as i64 + delta) as usize;
+            }
+        }
+        // Update deferred skips and byte diffs
+        for (skip_sec, skip_off, _, _) in self.deferred_skips.iter_mut() {
+            if *skip_sec == sec_idx && *skip_off >= at_offset {
+                *skip_off = (*skip_off as i64 + delta) as usize;
+            }
+        }
+        for (bd_sec, bd_off, _, _, _, _) in self.deferred_byte_diffs.iter_mut() {
+            if *bd_sec == sec_idx && *bd_off >= at_offset {
+                *bd_off = (*bd_off as i64 + delta) as usize;
             }
         }
     }

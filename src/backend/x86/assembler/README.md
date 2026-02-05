@@ -402,7 +402,8 @@ jump's target into short range:
    - Rewrite the opcode bytes in place (Jcc: `0x70+cc`; JMP: `0xEB`).
    - Remove the extra bytes via `data.drain()`.
    - Adjust all `label_positions`, `numeric_label_positions`, relocation
-     offsets, and other jump offsets that fall after the shrunk instruction.
+     offsets, other jump offsets, `deferred_skips`, and `deferred_byte_diffs`
+     that fall after the shrunk instruction.
    - Remove the relocation entry for this jump (displacement is now inline).
 5. Repeat from step 1 until no more relaxation occurs (fixed-point
    convergence).
@@ -554,7 +555,7 @@ The encoder covers the following instruction categories (300+ match arms):
 | 17 | **SSE3/SSSE3** | haddpd/ps, hsubpd/ps, addsubpd/ps, movddup, movshdup, movsldup, pabsb/w/d, phaddw/d, phsubw/d, pmulhrsw |
 | 18 | **SSE4.1** | blendvpd/ps, pblendvb, roundsd/ss/pd/ps, pblendw, blendpd/ps, dpps, dppd, ptest, pminsb, pminuw, pmaxsb, pmaxuw, pminud, pmaxud, pminsw, pmaxsw, phminposuw, packusdw, packsswb, pmovzxbw/bd/bq/wd/wq/dq, pmovsxbw/bd/bq/wd/wq/dq |
 | 19 | **SSE unpacks** | unpcklpd/ps, unpckhpd/ps |
-| 20 | **SSE non-temporal** | movnti, movntdq, movntpd, movntps |
+| 20 | **SSE non-temporal** | movnti, movntdq, movntdqa, movntpd, movntps |
 | 21 | **SSE MXCSR** | ldmxcsr, stmxcsr |
 | 22 | **SSE conversions** | cvtsd2ss, cvtss2sd, cvtsi2sdq/ssq/sdl/ssl, cvttsd2siq/ssiq/sd2sil/ss2sil, cvtsd2siq/sd2si/ss2siq/ss2si, cvtps2dq, cvtdq2ps, cvttps2dq |
 | 23 | **AES-NI** | aesenc, aesenclast, aesdec, aesdeclast, aesimc, aeskeygenassist |
@@ -582,6 +583,7 @@ The encoder covers the following instruction categories (300+ match arms):
 | 45 | **Misc** | nop, hlt, leave, ud2, pause, mfence, lfence, sfence, clflush |
 | 46 | **Segment/Control regs** | mov to/from segment registers (es/cs/ss/ds/fs/gs), mov to/from control registers (cr0/cr2/cr3/cr4/cr8) |
 | 47 | **MMX** | emms, paddb (MMX form) |
+| 48 | **VMX** | vmcall, vmmcall, vmlaunch, vmresume, vmxoff, vmfunc |
 
 
 ## Supported Relocation Types
