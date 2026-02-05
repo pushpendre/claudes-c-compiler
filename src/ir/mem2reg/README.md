@@ -306,8 +306,10 @@ typically branch to a single logical target at a time.
 | `promote.rs` | SSA construction: alloca identification, phi insertion via iterated dominance frontiers, and variable renaming via dominator-tree DFS. |
 | `phi_eliminate.rs` | Phi elimination: conflict detection, two-phase copy emission, critical edge splitting via trampoline blocks, and final IR rewriting. |
 
-Both passes depend on shared infrastructure in `ir::analysis` for CFG construction,
-dominator computation (Cooper-Harvey-Kennedy), and dominance frontier calculation.
+The SSA construction pass depends on shared infrastructure in `ir::analysis` for CFG
+construction, dominator computation (Cooper-Harvey-Kennedy), and dominance frontier
+calculation. The phi elimination pass is self-contained, performing its own successor
+analysis and conflict detection.
 
 ---
 
