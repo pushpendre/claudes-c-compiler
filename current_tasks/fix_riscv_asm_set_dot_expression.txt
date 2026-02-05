@@ -1,0 +1,11 @@
+Task: Fix RISC-V assembler .set directive with (. - symbol) / N expressions
+
+Problem: The .set directive produces 0 instead of the correct value when the
+expression involves the location counter (.) minus a symbol, divided by a constant.
+Example: `.set section_count, (. - section_table) / 40` should produce 2 but produces 0.
+
+This causes the Linux kernel PE/COFF header NumberOfSections field to be 0 instead of 2,
+which corrupts the EFI header and causes the RISC-V kernel to hang during boot.
+
+Status: IN PROGRESS
+Worker: Claude agent
