@@ -112,7 +112,7 @@ fn eval_shift(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
     while *pos < tokens.len() {
         match &tokens[*pos] {
             ExprToken::Op2("<<") => { *pos += 1; val <<= eval_add(tokens, pos)?; }
-            ExprToken::Op2(">>") => { *pos += 1; val >>= eval_add(tokens, pos)?; }
+            ExprToken::Op2(">>") => { *pos += 1; val = ((val as u64) >> eval_add(tokens, pos)?) as i64; }
             _ => break,
         }
     }

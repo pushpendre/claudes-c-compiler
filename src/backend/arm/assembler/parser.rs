@@ -93,6 +93,8 @@ pub enum DataValue {
     SymbolDiff(String, String),
     /// symbol - symbol + addend
     SymbolDiffAddend(String, String, i64),
+    /// Raw expression string for deferred evaluation (e.g., `(sym_a - sym_b) >> 5`)
+    Expr(String),
 }
 
 /// A typed assembly directive, fully parsed at parse time.
@@ -142,6 +144,8 @@ pub enum AsmDirective {
     PushSection(SectionDirective),
     /// Pop section stack and restore previous section: `.popsection`
     PopSection,
+    /// `.previous` — swap current and previous sections
+    Previous,
     /// CFI directive (ignored for code generation)
     Cfi,
     /// `.incbin "file"[, skip[, count]]` — include binary file contents
@@ -178,6 +182,7 @@ pub enum AsmStatement {
 // TODO: extract expand_rept_blocks to shared module (duplicated in ARM, RISC-V, x86 parsers)
 fn is_rept_start(trimmed: &str) -> bool {
     trimmed.starts_with(".rept ") || trimmed.starts_with(".rept\t")
+    || trimmed.starts_with(".rep ") || trimmed.starts_with(".rep\t")
 }
 
 fn is_irp_start(trimmed: &str) -> bool {
@@ -223,9 +228,10 @@ fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
     while i < lines.len() {
         let trimmed = strip_comment(lines[i]).trim().to_string();
         if is_rept_start(&trimmed) {
-            let count_str = trimmed[".rept".len()..].trim();
-            let count_val = parse_int_literal(count_str)
-                .map_err(|e| format!(".rept: bad count '{}': {}", count_str, e))?;
+            let prefix_len = if trimmed.starts_with(".rept") { 5 } else { 4 };
+            let count_str = trimmed[prefix_len..].trim();
+            let count_val = asm_expr::parse_integer_expr(count_str)
+                .unwrap_or(0);
             // Treat negative counts as 0 (matches GNU as behavior)
             let count = if count_val < 0 { 0usize } else { count_val as usize };
             let body = collect_block_body(lines, &mut i)?;
@@ -595,16 +601,18 @@ fn substitute_params(body: &[String], params: &[String], defaults: &[Option<Stri
 fn expand_macros(lines: &[&str]) -> Result<Vec<String>, String> {
     use std::collections::HashMap;
     let mut macros: HashMap<String, MacroDef> = HashMap::new();
-    expand_macros_impl(lines, &mut macros, 0)
+    let mut counter = 0u64;
+    expand_macros_impl(lines, &mut macros, 0, &mut counter)
 }
 
 /// Core macro expansion implementation with a shared, mutable macro table.
 /// `depth` limits recursion to prevent infinite expansion.
-/// `set_symbols` tracks .set/.equ definitions for expression resolution.
+/// `counter` is GAS's `\@` macro invocation counter.
 fn expand_macros_impl(
     lines: &[&str],
     macros: &mut std::collections::HashMap<String, MacroDef>,
     depth: usize,
+    counter: &mut u64,
 ) -> Result<Vec<String>, String> {
     if depth > 64 {
         return Err("Macro expansion depth limit exceeded (>64)".to_string());
@@ -649,9 +657,12 @@ fn expand_macros_impl(
                     let mac_vararg = macros[rest_first_word].has_vararg;
                     let macro_args_str = rest_after_label[rest_first_word.len()..].trim().to_string();
                     let macro_args = split_macro_args(&macro_args_str);
-                    let expanded_lines = substitute_params(&mac_body, &mac_params, &mac_defaults, &macro_args, mac_vararg);
+                    let mut expanded_lines = substitute_params(&mac_body, &mac_params, &mac_defaults, &macro_args, mac_vararg);
+                    let ctr_str = counter.to_string();
+                    for line in &mut expanded_lines { *line = line.replace("\\@", &ctr_str); }
+                    *counter += 1;
                     let refs: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
-                    let re_expanded = expand_macros_impl(&refs, macros, depth + 1)?;
+                    let re_expanded = expand_macros_impl(&refs, macros, depth + 1, counter)?;
                     result.extend(re_expanded);
                 } else {
                     result.push(lines[i].to_string());
@@ -697,10 +708,13 @@ fn expand_macros_impl(
                 } else {
                     split_macro_args(&args_str)
                 };
-                let expanded_lines = substitute_params(&mac_body, &mac_params, &mac_defaults, &args, mac_vararg);
+                let mut expanded_lines = substitute_params(&mac_body, &mac_params, &mac_defaults, &args, mac_vararg);
+                let ctr_str = counter.to_string();
+                for line in &mut expanded_lines { *line = line.replace("\\@", &ctr_str); }
+                *counter += 1;
                 // Recursively expand the result (may define new macros, invoke others)
                 let refs: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
-                let re_expanded = expand_macros_impl(&refs, macros, depth + 1)?;
+                let re_expanded = expand_macros_impl(&refs, macros, depth + 1, counter)?;
                 result.extend(re_expanded);
             } else {
                 result.push(lines[i].to_string());
@@ -884,9 +898,15 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
     // Pre-process: strip C-style /* ... */ comments
     let text = asm_preprocess::strip_c_comments(text);
 
+    // Split lines on ';' (GAS statement separator) before macro expansion,
+    // so macro invocations after ';' on the same line get expanded correctly.
+    let presplit: Vec<String> = text.lines().flat_map(|line| {
+        split_on_semicolons(line).into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    }).collect();
+    let presplit_refs: Vec<&str> = presplit.iter().map(|s| s.as_str()).collect();
+
     // Expand .macro/.endm definitions and invocations
-    let raw_lines: Vec<&str> = text.lines().collect();
-    let macro_expanded = expand_macros(&raw_lines)?;
+    let macro_expanded = expand_macros(&presplit_refs)?;
     let macro_refs: Vec<&str> = macro_expanded.iter().map(|s| s.as_str()).collect();
 
     // Expand .rept/.endr blocks
@@ -903,6 +923,8 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
     // Each entry is (active, any_taken): active = current block emitting code,
     // any_taken = whether any branch in this if/elseif/else chain was taken.
     let mut if_stack: Vec<(bool, bool)> = Vec::new();
+    // Track defined symbols for .ifdef/.ifndef
+    let mut defined_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (line_num, line) in expanded_lines.iter().enumerate() {
         let line = line.trim();
 
@@ -957,11 +979,11 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
             }
             continue;
         }
-        if lower.starts_with(".if ") || lower.starts_with(".if\t") {
-            let cond_str = line[3..].trim();
+        if lower == ".if" || lower.starts_with(".if ") || lower.starts_with(".if\t") {
+            let cond_str = if line.len() > 3 { line[3..].trim() } else { "" };
             // Evaluate the condition: if we're already in a false block, push false
             let active = if if_stack.last().map(|&(a, _)| a).unwrap_or(true) {
-                eval_if_condition(cond_str)
+                if cond_str.is_empty() { false } else { eval_if_condition(cond_str) }
             } else {
                 false
             };
@@ -1020,6 +1042,50 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
             if_stack.push((active, active));
             continue;
         }
+        // .ifdef symbol — conditional if symbol is defined
+        if lower.starts_with(".ifdef ") || lower.starts_with(".ifdef\t") {
+            let sym = line[6..].trim().to_string();
+            let active = if if_stack.last().map(|&(a, _)| a).unwrap_or(true) {
+                defined_symbols.contains(&sym)
+            } else {
+                false
+            };
+            if_stack.push((active, active));
+            continue;
+        }
+        // .ifndef symbol — conditional if symbol is NOT defined
+        if lower.starts_with(".ifndef ") || lower.starts_with(".ifndef\t") {
+            let sym = line[7..].trim().to_string();
+            let active = if if_stack.last().map(|&(a, _)| a).unwrap_or(true) {
+                !defined_symbols.contains(&sym)
+            } else {
+                false
+            };
+            if_stack.push((active, active));
+            continue;
+        }
+        // .ifeq expression — conditional if expression equals 0
+        if lower.starts_with(".ifeq ") || lower.starts_with(".ifeq\t") {
+            let expr_str = line[5..].trim();
+            let active = if if_stack.last().map(|&(a, _)| a).unwrap_or(true) {
+                asm_expr::parse_integer_expr(expr_str).unwrap_or(1) == 0
+            } else {
+                false
+            };
+            if_stack.push((active, active));
+            continue;
+        }
+        // .ifne expression — conditional if expression is not equal to 0
+        if lower.starts_with(".ifne ") || lower.starts_with(".ifne\t") {
+            let expr_str = line[5..].trim();
+            let active = if if_stack.last().map(|&(a, _)| a).unwrap_or(true) {
+                asm_expr::parse_integer_expr(expr_str).unwrap_or(0) != 0
+            } else {
+                false
+            };
+            if_stack.push((active, active));
+            continue;
+        }
         // If we're inside a false .if block, skip this line
         if if_stack.last().map(|&(a, _)| a).unwrap_or(true) == false {
             continue;
@@ -1042,7 +1108,20 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
                 continue;
             }
             match parse_line(part) {
-                Ok(stmts) => statements.extend(stmts),
+                Ok(stmts) => {
+                    for stmt in &stmts {
+                        match stmt {
+                            AsmStatement::Label(name) => {
+                                defined_symbols.insert(name.clone());
+                            }
+                            AsmStatement::Directive(AsmDirective::Set(name, _)) => {
+                                defined_symbols.insert(name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    statements.extend(stmts);
+                }
                 Err(e) => return Err(format!("Line {}: {}: '{}'", line_num + 1, e, part)),
             }
         }
@@ -1281,7 +1360,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
             }
             AsmDirective::Short(vals)
         }
-        ".long" | ".4byte" | ".word" | ".int" => {
+        ".long" | ".4byte" | ".word" | ".int" | ".inst" => {
             let vals = parse_data_values(args)?;
             AsmDirective::Long(vals)
         }
@@ -1338,7 +1417,8 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
                 _ => AsmDirective::Ignored,
             }
         }
-        ".popsection" | ".previous" => AsmDirective::PopSection,
+        ".popsection" => AsmDirective::PopSection,
+        ".previous" => AsmDirective::Previous,
         ".subsection" => {
             // .subsection N — switch to numbered subsection; ignore for now
             AsmDirective::Ignored
@@ -1663,7 +1743,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
 
     // Bare integer (without # prefix) - some inline asm constraints emit these
     // e.g., "eor w9, w10, 255" or "ccmp x10, x13, 0, eq"
-    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+    // Also handles negative like -1, -2, etc.
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
         if let Ok(val) = parse_int_literal(s) {
             return Ok(Operand::Imm(val));
         }
@@ -1672,20 +1753,29 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     // Label/symbol reference (for branches, adrp, etc.)
     // Could be: .LBB42, func_name, symbol+offset
     if let Some(plus_pos) = s.find('+') {
-        let sym = &s[..plus_pos];
-        let off_str = &s[plus_pos + 1..];
-        if let Ok(off) = parse_int_literal(off_str) {
-            return Ok(Operand::SymbolOffset(sym.to_string(), off));
+        let sym = s[..plus_pos].trim();
+        let off_str = s[plus_pos + 1..].trim();
+        if !sym.is_empty() {
+            if let Ok(off) = parse_int_literal(off_str) {
+                return Ok(Operand::SymbolOffset(sym.to_string(), off));
+            }
         }
     }
     if let Some(minus_pos) = s.find('-') {
         // Careful: don't confuse with label names containing '-' in label diff expressions
         if minus_pos > 0 {
-            let sym = &s[..minus_pos];
+            let sym = s[..minus_pos].trim();
             let off_str = &s[minus_pos..]; // includes the '-'
             if let Ok(off) = parse_int_literal(off_str) {
                 return Ok(Operand::SymbolOffset(sym.to_string(), off));
             }
+        }
+    }
+
+    // Try evaluating as a constant expression (handles parenthesized expressions like (0 + ...))
+    if s.starts_with('(') || s.starts_with('~') {
+        if let Ok(val) = parse_int_literal(s) {
+            return Ok(Operand::Imm(val));
         }
     }
 
@@ -1880,16 +1970,25 @@ fn parse_modifier(s: &str) -> Result<Operand, String> {
     let kind = s[..colon_pos].to_string();
     let rest = &s[colon_pos + 1..];
 
-    // Check for symbol+offset
+    // Check for symbol+offset or symbol-offset
     if let Some(plus_pos) = rest.find('+') {
-        let symbol = rest[..plus_pos].to_string();
-        let offset_str = &rest[plus_pos + 1..];
+        let symbol = rest[..plus_pos].trim().to_string();
+        let offset_str = rest[plus_pos + 1..].trim();
         if let Ok(offset) = parse_int_literal(offset_str) {
             return Ok(Operand::ModifierOffset { kind, symbol, offset });
         }
     }
+    if let Some(minus_pos) = rest.rfind('-') {
+        if minus_pos > 0 {
+            let symbol = rest[..minus_pos].trim().to_string();
+            let offset_str = &rest[minus_pos..]; // includes the '-'
+            if let Ok(offset) = parse_int_literal(offset_str) {
+                return Ok(Operand::ModifierOffset { kind, symbol, offset });
+            }
+        }
+    }
 
-    Ok(Operand::Modifier { kind, symbol: rest.to_string() })
+    Ok(Operand::Modifier { kind, symbol: rest.trim().to_string() })
 }
 
 fn parse_immediate(s: &str) -> Result<Operand, String> {
@@ -1948,7 +2047,7 @@ fn is_register(s: &str) -> bool {
 fn parse_section_directive(args: &str) -> Result<AsmDirective, String> {
     let parts = split_section_args(args);
     let name = parts.first()
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim().trim_matches('"').to_string())
         .unwrap_or_else(|| ".text".to_string());
     let flags = parts.get(1).map(|s| s.trim().trim_matches('"').to_string());
     let section_type = parts.get(2).map(|s| s.trim().to_string());
@@ -2059,8 +2158,13 @@ fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
             vals.push(dv);
             continue;
         }
-        // Symbol reference
-        vals.push(DataValue::Symbol(trimmed.to_string()));
+        // Check if it looks like an expression with operators (for deferred evaluation)
+        if trimmed.contains('-') || trimmed.contains('+') || trimmed.contains(">>") || trimmed.contains("<<") || trimmed.starts_with('(') {
+            vals.push(DataValue::Expr(trimmed.to_string()));
+        } else {
+            // Symbol reference
+            vals.push(DataValue::Symbol(trimmed.to_string()));
+        }
     }
     Ok(vals)
 }
@@ -2077,41 +2181,98 @@ fn is_numeric_label_ref(s: &str) -> bool {
     s[..s.len() - 1].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Strip balanced outer parentheses from an expression, recursively.
+/// e.g. "((foo) - .)" => "(foo) - ." => "foo - ." (inner parens on individual terms
+/// are handled by callers).
+fn strip_outer_parens(s: &str) -> &str {
+    let s = s.trim();
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return s;
+    }
+    // Check if the outer parens are actually matched (not "(a)-(b)")
+    let inner = &s[1..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return s; // closing paren in middle means outer parens aren't a simple wrapper
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        strip_outer_parens(inner) // recursively strip more layers
+    } else {
+        s
+    }
+}
+
+/// Strip parentheses from a symbol name: "(9997f)" => "9997f", "(__label)" => "__label"
+fn strip_sym_parens(s: &str) -> &str {
+    let s = s.trim();
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        // Make sure there are no unbalanced parens inside
+        let mut depth = 0i32;
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 { return s; }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 { strip_sym_parens(inner) } else { s }
+    } else {
+        s
+    }
+}
+
 /// Try to parse a symbol difference expression like "A - B" or "A - B + C".
 /// Also handles numeric label references like "662b-661b".
+/// Handles parenthesized expressions like "((9997f) - .)".
 fn try_parse_symbol_diff(expr: &str) -> Option<DataValue> {
-    let expr = expr.trim();
+    let expr = strip_outer_parens(expr);
     if expr.is_empty() {
         return None;
     }
     let first_char = expr.chars().next()?;
     let is_sym_start = first_char.is_ascii_alphabetic() || first_char == '_' || first_char == '.';
     let could_be_numeric_ref = first_char.is_ascii_digit();
-    if !is_sym_start && !could_be_numeric_ref {
+    let could_be_paren_sym = first_char == '(';
+    if !is_sym_start && !could_be_numeric_ref && !could_be_paren_sym {
         return None;
     }
     let minus_pos = find_symbol_diff_minus(expr)?;
-    let sym_a = expr[..minus_pos].trim().to_string();
+    let sym_a = strip_sym_parens(expr[..minus_pos].trim()).to_string();
     let rest = expr[minus_pos + 1..].trim();
     // rest might be "B" or "B + offset"
     let (sym_b, extra_addend) = if let Some(plus_pos) = rest.find('+') {
-        let b = rest[..plus_pos].trim().to_string();
+        let b = strip_sym_parens(rest[..plus_pos].trim()).to_string();
         let add_str = rest[plus_pos + 1..].trim();
         let add_val: i64 = add_str.parse().unwrap_or(0);
         (b, add_val)
     } else {
-        (rest.to_string(), 0i64)
+        (strip_sym_parens(rest).to_string(), 0i64)
     };
     if sym_b.is_empty() {
         return None;
     }
+    let a_first = sym_a.chars().next()?;
+    let a_is_sym = a_first.is_ascii_alphabetic() || a_first == '_' || a_first == '.';
     let b_first = sym_b.chars().next().unwrap();
     let b_is_sym = b_first.is_ascii_alphabetic() || b_first == '_' || b_first == '.';
     if !b_is_sym && !is_numeric_label_ref(&sym_b) {
         return None;
     }
     // Also verify sym_a is valid (symbol or numeric label ref)
-    if !is_sym_start && !is_numeric_label_ref(&sym_a) {
+    if !a_is_sym && !is_numeric_label_ref(&sym_a) {
         return None;
     }
     if extra_addend != 0 {
@@ -2138,18 +2299,29 @@ fn try_parse_symbol_offset(s: &str) -> Option<DataValue> {
 }
 
 /// Find the position of the '-' operator in a symbol difference expression.
+/// Skips over parenthesized sub-expressions.
 fn find_symbol_diff_minus(expr: &str) -> Option<usize> {
     let bytes = expr.as_bytes();
     let len = bytes.len();
     let mut i = 1;
+    let mut depth = 0i32;
     while i < len {
+        match bytes[i] {
+            b'(' => { depth += 1; i += 1; continue; }
+            b')' => { depth -= 1; i += 1; continue; }
+            _ => {}
+        }
+        if depth > 0 {
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'-' {
             let left_char = bytes[i - 1];
-            let left_ok = left_char.is_ascii_alphanumeric() || left_char == b'_' || left_char == b'.' || left_char == b' ';
+            let left_ok = left_char.is_ascii_alphanumeric() || left_char == b'_' || left_char == b'.' || left_char == b' ' || left_char == b')';
             let right_start = expr[i + 1..].trim_start();
             if !right_start.is_empty() {
                 let right_char = right_start.as_bytes()[0];
-                let right_ok = right_char.is_ascii_alphabetic() || right_char == b'_' || right_char == b'.' || right_char.is_ascii_digit();
+                let right_ok = right_char.is_ascii_alphabetic() || right_char == b'_' || right_char == b'.' || right_char.is_ascii_digit() || right_char == b'(';
                 if left_ok && right_ok {
                     return Some(i);
                 }

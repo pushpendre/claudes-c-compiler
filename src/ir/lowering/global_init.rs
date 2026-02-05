@@ -706,7 +706,15 @@ impl Lowerer {
                 // elements at the correct offset within the sub-array.
                 if let Initializer::List(sub_items) = &item.init {
                     if is_structured {
-                        // Process inner list with designator support
+                        // Process inner list with designator support.
+                        // Compute how many flat elements each inner sub-item spans.
+                        // For arr[2][2][3] with strides [48,24,8] and base_type_size=8,
+                        // inner_stride = 24/8 = 3. For 2D arrays, inner_stride = 1.
+                        let inner_stride = if array_dim_strides.len() >= 2 {
+                            array_dim_strides[1] / base_type_size
+                        } else {
+                            1
+                        };
                         let mut inner_idx = 0usize;
                         for sub in sub_items {
                             // Check for inner designator
@@ -720,7 +728,7 @@ impl Lowerer {
                             if !inner_desig.is_empty() {
                                 inner_idx = inner_desig[0];
                             }
-                            let target_idx = flat_idx + inner_idx;
+                            let target_idx = flat_idx + inner_idx * inner_stride;
                             if target_idx < flat_num_elems {
                                 let mut elem_parts = Vec::new();
                                 self.collect_compound_init_element(&sub.init, &mut elem_parts, elem_size);

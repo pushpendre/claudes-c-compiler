@@ -13,6 +13,7 @@
 //! - [`loop_trampoline`]: SSA loop backedge trampoline block coalescing
 //! - [`callee_saves`]: unused callee-saved register save/restore elimination
 //! - [`memory_fold`]: fold stack loads into ALU instructions as memory operands
+//! - [`tail_call`]: convert `call; epilogue; ret` to `epilogue; jmp` for tail calls
 //! - [`helpers`]: shared utilities (register rewriting, label parsing, etc.)
 
 use super::types::*;
@@ -29,6 +30,7 @@ mod loop_trampoline;
 mod callee_saves;
 mod memory_fold;
 mod frame_compact;
+mod tail_call;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -118,7 +120,12 @@ pub fn peephole_optimize(asm: String) -> String {
         }
     }
 
-    // Phase 5: Global dead store elimination for never-read stack slots.
+    // Phase 5: Tail call optimization: convert `call X; epilogue; ret` to
+    // `epilogue; jmp X`. This must run before callee-save elimination because
+    // removing the call may make some callee-save registers unnecessary.
+    tail_call::optimize_tail_calls(&mut store, &mut infos);
+
+    // Phase 5b: Global dead store elimination for never-read stack slots.
     dead_code::eliminate_never_read_stores(&store, &mut infos);
 
     // Phase 6: Eliminate unused callee-saved register saves/restores.

@@ -19,10 +19,11 @@ unnecessary extensions that this optimizer systematically eliminates.
 6. [Phase 2: Global Passes](#phase-2-global-passes)
 7. [Phase 3: Post-Global Cleanup](#phase-3-post-global-cleanup)
 8. [Phase 4: Loop Trampoline Elimination](#phase-4-loop-trampoline-elimination)
-9. [Phase 5: Never-Read Store Elimination](#phase-5-never-read-store-elimination)
-10. [Phase 6: Callee-Save Elimination](#phase-6-callee-save-elimination)
-11. [Design Decisions and Tradeoffs](#design-decisions-and-tradeoffs)
-12. [Files](#files)
+9. [Phase 5: Tail Call Optimization](#phase-5-tail-call-optimization)
+10. [Phase 5b: Never-Read Store Elimination](#phase-5b-never-read-store-elimination)
+11. [Phase 6: Callee-Save Elimination](#phase-6-callee-save-elimination)
+12. [Design Decisions and Tradeoffs](#design-decisions-and-tradeoffs)
+13. [Files](#files)
 
 ---
 
@@ -36,8 +37,8 @@ The optimizer has two architectural layers:
    All subsequent passes use integer/enum comparisons on these structs, never
    re-parsing the assembly text.
 
-2. **Optimization passes** (`passes/`): A pipeline of 13 distinct pass functions
-   organized into 6 phases. Passes range from simple single-line pattern matching (self-move
+2. **Optimization passes** (`passes/`): A pipeline of 14 distinct pass functions
+   organized into 7 phases. Passes range from simple single-line pattern matching (self-move
    elimination) to whole-function analysis (never-read store elimination and
    loop trampoline coalescing).
 
@@ -83,7 +84,11 @@ Phase 4: Loop Trampoline Elimination (once)
     + Post-trampoline cleanup (up to 4 rounds, same as Phase 3)
         |
         v
-Phase 5: Never-Read Store Elimination (once)
+Phase 5: Tail Call Optimization (once)
+    optimize_tail_calls (call+epilogue+ret -> epilogue+jmp)
+        |
+        v
+Phase 5b: Never-Read Store Elimination (once)
     eliminate_never_read_stores (whole-function analysis)
         |
         v
@@ -515,7 +520,36 @@ clean up any dead code exposed.
 
 ---
 
-## Phase 5: Never-Read Store Elimination
+## Phase 5: Tail Call Optimization
+
+Converts `call TARGET; <epilogue>; ret` sequences into `<epilogue>; jmp TARGET`
+(`tail_call.rs`). This eliminates the overhead of creating a new stack frame for
+functions whose last action is calling another function and returning its result.
+
+**Algorithm:**
+1. Track function boundaries via global labels and `.cfi_startproc` directives.
+2. For each function, scan for `leaq offset(%rbp), %reg` or `leaq offset(%rsp), %reg`
+   instructions, which take the address of a stack-allocated local variable.
+3. For each `call` instruction, check if the subsequent instructions form a pure
+   epilogue sequence: callee-save restores (`LoadRbp`), frame teardown
+   (`movq %rbp, %rsp`), `popq %rbp`, and `ret`. No instruction between the call
+   and ret may write to `%rax` (which carries the return value).
+4. If the pattern matches and the function has no lea-of-local instructions:
+   NOP the `call` and replace the `ret` with `jmp TARGET`.
+
+**Safety:** The pass must NOT apply when the called function might receive a pointer
+to a local variable on the current stack frame. After frame teardown, such pointers
+become dangling. This is detected conservatively by checking for any `leaq` with
+`(%rbp)` or `(%rsp)` memory operands in the current function. If found, all tail
+call optimization is suppressed for that function.
+
+This optimization is critical for threaded interpreters (like wasm3) that use
+indirect tail calls (`call *%r10` -> `jmp *%r10`) to dispatch between opcode
+handlers without overflowing the stack.
+
+---
+
+## Phase 5b: Never-Read Store Elimination
 
 A whole-function analysis pass (`dead_code.rs`) that removes stores to stack
 slots that no instruction ever reads.
@@ -637,4 +671,5 @@ hot path.
 | `passes/compare_branch.rs` | ~170 | Phase 2: compare-and-branch fusion |
 | `passes/memory_fold.rs` | ~150 | Phase 2: fold stack loads into ALU memory operands |
 | `passes/loop_trampoline.rs` | ~520 | Phase 4: SSA loop backedge trampoline coalescing |
+| `passes/tail_call.rs` | ~380 | Phase 5: tail call optimization (call+epilogue+ret -> epilogue+jmp) |
 | `passes/callee_saves.rs` | ~160 | Phase 6: unused callee-saved register save/restore elimination |

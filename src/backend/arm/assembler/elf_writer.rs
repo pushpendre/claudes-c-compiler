@@ -34,6 +34,8 @@ pub struct ElfWriter {
     pending_branch_relocs: Vec<PendingReloc>,
     /// Pending symbol differences to resolve after all labels are known
     pending_sym_diffs: Vec<PendingSymDiff>,
+    /// Pending raw expressions to resolve after all labels are known
+    pending_exprs: Vec<PendingExpr>,
 }
 
 struct PendingReloc {
@@ -42,6 +44,14 @@ struct PendingReloc {
     reloc_type: u32,
     symbol: String,
     addend: i64,
+}
+
+/// A pending raw expression to be resolved after all labels are known.
+struct PendingExpr {
+    section: String,
+    offset: u64,
+    expr: String,
+    size: usize,
 }
 
 /// A pending symbol difference to be resolved after all labels are known.
@@ -66,6 +76,7 @@ impl ElfWriter {
             base: ElfWriterBase::new(AARCH64_NOP, 4),
             pending_branch_relocs: Vec::new(),
             pending_sym_diffs: Vec::new(),
+            pending_exprs: Vec::new(),
         }
     }
 
@@ -120,6 +131,75 @@ impl ElfWriter {
         Ok(())
     }
 
+    /// Resolve pending raw expressions by substituting label offsets and evaluating.
+    fn resolve_pending_exprs(&mut self) -> Result<(), String> {
+        let pending = std::mem::take(&mut self.pending_exprs);
+        for pexpr in &pending {
+            // Substitute label names with their offset values
+            let mut expr = pexpr.expr.clone();
+
+            // Collect all label names, sorted longest first to avoid partial replacements
+            let mut label_names: Vec<&String> = self.base.labels.keys().collect();
+            label_names.sort_by(|a, b| b.len().cmp(&a.len()));
+
+            let mut all_resolved = true;
+            for label_name in &label_names {
+                if expr.contains(label_name.as_str()) {
+                    if let Some((_section, offset)) = self.base.labels.get(*label_name) {
+                        expr = expr.replace(label_name.as_str(), &offset.to_string());
+                    } else {
+                        all_resolved = false;
+                    }
+                }
+            }
+
+            if all_resolved {
+                // Try to evaluate the expression
+                if let Ok(val) = crate::backend::asm_expr::parse_integer_expr(&expr) {
+                    if let Some(section) = self.base.sections.get_mut(&pexpr.section) {
+                        let off = pexpr.offset as usize;
+                        match pexpr.size {
+                            1 if off < section.data.len() => {
+                                section.data[off] = val as u8;
+                            }
+                            2 if off + 2 <= section.data.len() => {
+                                section.data[off..off + 2].copy_from_slice(&(val as i16).to_le_bytes());
+                            }
+                            4 if off + 4 <= section.data.len() => {
+                                section.data[off..off + 4].copy_from_slice(&(val as i32).to_le_bytes());
+                            }
+                            8 if off + 8 <= section.data.len() => {
+                                section.data[off..off + 8].copy_from_slice(&val.to_le_bytes());
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Couldn't evaluate - emit as symbol reference
+                    if let Some(section) = self.base.sections.get_mut(&pexpr.section) {
+                        section.relocs.push(ObjReloc {
+                            offset: pexpr.offset,
+                            reloc_type: RelocType::Abs32.elf_type(),
+                            symbol_name: pexpr.expr.clone(),
+                            addend: 0,
+                        });
+                    }
+                }
+            } else {
+                // Unresolved symbols - emit as relocation
+                if let Some(section) = self.base.sections.get_mut(&pexpr.section) {
+                    section.relocs.push(ObjReloc {
+                        offset: pexpr.offset,
+                        reloc_type: RelocType::Abs32.elf_type(),
+                        symbol_name: pexpr.expr.clone(),
+                        addend: 0,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Process all parsed assembly statements.
     pub fn process_statements(&mut self, statements: &[AsmStatement]) -> Result<(), String> {
         for stmt in statements {
@@ -127,6 +207,7 @@ impl ElfWriter {
         }
         // Resolve symbol differences first (needs all labels to be known)
         self.resolve_sym_diffs()?;
+        self.resolve_pending_exprs()?;
         self.resolve_local_branches()?;
         Ok(())
     }
@@ -180,7 +261,20 @@ impl ElfWriter {
                 Ok(())
             }
 
-            AsmDirective::Global(sym) => { self.base.set_global(sym); Ok(()) }
+            AsmDirective::Previous => {
+                self.base.restore_previous_section();
+                Ok(())
+            }
+
+            AsmDirective::Global(sym) => {
+                for s in sym.split(',') {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        self.base.set_global(s);
+                    }
+                }
+                Ok(())
+            }
             AsmDirective::Weak(sym) => { self.base.set_weak(sym); Ok(()) }
             AsmDirective::Hidden(sym) => { self.base.set_visibility(sym, STV_HIDDEN); Ok(()) }
             AsmDirective::Protected(sym) => { self.base.set_visibility(sym, STV_PROTECTED); Ok(()) }
@@ -293,6 +387,17 @@ impl ElfWriter {
                 DataValue::SymbolDiffAddend(sym_a, sym_b, addend) => {
                     self.record_sym_diff(sym_a, sym_b, *addend, size);
                 }
+                DataValue::Expr(expr) => {
+                    let section = self.base.current_section.clone();
+                    let offset = self.base.current_offset();
+                    self.pending_exprs.push(PendingExpr {
+                        section,
+                        offset,
+                        expr: expr.clone(),
+                        size,
+                    });
+                    self.base.emit_placeholder(size);
+                }
             }
         }
         Ok(())
@@ -322,7 +427,7 @@ impl ElfWriter {
                 Ok(())
             }
             Ok(EncodeResult::WordWithReloc { word, reloc }) => {
-                let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l");
+                let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l") || reloc.symbol == ".";
 
                 if is_local {
                     let offset = self.base.current_offset();
@@ -354,9 +459,14 @@ impl ElfWriter {
     /// Resolve local branch labels to PC-relative offsets using AArch64 relocation types.
     fn resolve_local_branches(&mut self) -> Result<(), String> {
         for reloc in &self.pending_branch_relocs {
-            let (target_section, target_offset) = self.base.labels.get(&reloc.symbol)
-                .ok_or_else(|| format!("undefined local label: {}", reloc.symbol))?
-                .clone();
+            // "." means current address (branch to self)
+            let (target_section, target_offset) = if reloc.symbol == "." {
+                (reloc.section.clone(), reloc.offset)
+            } else {
+                self.base.labels.get(&reloc.symbol)
+                    .ok_or_else(|| format!("undefined local label: {}", reloc.symbol))?
+                    .clone()
+            };
 
             if target_section != reloc.section {
                 // Cross-section reference - convert to section symbol + offset

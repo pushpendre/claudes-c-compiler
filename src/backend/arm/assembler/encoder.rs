@@ -312,8 +312,14 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "ldrw" | "ldrsw" => encode_ldrsw(operands),
         "ldrsb" => encode_ldrs(operands, 0b00),
         "ldrsh" => encode_ldrs(operands, 0b01),
-        "ldur" => encode_ldur_stur(operands, true),
-        "stur" => encode_ldur_stur(operands, false),
+        "ldur" => encode_ldur_stur(operands, true, 0b00),
+        "stur" => encode_ldur_stur(operands, false, 0b00),
+        "ldtr" => encode_ldur_stur(operands, true, 0b10),
+        "sttr" => encode_ldur_stur(operands, false, 0b10),
+        "ldtrh" => encode_ldtr_sized(operands, true, 0b01),
+        "sttrh" => encode_ldtr_sized(operands, false, 0b01),
+        "ldtrb" => encode_ldtr_sized(operands, true, 0b00),
+        "sttrb" => encode_ldtr_sized(operands, false, 0b00),
         "ldp" => encode_ldp_stp(operands, true),
         "stp" => encode_ldp_stp(operands, false),
         "ldnp" => encode_ldnp_stnp(operands, true),
@@ -826,16 +832,28 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
 
         // System
         "hint" => encode_hint(operands),
+        "bti" => encode_bti(raw_operands),
         "nop" => Ok(EncodeResult::Word(0xd503201f)),
         "yield" => Ok(EncodeResult::Word(0xd503203f)),
+        "wfe" => Ok(EncodeResult::Word(0xd503205f)),
+        "wfi" => Ok(EncodeResult::Word(0xd503207f)),
+        "sev" => Ok(EncodeResult::Word(0xd503209f)),
+        "sevl" => Ok(EncodeResult::Word(0xd50320bf)),
+        "eret" => Ok(EncodeResult::Word(0xd69f03e0)),
         "clrex" => Ok(EncodeResult::Word(0xd503305f)),
         "dc" => encode_dc(operands, raw_operands),
+        "tlbi" => encode_tlbi(operands, raw_operands),
+        "ic" => encode_ic(raw_operands),
         "dmb" => encode_dmb(operands),
         "dsb" => encode_dsb(operands),
         "isb" => Ok(EncodeResult::Word(0xd5033fdf)),
         "mrs" => encode_mrs(operands),
         "msr" => encode_msr(operands),
         "svc" => encode_svc(operands),
+        "hvc" => encode_hvc(operands),
+        "smc" => encode_smc(operands),
+        "at" => encode_at(operands, raw_operands),
+        "sys" => encode_sys(raw_operands),
         "brk" => encode_brk(operands),
 
         // Bitfield extract/insert
@@ -1098,10 +1116,41 @@ fn encode_mov_wide_imm(rd: u32, is_64: bool, imm: u64) -> Result<EncodeResult, S
     }
 }
 
+/// Resolve `:abs_g0:`, `:abs_g1:`, etc. modifiers for movz/movk.
+/// If the expression is a pure constant, returns Some((imm16, hw)) where
+/// imm16 is the relevant 16-bit chunk and hw is the halfword selector.
+/// If the expression contains a symbol reference, returns None (needs relocation).
+fn resolve_abs_g_modifier(kind: &str, symbol: &str) -> Result<Option<(u32, u32)>, String> {
+    let shift = match kind {
+        "abs_g0" | "abs_g0_nc" => 0,
+        "abs_g1" | "abs_g1_nc" => 16,
+        "abs_g2" | "abs_g2_nc" => 32,
+        "abs_g3" => 48,
+        _ => return Ok(None), // Not an abs_g modifier
+    };
+    let hw = shift / 16;
+    // Try to evaluate the expression as a constant
+    if let Ok(val) = crate::backend::asm_expr::parse_integer_expr(symbol) {
+        let imm16 = ((val as u64) >> shift) as u32 & 0xFFFF;
+        Ok(Some((imm16, hw)))
+    } else {
+        Ok(None) // Contains symbol reference - needs relocation
+    }
+}
+
 fn encode_movz(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
-    let imm = get_imm(operands, 1)?;
     let sf = sf_bit(is_64);
+
+    // Handle :abs_g*: modifiers
+    if let Some(Operand::Modifier { kind, symbol }) = operands.get(1) {
+        if let Some((imm16, hw)) = resolve_abs_g_modifier(kind, symbol)? {
+            let word = (sf << 31) | (0b10100101 << 23) | (hw << 21) | ((imm16 & 0xFFFF) << 5) | rd;
+            return Ok(EncodeResult::Word(word));
+        }
+    }
+
+    let imm = get_imm(operands, 1)?;
 
     // Check for lsl #N shift
     let hw = if operands.len() > 2 {
@@ -1124,8 +1173,17 @@ fn encode_movz(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_movk(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
-    let imm = get_imm(operands, 1)?;
     let sf = sf_bit(is_64);
+
+    // Handle :abs_g*: modifiers
+    if let Some(Operand::Modifier { kind, symbol }) = operands.get(1) {
+        if let Some((imm16, hw)) = resolve_abs_g_modifier(kind, symbol)? {
+            let word = (sf << 31) | (0b11100101 << 23) | (hw << 21) | ((imm16 & 0xFFFF) << 5) | rd;
+            return Ok(EncodeResult::Word(word));
+        }
+    }
+
+    let imm = get_imm(operands, 1)?;
 
     let hw = if operands.len() > 2 {
         if let Some(Operand::Shift { kind, amount }) = operands.get(2) {
@@ -2254,7 +2312,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
 
 /// Encode LDUR/STUR (unscaled immediate offset load/store)
 /// Format: size 111 V 00 opc 0 imm9 00 Rn Rt
-fn encode_ldur_stur(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
+fn encode_ldur_stur(operands: &[Operand], is_load: bool, op2_bits: u32) -> Result<EncodeResult, String> {
     if operands.len() < 2 {
         return Err("ldur/stur requires 2 operands".to_string());
     }
@@ -2293,7 +2351,27 @@ fn encode_ldur_stur(operands: &[Operand], is_load: bool) -> Result<EncodeResult,
 
     let imm9_enc = (imm9 as u32) & 0x1FF;
     let word = (size << 30) | (0b111 << 27) | (v << 26) | (opc << 22)
-        | (imm9_enc << 12) | (rn << 5) | rt;
+        | (imm9_enc << 12) | (op2_bits << 10) | (rn << 5) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode LDTR/STTR with explicit size (for ldtrh, ldtrb, etc.)
+fn encode_ldtr_sized(operands: &[Operand], is_load: bool, size: u32) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err("ldtr/sttr requires 2 operands".to_string());
+    }
+    let (rt, _) = get_reg(operands, 0)?;
+    let opc = if is_load { 0b01u32 } else { 0b00 };
+    let (rn, imm9) = match &operands[1] {
+        Operand::Mem { base, offset } => {
+            let rn = parse_reg_num(base).ok_or("invalid base reg")?;
+            (rn, *offset as i32)
+        }
+        _ => return Err("ldtr/sttr: expected memory operand".to_string()),
+    };
+    let imm9_enc = (imm9 as u32) & 0x1FF;
+    let word = (size << 30) | (0b111 << 27) | (opc << 22)
+        | (imm9_enc << 12) | (0b10 << 10) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
@@ -3037,34 +3115,222 @@ fn encode_mrs(operands: &[Operand]) -> Result<EncodeResult, String> {
     };
 
     let encoding = match sysreg.as_str() {
-        "tpidr_el0" => 0xde82u32, // 11 011 1101 0000 010
+        "sp_el0" => 0xc208u32,
+        "tpidr_el0" => 0xde82,
+        "tpidr_el1" => 0xc684,
+        "tpidr_el2" => 0xe682,
+        "tpidrro_el0" => 0xde83,
+        "tcr_el1" => 0xc102,
+        "ttbr0_el1" => 0xc100,
+        "sctlr_el1" => 0xc080,
+        "mdscr_el1" => 0x8012,
+        "id_aa64mmfr0_el1" => 0xc038,
+        "id_aa64mmfr1_el1" => 0xc039,
+        "cpacr_el1" => 0xc082,
+        "par_el1" => 0xc3a0,
+        "osdlr_el1" => 0x809c,
+        "currentel" => 0xc212,
+        "elr_el1" => 0xc201,
+        "spsr_el1" => 0xc200,
+        "esr_el1" => 0xc290,
+        "far_el1" => 0xc300,
+        "vbar_el1" => 0xc600,
+        "mpidr_el1" => 0xc005,
+        "contextidr_el1" => 0xc681,
+        "mair_el1" => 0xc510,
+        "isr_el1" => 0xc608,
+        "oslsr_el1" => 0x808c,
+        "midr_el1" => 0xc000,
+        "revidr_el1" => 0xc006,
+        "id_aa64pfr0_el1" => 0xc020,
+        "id_aa64pfr1_el1" => 0xc021,
+        "id_aa64isar0_el1" => 0xc030,
+        "id_aa64isar1_el1" => 0xc031,
+        "id_aa64isar2_el1" => 0xc032,
+        "amair_el1" => 0xc518,
+        "hcr_el2" => 0xe088,
+        "cptr_el2" => 0xe08a,
+        "hstr_el2" => 0xe08b,
+        "hacr_el2" => 0xe08f,
+        "vpidr_el2" => 0xe000,
+        "vmpidr_el2" => 0xe005,
+        "actlr_el2" => 0xe081,
+        "elr_el2" => 0xe201,
+        "esr_el2" => 0xe290,
+        "afsr0_el2" => 0xe288,
+        "afsr1_el2" => 0xe289,
+        "far_el2" => 0xe300,
+        "hpfar_el2" => 0xe304,
+        "spsr_el2" => 0xe200,
+        "sctlr_el2" => 0xe080,
+        "mdcr_el2" => 0xe089,
+        "tcr_el2" => 0xe102,
+        "ttbr0_el2" => 0xe100,
+        "vttbr_el2" => 0xe108,
+        "vtcr_el2" => 0xe10a,
+        "vbar_el2" => 0xe600,
+        "mair_el2" => 0xe510,
+        "amair_el2" => 0xe518,
+        "sp_el1" => 0xe208,
+        "pmuserenr_el0" => 0xdcf0,
         "cntfrq_el0" => 0xdf00,
+        "cntpct_el0" => 0xdf01,
+        "cntv_ctl_el0" => 0xdf19,
+        "cntp_ctl_el0" => 0xdf11,
+        "cntv_cval_el0" => 0xdf1c,
+        "cntp_cval_el0" => 0xdf12,
+        "ctr_el0" => 0xd801,
+        "ttbr1_el1" => 0xc101,
+        "cntkctl_el1" => 0xc708,
+        "id_aa64dfr0_el1" => 0xc028,
+        "oslar_el1" => 0x8084,
         "cntvct_el0" => 0xdf02,
-        "dczid_el0" => 0xd807, // S3_3_C0_C0_7: o0=1 011 0000 0000 111
+        "clidr_el1" => 0xc801,
+        "ccsidr_el1" => 0xc800,
+        "csselr_el1" => 0xd000,
+        "id_aa64mmfr2_el1" => 0xc03a,
+        "id_aa64dfr1_el1" => 0xc029,
+        "actlr_el1" => 0xc081,
+        "afsr0_el1" => 0xc288,
+        "afsr1_el1" => 0xc289,
+        "id_pfr0_el1" => 0xc008,
+        "id_pfr1_el1" => 0xc009,
+        "cnthctl_el2" => 0xe708,
+        "cntvoff_el2" => 0xe703,
+        "sp_el2" => 0xf208,
+        "pmcr_el0" => 0xdce0,
+        "pmcntenset_el0" => 0xdce1,
+        "pmovsclr_el0" => 0xdce3,
+        "pmselr_el0" => 0xdce5,
+        "pmccntr_el0" => 0xdce8,
+        "pmxevtyper_el0" => 0xdce9,
+        "pmxevcntr_el0" => 0xdcea,
+        "dczid_el0" => 0xd807,
+        "daif" => 0xda11,
         "fpcr" => 0xda20,
         "fpsr" => 0xda21,
         "nzcv" => 0xda10,
-        _ => return Err(format!("unsupported system register: {}", sysreg)),
+        _ => parse_generic_sysreg(&sysreg)?,
     };
 
     let word = 0xd5300000 | (encoding << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
+/// Parse generic system register name like `s3_0_c1_c0_1` into encoding bits.
+fn parse_generic_sysreg(name: &str) -> Result<u32, String> {
+    // Format: s<op0>_<op1>_c<CRn>_c<CRm>_<op2>
+    let parts: Vec<&str> = name.split('_').collect();
+    if parts.len() == 5 && parts[0].starts_with('s') && parts[2].starts_with('c') && parts[3].starts_with('c') {
+        let op0: u32 = parts[0][1..].parse().map_err(|_| format!("unsupported system register: {}", name))?;
+        let op1: u32 = parts[1].parse().map_err(|_| format!("unsupported system register: {}", name))?;
+        let crn: u32 = parts[2][1..].parse().map_err(|_| format!("unsupported system register: {}", name))?;
+        let crm: u32 = parts[3][1..].parse().map_err(|_| format!("unsupported system register: {}", name))?;
+        let op2: u32 = parts[4].parse().map_err(|_| format!("unsupported system register: {}", name))?;
+        // Encoding: op0[1:0] op1[2:0] CRn[3:0] CRm[3:0] op2[2:0]
+        let enc = ((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 0xF) << 7) | ((crm & 0xF) << 3) | (op2 & 7);
+        Ok(enc)
+    } else {
+        Err(format!("unsupported system register: {}", name))
+    }
+}
+
 fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
-    // MSR system_reg, Xt
     let sysreg = match operands.first() {
         Some(Operand::Symbol(s)) => s.to_lowercase(),
         _ => return Err("msr needs system register name".to_string()),
     };
+
+    // MSR (immediate): msr <pstatefield>, #imm
+    // Encoding: 1101_0101_0000_0 op1[18:16] 0100 CRm[11:8] 101 op2[7:5] 11111
+    // daifset: op1=011, op2=110; daifclr: op1=011, op2=111
+    match sysreg.as_str() {
+        "daifset" => {
+            let imm = get_imm(operands, 1)? as u32 & 0xF;
+            let word = 0xd5034000 | (imm << 8) | (0b110 << 5) | 0x1F;
+            return Ok(EncodeResult::Word(word));
+        }
+        "daifclr" => {
+            let imm = get_imm(operands, 1)? as u32 & 0xF;
+            let word = 0xd5034000 | (imm << 8) | (0b111 << 5) | 0x1F;
+            return Ok(EncodeResult::Word(word));
+        }
+        _ => {}
+    }
+
+    // MSR (register): msr sysreg, Xt
     let (rt, _) = get_reg(operands, 1)?;
 
     let encoding = match sysreg.as_str() {
-        "tpidr_el0" => 0xde82u32,
+        "sp_el0" => 0xc208u32,
+        "tpidr_el0" => 0xde82,
+        "tpidr_el1" => 0xc684,
+        "tpidr_el2" => 0xe682,
+        "tpidrro_el0" => 0xde83,
+        "tcr_el1" => 0xc102,
+        "ttbr0_el1" => 0xc100,
+        "sctlr_el1" => 0xc080,
+        "mdscr_el1" => 0x8012,
+        "cpacr_el1" => 0xc082,
+        "osdlr_el1" => 0x809c,
+        "oslar_el1" => 0x8084,
+        "oslsr_el1" => 0x808c,
+        "elr_el1" => 0xc201,
+        "spsr_el1" => 0xc200,
+        "esr_el1" => 0xc290,
+        "far_el1" => 0xc300,
+        "vbar_el1" => 0xc600,
+        "contextidr_el1" => 0xc681,
+        "mair_el1" => 0xc510,
+        "amair_el1" => 0xc518,
+        "hcr_el2" => 0xe088,
+        "cptr_el2" => 0xe08a,
+        "hstr_el2" => 0xe08b,
+        "elr_el2" => 0xe201,
+        "esr_el2" => 0xe290,
+        "far_el2" => 0xe300,
+        "spsr_el2" => 0xe200,
+        "sctlr_el2" => 0xe080,
+        "mdcr_el2" => 0xe089,
+        "tcr_el2" => 0xe102,
+        "ttbr0_el2" => 0xe100,
+        "vttbr_el2" => 0xe108,
+        "vtcr_el2" => 0xe10a,
+        "vbar_el2" => 0xe600,
+        "mair_el2" => 0xe510,
+        "sp_el1" => 0xe208,
+        "csselr_el1" => 0xd000,
+        "actlr_el1" => 0xc081,
+        "cnthctl_el2" => 0xe708,
+        "cntvoff_el2" => 0xe703,
+        "sp_el2" => 0xf208,
+        "vpidr_el2" => 0xe000,
+        "vmpidr_el2" => 0xe005,
+        "hacr_el2" => 0xe08f,
+        "actlr_el2" => 0xe081,
+        "afsr0_el2" => 0xe288,
+        "afsr1_el2" => 0xe289,
+        "amair_el2" => 0xe518,
+        "hpfar_el2" => 0xe304,
+        "pmcr_el0" => 0xdce0,
+        "pmcntenset_el0" => 0xdce1,
+        "pmovsclr_el0" => 0xdce3,
+        "pmselr_el0" => 0xdce5,
+        "pmccntr_el0" => 0xdce8,
+        "pmxevtyper_el0" => 0xdce9,
+        "pmxevcntr_el0" => 0xdcea,
+        "pmuserenr_el0" => 0xdcf0,
+        "cntv_ctl_el0" => 0xdf19,
+        "cntp_ctl_el0" => 0xdf11,
+        "cntp_cval_el0" => 0xdf12,
+        "cntv_cval_el0" => 0xdf1c,
+        "ttbr1_el1" => 0xc101,
+        "cntkctl_el1" => 0xc708,
+        "daif" => 0xda11,
         "fpcr" => 0xda20,
         "fpsr" => 0xda21,
         "nzcv" => 0xda10,
-        _ => return Err(format!("unsupported system register: {}", sysreg)),
+        _ => parse_generic_sysreg(&sysreg)?,
     };
 
     let word = 0xd5100000 | (encoding << 5) | rt;
@@ -3077,13 +3343,138 @@ fn encode_svc(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
+fn encode_hvc(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let imm = get_imm(operands, 0)?;
+    let word = 0xd4000002 | ((imm as u32 & 0xFFFF) << 5);
+    Ok(EncodeResult::Word(word))
+}
+
+fn encode_ic(raw_operands: &str) -> Result<EncodeResult, String> {
+    let parts: Vec<&str> = raw_operands.splitn(2, ',').collect();
+    let op_name = parts[0].trim().to_lowercase();
+    let rt = if parts.len() > 1 {
+        let reg_str = parts[1].trim();
+        parse_reg_num(reg_str).ok_or_else(|| format!("ic: invalid register '{}'", reg_str))?
+    } else {
+        31 // xzr
+    };
+    let base = match op_name.as_str() {
+        "ialluis" => 0xd508711fu32,
+        "iallu"   => 0xd508751f,
+        "ivau"    => 0xd50b7520,
+        _ => return Err(format!("unsupported ic operation: {}", op_name)),
+    };
+    let word = (base & !0x1F) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
+fn encode_smc(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let imm = get_imm(operands, 0)?;
+    let word = 0xd4000003 | ((imm as u32 & 0xFFFF) << 5);
+    Ok(EncodeResult::Word(word))
+}
+
+fn encode_at(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, String> {
+    let parts: Vec<&str> = raw_operands.splitn(2, ',').collect();
+    let op_name = parts[0].trim().to_lowercase();
+    let rt = if parts.len() > 1 {
+        let reg_str = parts[1].trim();
+        parse_reg_num(reg_str).ok_or_else(|| format!("at: invalid register '{}'", reg_str))?
+    } else {
+        31
+    };
+    // AT encoding: SYS instruction. Base words from GCC:
+    let base = match op_name.as_str() {
+        "s1e1r" => 0xd5087800u32,
+        "s1e1w" => 0xd5087820,
+        "s1e0r" => 0xd5087840,
+        "s1e0w" => 0xd5087860,
+        _ => return Err(format!("unsupported at operation: {}", op_name)),
+    };
+    let word = (base & !0x1F) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode `sys #op1, Cn, Cm, #op2, Xt` instruction.
+fn encode_sys(raw_operands: &str) -> Result<EncodeResult, String> {
+    let parts: Vec<&str> = raw_operands.split(',').map(|s| s.trim()).collect();
+    if parts.len() < 4 {
+        return Err(format!("sys needs at least 4 operands, got: {}", raw_operands));
+    }
+    let op1: u32 = parts[0].trim_start_matches('#').trim().parse()
+        .map_err(|_| format!("sys: invalid op1: {}", parts[0]))?;
+    let crn: u32 = parts[1].trim().to_lowercase().trim_start_matches('c').parse()
+        .map_err(|_| format!("sys: invalid CRn: {}", parts[1]))?;
+    let crm: u32 = parts[2].trim().to_lowercase().trim_start_matches('c').parse()
+        .map_err(|_| format!("sys: invalid CRm: {}", parts[2]))?;
+    let op2: u32 = parts[3].trim_start_matches('#').trim().parse()
+        .map_err(|_| format!("sys: invalid op2: {}", parts[3]))?;
+    let rt = if parts.len() >= 5 {
+        let reg = parts[4].trim().to_lowercase();
+        parse_reg_num(&reg).ok_or_else(|| format!("sys: invalid register: {}", parts[4]))?
+    } else {
+        31 // xzr if no register specified
+    };
+    let word = 0xd5080000 | ((op1 & 7) << 16) | ((crn & 0xF) << 12) | ((crm & 0xF) << 8) | ((op2 & 7) << 5) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
 fn encode_brk(operands: &[Operand]) -> Result<EncodeResult, String> {
     let imm = get_imm(operands, 0)?;
     let word = 0xd4200000 | ((imm as u32 & 0xFFFF) << 5);
     Ok(EncodeResult::Word(word))
 }
 
+fn encode_tlbi(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, String> {
+    let parts: Vec<&str> = raw_operands.splitn(2, ',').collect();
+    let op_name = parts[0].trim().to_lowercase();
+    let rt = if parts.len() > 1 {
+        let reg_str = parts[1].trim();
+        parse_reg_num(reg_str).ok_or_else(|| format!("tlbi: invalid register '{}'", reg_str))?
+    } else {
+        31 // xzr
+    };
+    // TLBI encoding: SYS instruction with fixed fields
+    // Full word from GCC objdump for known ops:
+    let base = match op_name.as_str() {
+        "vmalle1is" => 0xd508831fu32,
+        "vmalle1"   => 0xd508871f,
+        "alle1is"   => 0xd50c839f,
+        "alle1"     => 0xd50c879f,
+        "alle2is"   => 0xd50c831f,
+        "vale1is"   => 0xd50883a0,
+        "vale1"     => 0xd50887a0,
+        "vale2is"   => 0xd50c83a0,
+        "vaae1is"   => 0xd5088360,
+        "vaae1"     => 0xd5088760,
+        "vaale1is"  => 0xd50883e0,
+        "vaale1"    => 0xd50887e0,
+        "vae1is"    => 0xd5088320,
+        "vae1"      => 0xd5088720,
+        "aside1is"  => 0xd5088340,
+        "aside1"    => 0xd5088740,
+        "vmalls12e1is" => 0xd50c83df,
+        "vmalls12e1"   => 0xd50c87df,
+        _ => return Err(format!("unsupported tlbi operation: {}", op_name)),
+    };
+    // Replace Rt field (bits 4:0)
+    let word = (base & !0x1F) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
 /// Encode HINT #imm (system hint instruction)
+fn encode_bti(raw_operands: &str) -> Result<EncodeResult, String> {
+    let target = raw_operands.trim().to_lowercase();
+    let word = match target.as_str() {
+        "" => 0xd503241f,    // bti (no target)
+        "c" => 0xd503245f,   // bti c
+        "j" => 0xd503249f,   // bti j
+        "jc" => 0xd50324df,  // bti jc
+        _ => return Err(format!("unsupported bti target: {}", target)),
+    };
+    Ok(EncodeResult::Word(word))
+}
+
 fn encode_hint(operands: &[Operand]) -> Result<EncodeResult, String> {
     let imm = get_imm(operands, 0)?;
     // HINT: 11010101 00000011 0010 CRm op2 11111
@@ -4929,6 +5320,24 @@ fn encode_dc(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, S
     if op.contains("civac") {
         // DC CIVAC: sys #3, c7, c14, #1, Xt
         let word = 0xd50b7e20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+    if op.contains("cvac") {
+        // DC CVAC: sys #3, c7, c10, #1, Xt
+        let word = 0xd50b7a20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+    if op.contains("cvap") {
+        // DC CVAP: sys #3, c7, c12, #1, Xt
+        let word = 0xd50b7c20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+    if op.contains("cvau") {
+        let word = 0xd50b7b20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+    if op.contains("ivac") {
+        let word = 0xd5087620 | rt;
         return Ok(EncodeResult::Word(word));
     }
     if op.contains("zva") {
