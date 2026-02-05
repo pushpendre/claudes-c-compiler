@@ -1,0 +1,11 @@
+Split all four assembler encoder.rs files into focused submodules.
+
+The assembler encoder files are the largest in the codebase:
+- x86/assembler/encoder.rs: 6229 lines
+- arm/assembler/encoder.rs: 6164 lines
+- i686/assembler/encoder.rs: 3475 lines
+- riscv/assembler/encoder.rs: 2649 lines
+
+Each will be split into submodules organized by instruction category
+(e.g., gp_integer, sse/neon/vector, system, etc.) while keeping the
+dispatch function in the main module.
