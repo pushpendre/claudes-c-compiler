@@ -673,7 +673,14 @@ pub(super) fn emit_executable(
                     let st_info = (stb << 4) | stt;
                     if ds+5 < out.len() { out[ds+4] = st_info; out[ds+5] = 0; }
                     w16(&mut out, ds+6, 1);
-                    w64(&mut out, ds+8, gsym.value);
+                    // For TLS symbols, the dynsym value must be the offset within
+                    // the TLS segment, not the virtual address.
+                    let sym_val = if stt == STT_TLS && tls_addr != 0 {
+                        gsym.value - tls_addr
+                    } else {
+                        gsym.value
+                    };
+                    w64(&mut out, ds+8, sym_val);
                     w64(&mut out, ds+16, gsym.size);
                 } else {
                     let bind = gsym.info >> 4;

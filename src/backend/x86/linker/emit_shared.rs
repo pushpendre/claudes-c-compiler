@@ -3,7 +3,7 @@
 //! Emits an ELF64 shared library (ET_DYN) with PIC relocations, PLT stubs,
 //! `.dynamic` section, and GNU hash tables.
 
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 
 use super::elf::*;
 use super::types::{GlobalSymbol, PAGE_SIZE};
@@ -84,8 +84,10 @@ pub(super) fn emit_shared_library(
     }
 
     // Collect symbols that need GOT entries (GOTPCREL references).
-    // For undefined symbols, these need R_X86_64_GLOB_DAT relocations.
+    // For undefined symbols, these need R_X86_64_GLOB_DAT relocations
+    // (or R_X86_64_TPOFF64 for TLS symbols referenced via GOTTPOFF).
     let mut got_needed_names: Vec<String> = Vec::new();
+    let mut tls_got_names: HashSet<String> = HashSet::new();
     for obj in objects.iter() {
         for sec_relas in &obj.relocations {
             for rela in sec_relas {
@@ -101,6 +103,10 @@ pub(super) fn emit_shared_library(
                         if !got_needed_names.contains(&sym.name) {
                             got_needed_names.push(sym.name.clone());
                         }
+                        // Track TLS symbols for proper dynamic relocation emission
+                        if sym.sym_type() == STT_TLS {
+                            tls_got_names.insert(sym.name.clone());
+                        }
                     }
                     _ => {}
                 }
@@ -110,8 +116,11 @@ pub(super) fn emit_shared_library(
     // Ensure GOT-referenced undefined symbols are in globals for dynsym
     for name in &got_needed_names {
         if !globals.contains_key(name) {
+            // Use STT_TLS for TLS symbols so the dynamic symbol table has the
+            // correct type, allowing the dynamic linker to resolve them properly.
+            let stype = if tls_got_names.contains(name) { STT_TLS } else { STT_FUNC };
             globals.insert(name.clone(), GlobalSymbol {
-                value: 0, size: 0, info: (STB_GLOBAL << 4) | STT_FUNC,
+                value: 0, size: 0, info: (STB_GLOBAL << 4) | stype,
                 defined_in: None, from_lib: None, section_idx: SHN_UNDEF,
                 is_dynamic: true, copy_reloc: false, lib_sym_value: 0, version: None,
                 plt_idx: None, got_idx: None,
@@ -664,7 +673,15 @@ pub(super) fn emit_shared_library(
                 // shndx=1: marks symbol as defined (non-UNDEF). The dynamic linker
                 // only checks UNDEF vs defined, not the actual section index.
                 w16(&mut out, ds+6, 1);
-                w64(&mut out, ds+8, gsym.value);
+                // For TLS symbols, the value must be the offset within the TLS segment,
+                // not the virtual address. The dynamic linker uses this offset to
+                // compute the thread-pointer-relative address.
+                let sym_val = if (gsym.info & 0xf) == STT_TLS && tls_mem_size > 0 {
+                    gsym.value - tls_addr
+                } else {
+                    gsym.value
+                };
+                w64(&mut out, ds+8, sym_val);
                 w64(&mut out, ds+16, gsym.size);
             } else {
                 // Undefined symbol (from -l dependencies or weak refs)
@@ -746,10 +763,12 @@ pub(super) fn emit_shared_library(
     for (i, name) in got_needed.iter().enumerate() {
         let gea = got_addr + i as u64 * 8;
         got_sym_addrs.insert(name.clone(), gea);
-        // Fill GOT with resolved symbol value
-        if let Some(gsym) = globals.get(name) {
-            if gsym.defined_in.is_some() && !gsym.is_dynamic {
-                w64(&mut out, (got_offset + i as u64 * 8) as usize, gsym.value);
+        // Fill GOT with resolved symbol value (skip TLS - handled in reloc loop below)
+        if !tls_got_names.contains(name) {
+            if let Some(gsym) = globals.get(name) {
+                if gsym.defined_in.is_some() && !gsym.is_dynamic {
+                    w64(&mut out, (got_offset + i as u64 * 8) as usize, gsym.value);
+                }
             }
         }
     }
@@ -758,19 +777,35 @@ pub(super) fn emit_shared_library(
     let globals_snap: HashMap<String, GlobalSymbol> = globals.clone();
     let mut rela_dyn_entries: Vec<(u64, u64)> = Vec::new(); // (offset, value) for RELATIVE relocs
     let mut glob_dat_entries: Vec<(u64, String)> = Vec::new(); // (offset, sym_name) for GLOB_DAT relocs
+    let mut tpoff64_entries: Vec<(u64, String)> = Vec::new(); // (offset, sym_name) for R_X86_64_TPOFF64 relocs
     let mut abs64_entries: Vec<(u64, String, i64)> = Vec::new(); // (offset, sym_name, addend) for R_X86_64_64 relocs
 
     // Add RELATIVE entries for GOT entries that point to local symbols,
-    // and GLOB_DAT entries for GOT entries that point to external symbols
+    // GLOB_DAT entries for GOT entries that point to external non-TLS symbols,
+    // and TPOFF64 entries for GOT entries that point to external TLS symbols.
     for (i, name) in got_needed.iter().enumerate() {
         let gea = got_addr + i as u64 * 8;
+        let is_tls = tls_got_names.contains(name);
         if let Some(gsym) = globals_snap.get(name) {
             if gsym.defined_in.is_some() && !gsym.is_dynamic && gsym.section_idx != SHN_UNDEF {
-                rela_dyn_entries.push((gea, gsym.value));
+                if is_tls {
+                    // Locally-defined TLS symbol: compute TPOFF and store in GOT
+                    let tpoff = (gsym.value as i64 - tls_addr as i64) - tls_mem_size as i64;
+                    w64(&mut out, (got_offset + i as u64 * 8) as usize, tpoff as u64);
+                    // No dynamic relocation needed - statically resolved
+                } else {
+                    rela_dyn_entries.push((gea, gsym.value));
+                }
+            } else if is_tls {
+                // External TLS symbol - needs R_X86_64_TPOFF64 dynamic relocation
+                tpoff64_entries.push((gea, name.clone()));
             } else {
-                // External symbol - needs GLOB_DAT
+                // External non-TLS symbol - needs GLOB_DAT
                 glob_dat_entries.push((gea, name.clone()));
             }
+        } else if is_tls {
+            // Unknown TLS symbol - needs R_X86_64_TPOFF64
+            tpoff64_entries.push((gea, name.clone()));
         } else {
             // Unknown symbol - needs GLOB_DAT
             glob_dat_entries.push((gea, name.clone()));
@@ -852,12 +887,24 @@ pub(super) fn emit_shared_library(
                     }
                     R_X86_64_PC64 => { w64(&mut out, fp, (s as i64 + a - p as i64) as u64); }
                     R_X86_64_GOTTPOFF => {
-                        // TLS: try to find GOT entry
+                        // TLS Initial-Exec: point the instruction at the GOT entry.
+                        // For locally-defined TLS symbols, the GOT entry was already
+                        // filled with the static TPOFF value above. For external TLS
+                        // symbols, the dynamic linker fills the GOT slot at load time
+                        // via R_X86_64_TPOFF64.
                         if let Some(&gea) = got_sym_addrs.get(&sym.name) {
-                            let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
-                            w64(&mut out, (got_offset + (gea - got_addr)) as usize, tpoff as u64);
+                            // Only fill the GOT entry statically for locally-defined symbols
+                            let is_local_tls = if let Some(g) = globals_snap.get(&sym.name) {
+                                g.defined_in.is_some() && !g.is_dynamic && g.section_idx != SHN_UNDEF
+                            } else { false };
+                            if is_local_tls {
+                                let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
+                                w64(&mut out, (got_offset + (gea - got_addr)) as usize, tpoff as u64);
+                            }
+                            // Patch the instruction to reference the GOT entry
                             w32(&mut out, fp, (gea as i64 + a - p as i64) as u32);
                         } else {
+                            // No GOT entry: IE-to-LE relaxation for locally-resolved symbols
                             let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
                             if fp >= 2 && fp + 4 <= out.len() && out[fp-2] == 0x8b {
                                 let modrm = out[fp-1];
@@ -883,7 +930,7 @@ pub(super) fn emit_shared_library(
 
     // Write .rela.dyn entries
     let relative_count = rela_dyn_entries.len();
-    let total_rela_count = relative_count + glob_dat_entries.len() + abs64_entries.len();
+    let total_rela_count = relative_count + glob_dat_entries.len() + tpoff64_entries.len() + abs64_entries.len();
     let rela_dyn_size = total_rela_count as u64 * 24;
     let mut rd = rela_dyn_offset as usize;
     // First: R_X86_64_RELATIVE entries (type 8, no symbol)
@@ -901,6 +948,18 @@ pub(super) fn emit_shared_library(
         if rd + 24 <= out.len() {
             w64(&mut out, rd, *rel_offset);         // r_offset = GOT entry address
             w64(&mut out, rd+8, (si << 32) | R_X86_64_GLOB_DAT as u64);
+            w64(&mut out, rd+16, 0);                 // r_addend = 0
+            rd += 24;
+        }
+    }
+    // Then: R_X86_64_TPOFF64 entries (type 18, with symbol index) for TLS GOT entries.
+    // The dynamic linker fills these GOT slots with the thread-pointer offset of the
+    // TLS symbol, so that `%fs:0 + GOT[n]` gives the correct address.
+    for (rel_offset, sym_name) in &tpoff64_entries {
+        let si = dyn_sym_names.iter().position(|n| n == sym_name).map(|j| j + 1).unwrap_or(0) as u64;
+        if rd + 24 <= out.len() {
+            w64(&mut out, rd, *rel_offset);         // r_offset = GOT entry address
+            w64(&mut out, rd+8, (si << 32) | R_X86_64_TPOFF64 as u64);
             w64(&mut out, rd+16, 0);                 // r_addend = 0
             rd += 24;
         }

@@ -284,3 +284,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | pngquant | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
 | libunistring | PASS | TODO | TODO | TODO | Fixed: (1) preprocessor va_list/gnuc_va_list typedef text injection via pending_injections broke when stdarg.h included from nested headers (typedef emitted inside array initializer); moved to sema seed_builtin_typedefs. (2) x87 is_inf() mask 0x3FFF... stripped QNaN bit 62, making NaN look like infinity in constant folding (0.0L/0.0L); fixed with exact mantissa==0x8000... check. |
 | libsoxr | PASS (build script fix) | PASS | PASS | PASS | Fixed x86: (1) peephole copy propagation rewrote fnstsw %ax to invalid register (added x87 FPU status/control instrs to has_implicit_reg_usage), (2) added missing AVX double-precision intrinsics to avxintrin.h. Build script fix: disable SIMD engines (-DWITH_CR32S=OFF -DWITH_CR64S=OFF) due to pffft AVX convolution codegen crash |
+| libsodium | PASS | TODO | TODO | TODO | Passes x86 (was previously failing, now fixed by other improvements) |
+| libsrtp | PASS | TODO | TODO | TODO | Passes x86 (was previously failing, now fixed by other improvements) |
+| libmicrohttpd | PASS | TODO | TODO | TODO | Passes x86 (was previously failing, now fixed by other improvements) |
+| haproxy | PASS | TODO | TODO | TODO | Passes x86 (was previously failing, now fixed by other improvements) |
