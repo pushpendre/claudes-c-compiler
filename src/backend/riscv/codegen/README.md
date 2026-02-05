@@ -57,7 +57,7 @@ All files live under `src/backend/riscv/codegen/`.
 | `prologue.rs` | Stack space calculation, register allocator invocation, prologue/epilogue emission (small-frame, large-frame, stack-probing paths), parameter classification and storage, variadic register save area setup. |
 | `calls.rs` | Outgoing call ABI: `CallAbiConfig` for LP64D, stack argument marshalling, GP/FP register argument staging (three-phase strategy using t3/t4/t5), F128 and i128 register-pair argument loading, call instruction emission, result retrieval. |
 | `memory.rs` | Load, store, and memcpy operations. Slot addressing (direct s0-relative, indirect through pointer, over-aligned alloca). GEP (get-element-pointer) with constant offsets (variable-offset GEP uses the shared trait default in `traits.rs`). Dynamic stack allocation helpers (`alloca` round-up, sp manipulation). |
-| `alu.rs` | Integer arithmetic: binary operations (`add`/`addw`, `sub`/`subw`, `mul`/`mulw`, `div`/`divw`/`divu`/`divuw`, `rem`/`remw`/`remu`/`remuw`, shifts, bitwise), unary negation, bitwise NOT, i128 copy. Selects 32-bit `*w` instruction variants for I32/U32 types. |
+| `alu.rs` | Integer arithmetic: binary operations (`add`/`addw`, `sub`/`subw`, `mul`/`mulw`, `div`/`divw`/`divu`/`divuw`, `rem`/`remw`/`remu`/`remuw`, shifts, bitwise), unary negation, bitwise NOT, float negation (`fneg.{s,d}`), i128 copy. Selects 32-bit `*w` instruction variants for I32/U32 types. |
 | `float_ops.rs` | Floating-point binary operations (`fadd`, `fsub`, `fmul`, `fdiv`) for F32 and F64, using `fmv.w.x`/`fmv.d.x` (GP-to-FP) and `fmv.x.w`/`fmv.x.d` (FP-to-GP) to move between register files. F128 binary ops dispatch to soft-float libcalls. F128 negation (sign-bit flip). |
 | `comparison.rs` | Integer comparisons (via `slt`/`sltu`/`seqz`/`snez`), float comparisons (via `feq`/`flt`/`fle`), fused compare-and-branch (inverted branch + jump), select (`beqz`-based conditional move), F128 comparisons via libcalls. |
 | `cast_ops.rs` | Type conversions: integer widening/narrowing via `slli`/`srai`/`srli`/`andi`, float-to-int via `fcvt.l.d`/`fcvt.lu.d`, int-to-float via `fcvt.d.l`/`fcvt.s.l`, float-to-float via `fcvt.d.s`/`fcvt.s.d`, U32-to-I32 sign extension. |
@@ -333,7 +333,7 @@ offsets rather than sp-relative, since sp may have been modified at runtime.
 
 ### Over-aligned Allocas
 
-Allocas with alignment greater than 8 bytes get extra padding in their stack
+Allocas with alignment greater than 16 bytes get extra padding in their stack
 slot. The address is dynamically aligned at use sites:
 
 ```asm
@@ -395,7 +395,7 @@ Memory operations resolve value addresses through three `SlotAddr` variants:
 |---------|---------|----------------|
 | `Direct(slot)` | Value lives at a known s0-relative offset | `ld/sd t0, offset(s0)` |
 | `Indirect(slot)` | Slot holds a pointer; must dereference | `ld t5, offset(s0); ld/sd t0, 0(t5)` |
-| `OverAligned(slot, id)` | Alloca with > 8-byte alignment | Dynamic alignment then `ld/sd t0, 0(t5)` |
+| `OverAligned(slot, id)` | Alloca with > 16-byte alignment | Dynamic alignment then `ld/sd t0, 0(t5)` |
 
 For loads/stores with constant offsets (e.g., struct field access), the
 offset is folded into the slot offset for Direct addressing, or added to
