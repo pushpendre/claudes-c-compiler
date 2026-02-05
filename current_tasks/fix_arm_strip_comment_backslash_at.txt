@@ -1,0 +1,9 @@
+Fix ARM assembler strip_comment regression: backslash-@ treated as comment
+
+The strip_comment() function in parser.rs treats @ as a GAS line comment character.
+When called before macro expansion (in the presplit phase), it incorrectly strips
+\@ (GAS macro invocation counter) and everything after it from labels like
+.Lventry_start\@: and .Ldcache_op\@:, leaving broken labels like .Lventry_start\
+that fail to parse.
+
+Fix: skip @ when preceded by backslash, since \@ is a macro parameter, not a comment.
