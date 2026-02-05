@@ -452,6 +452,36 @@ impl ElfWriter {
     /// R_RISCV_RELAX ELF relocation type
     const R_RISCV_RELAX: u32 = 51;
 
+    /// R_RISCV_ALIGN ELF relocation type — marks alignment padding so the
+    /// linker can adjust it after relaxation shrinks preceding instructions.
+    const R_RISCV_ALIGN: u32 = 43;
+
+    /// Align the current section and emit an R_RISCV_ALIGN relocation if
+    /// relaxation is enabled. The relocation is placed at the start of the
+    /// NOP padding with an addend equal to the padding size, so the linker
+    /// can re-pad after relaxation changes code size.
+    fn emit_align_with_reloc(&mut self, align_bytes: u64) {
+        if align_bytes <= 1 {
+            return;
+        }
+        let offset_before = self.base.current_offset();
+        self.base.align_to(align_bytes);
+        let offset_after = self.base.current_offset();
+        let padding = offset_after - offset_before;
+        if padding > 0 && !self.no_relax {
+            // Emit R_RISCV_ALIGN at the start of the padding region.
+            // The addend is the number of padding bytes the assembler inserted.
+            if let Some(s) = self.base.sections.get_mut(&self.base.current_section) {
+                s.relocs.push(ObjReloc {
+                    offset: offset_before,
+                    reloc_type: Self::R_RISCV_ALIGN,
+                    symbol_name: String::new(),
+                    addend: padding as i64,
+                });
+            }
+        }
+    }
+
     /// Process all parsed assembly statements.
     pub fn process_statements(&mut self, statements: &[AsmStatement]) -> Result<(), String> {
         let statements = resolve_numeric_label_refs(statements);
@@ -602,12 +632,12 @@ impl ElfWriter {
             Directive::Align(val) => {
                 // RISC-V .align N means 2^N bytes (same as .p2align)
                 let bytes = 1u64 << val;
-                self.base.align_to(bytes);
+                self.emit_align_with_reloc(bytes);
                 Ok(())
             }
 
             Directive::Balign(val) => {
-                self.base.align_to(*val);
+                self.emit_align_with_reloc(*val);
                 Ok(())
             }
 

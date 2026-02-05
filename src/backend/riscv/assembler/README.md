@@ -423,6 +423,10 @@ The writer performs several bookkeeping tasks:
   `R_RISCV_RELAX` relocation is emitted alongside `PCREL_HI20`, `CALL_PLT`,
   `TPREL_*`, and `GOT_HI20` relocations to allow the linker to perform
   relaxation optimizations (unless suppressed by `.option norelax`).
+  Additionally, `R_RISCV_ALIGN` relocations are emitted at `.align`,
+  `.balign`, and `.p2align` directives when relaxation is enabled. These
+  mark NOP padding regions so the linker can re-pad after relaxation
+  shrinks preceding instructions, maintaining correct alignment.
 
 - **ELF flags**: Default is `EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC` (0x05).
   The float ABI can be overridden via the `-mabi=` flag passed to
