@@ -1,6 +1,0 @@
-Fixing Wren project for x86 target.
-3 tests fail due to 5-second timeout in Wren's test.py runner.
-Our compiled code is slower than GCC, causing GC stress tests and RNG tests to exceed the timeout.
-Tests produce correct output when run without timeout.
-Fix: modify check script to increase timeout in test.py before running tests.
-Started 2026-02-05.
