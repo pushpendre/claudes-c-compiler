@@ -1,0 +1,17 @@
+Split the oversized linker files into smaller, well-organized modules.
+
+Primary targets (all 2000+ lines):
+1. riscv/linker/link.rs (3,849 lines) - 2 monolithic functions of 2319 and 1454 lines
+2. arm/linker/mod.rs (3,355 lines) - several large functions
+3. i686/linker/mod.rs (3,254 lines) - already partially split but main file still huge
+4. x86/linker/mod.rs (3,064 lines) - several large functions
+5. linker_common.rs (2,137 lines) - shared linker code
+
+Approach:
+- Extract ELF emission code into separate files (emit_exec.rs, emit_shared.rs)
+- Extract helper functions (plt_got, gc_sections, symbol resolution)
+- Decompose RISC-V's monolithic functions into smaller reusable pieces
+- Split linker_common.rs into logical modules
+- Add README.md files documenting the linker architecture
+
+Started: 2026-02-05
