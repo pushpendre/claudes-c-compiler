@@ -257,3 +257,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | ECL     | PASS | TODO | TODO | TODO | Fixed x86/i686 asm: jmp/jcc @PLT labels now strip suffix and use PLT32 relocation instead of PC32 with @PLT in symbol name |
 | nelua   | PASS | TODO | TODO | TODO | Fixed: added bundled x86intrin.h (rdtsc/rdtscp/bsf/bsr/bswap/rotate intrinsics) to prevent fallthrough to GCC's vector-type-heavy header |
 | SDL2    | PASS | TODO | TODO | TODO | Fixed: (1) complete MMX intrinsics in mmintrin.h, (2) _mm_packs_epi16 SSE2 intrinsic (packsswb128), (3) _mm_stream_ps in xmmintrin.h, (4) peephole optimizer incorrectly eliminating pushq/popq pairs across pushfq/popfq |
+| s6      | PASS | TODO | TODO | TODO | Fixed x86: added IFUNC/IRELATIVE support to x86-64 static linker (IPLT stubs, IFUNC GOT, R_X86_64_IRELATIVE relocations); glibc memcpy/memset/strcmp are IFUNC symbols resolved at startup |

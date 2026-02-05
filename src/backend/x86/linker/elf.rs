@@ -12,7 +12,7 @@ pub use crate::backend::elf::{
     SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_GNU_HASH, SHT_GNU_VERSYM, SHT_GNU_VERNEED,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
     STB_GLOBAL, STB_WEAK,
-    STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS,
+    STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS, STT_GNU_IFUNC,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
     PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_PHDR, PT_TLS, PT_GNU_STACK, PT_GNU_RELRO,
     PF_X, PF_W, PF_R,
@@ -43,6 +43,7 @@ pub const R_X86_64_TPOFF32: u32 = 23;
 pub const R_X86_64_PC64: u32 = 24;
 pub const R_X86_64_GOTPCRELX: u32 = 41;
 pub const R_X86_64_REX_GOTPCRELX: u32 = 42;
+pub const R_X86_64_IRELATIVE: u32 = 37;
 
 // DT_* constants now in shared module - re-export them
 pub use crate::backend::elf::{

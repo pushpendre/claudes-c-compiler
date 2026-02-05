@@ -1,2 +1,0 @@
-Fixing s6 project for x86. The s6-tai64n binary segfaults when compiled with ccc-x86 standalone mode.
-GCC compiles and tests pass fine. Investigating codegen/linker bug.
