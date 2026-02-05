@@ -1,2 +1,2 @@
-Fixing diffutils project for x86 target. Diagnosing build/test failures and fixing compiler bugs as needed.
-Started 2026-02-05.
+Fixing diffutils: LDBL_MAX is one ULP too small (0xf.ffffffffffffffep+16380 instead of 0xf.fffffffffffffffp+16380).
+This causes test-float to fail because LDBL_MAX + LDBL_MAX/2^64 should overflow to inf but our too-small LDBL_MAX produces a finite result one above max.
