@@ -108,7 +108,7 @@ Defined in `mod.rs`.  Called when the built-in assembler is selected
 | File | Lines | Role |
 |------|-------|------|
 | `mod.rs` | ~30 | Public `assemble()` entry point; module wiring |
-| `parser.rs` | ~1900 | AT&T syntax parser with `.rept` expansion, GAS macro processing, expression evaluation; produces `Vec<AsmItem>` |
+| `parser.rs` | ~2200 | AT&T syntax parser with `.rept` expansion, GAS macro processing, expression evaluation; produces `Vec<AsmItem>` |
 | `encoder/` | ~6260 | x86-64 instruction encoder (split into focused submodules, see below) |
 | `elf_writer.rs` | ~90 | Thin x86-64 adapter: implements `X86Arch` trait for `ElfWriterCore<X86_64Arch>`, wiring architecture constants and instruction encoding |
 
@@ -129,7 +129,7 @@ The instruction encoder is organized as a directory of focused submodules:
 
 The bulk of the ELF building logic (section management, jump relaxation,
 deferred evaluation, ELF serialization) lives in the shared
-`backend::elf_writer_common` module (~1600 lines), parameterized by the
+`backend::elf_writer_common` module (~1700 lines), parameterized by the
 `X86Arch` trait.  Expression evaluation for deferred `.skip` directives uses
 the shared `backend::asm_expr` module (~410 lines).  C-comment stripping,
 semicolon splitting, and some preprocessing helpers come from
@@ -138,7 +138,7 @@ semicolon splitting, and some preprocessing helpers come from
 
 ## Key Data Structures
 
-### `AsmItem` enum (32 variants) -- parser.rs
+### `AsmItem` enum (33 variants) -- parser.rs
 
 The fundamental intermediate representation.  Each non-empty line of assembly
 maps to one `AsmItem` variant:
@@ -176,6 +176,7 @@ AsmItem
   |-- Org(String, i64)                 .org expression, fill
   |-- Incbin { path, skip, count }     .incbin "file"[, skip[, count]]
   |-- Symver(String, String)           .symver name, alias@@VERSION
+  |-- CodeMode(u8)                     .code16 / .code32 / .code64
   |-- Empty                            blank/comment-only line
 ```
 
@@ -713,6 +714,7 @@ provided flags/type instead of these defaults.
 | `.file` | `.file N "name"` | Debug file directive (parsed, ignored) |
 | `.loc` | `.loc filenum line col` | Debug location (parsed, ignored) |
 | `.option` | `.option ...` | RISC-V directive (ignored on x86) |
+| `.code16` / `.code32` / `.code64` | `.code16` | Set code generation mode (16/32/64-bit) |
 
 
 ## Key Design Decisions and Trade-offs
