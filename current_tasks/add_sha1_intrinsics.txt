@@ -1,0 +1,8 @@
+Add missing SHA-1 x86 intrinsics to shaintrin.h
+
+binutils build fails because _mm_sha1msg1_epu32, _mm_sha1msg2_epu32,
+_mm_sha1nexte_epu32, and _mm_sha1rnds4_epu32 are missing from shaintrin.h.
+
+These are the SHA-1 counterpart to the existing SHA-256 intrinsics.
+
+Started: 2026-02-05
