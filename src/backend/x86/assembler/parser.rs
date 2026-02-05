@@ -550,32 +550,63 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             // .fill repeat, size, value
             // Emits repeat copies of value, each size bytes wide (LE, max 8).
             let parts: Vec<&str> = args.splitn(3, ',').collect();
-            let repeat = parse_integer_expr(parts[0].trim())
-                .map_err(|_| format!("bad .fill repeat: {}", parts[0].trim()))? as u64;
-            let size = if parts.len() > 1 {
-                parse_integer_expr(parts[1].trim())
-                    .map_err(|_| format!("bad .fill size: {}", parts[1].trim()))? as u64
-            } else {
-                1
-            };
-            let value = if parts.len() > 2 {
-                parse_integer_expr(parts[2].trim())
-                    .map_err(|_| format!("bad .fill value: {}", parts[2].trim()))? as u64
-            } else {
-                0
-            };
-            let total_bytes = repeat * size.min(8);
-            if value == 0 {
-                Ok(AsmItem::Zero(total_bytes as u32))
-            } else {
-                let mut data = Vec::with_capacity(total_bytes as usize);
-                let value_bytes = value.to_le_bytes();
-                for _ in 0..repeat {
-                    for j in 0..size.min(8) as usize {
-                        data.push(value_bytes[j]);
+            let repeat_str = parts[0].trim();
+            match parse_integer_expr(repeat_str) {
+                Ok(repeat) => {
+                    let repeat = repeat as u64;
+                    let size = if parts.len() > 1 {
+                        parse_integer_expr(parts[1].trim())
+                            .map_err(|_| format!("bad .fill size: {}", parts[1].trim()))? as u64
+                    } else {
+                        1
+                    };
+                    let value = if parts.len() > 2 {
+                        parse_integer_expr(parts[2].trim())
+                            .map_err(|_| format!("bad .fill value: {}", parts[2].trim()))? as u64
+                    } else {
+                        0
+                    };
+                    let total_bytes = repeat * size.min(8);
+                    if value == 0 {
+                        Ok(AsmItem::Zero(total_bytes as u32))
+                    } else {
+                        let mut data = Vec::with_capacity(total_bytes as usize);
+                        let value_bytes = value.to_le_bytes();
+                        for _ in 0..repeat {
+                            for j in 0..size.min(8) as usize {
+                                data.push(value_bytes[j]);
+                            }
+                        }
+                        Ok(AsmItem::Ascii(data))
                     }
                 }
-                Ok(AsmItem::Ascii(data))
+                Err(_) => {
+                    // Repeat expression contains labels/symbols - defer to ELF writer.
+                    // Parse size and value as constants (these are always simple integers).
+                    let size = if parts.len() > 1 {
+                        parse_integer_expr(parts[1].trim())
+                            .map_err(|_| format!("bad .fill size: {}", parts[1].trim()))? as u64
+                    } else {
+                        1
+                    };
+                    let value = if parts.len() > 2 {
+                        parse_integer_expr(parts[2].trim())
+                            .map_err(|_| format!("bad .fill value: {}", parts[2].trim()))? as u8
+                    } else {
+                        0
+                    };
+                    if size == 1 {
+                        // size=1: equivalent to .skip repeat, value
+                        Ok(AsmItem::SkipExpr(repeat_str.to_string(), value))
+                    } else if value == 0 {
+                        // value=0: equivalent to .skip (repeat * size), 0
+                        // Wrap expression: (repeat_expr) * size
+                        let expr = format!("({}) * {}", repeat_str, size);
+                        Ok(AsmItem::SkipExpr(expr, 0))
+                    } else {
+                        Err(format!("bad .fill repeat: {}: deferred .fill with size > 1 and non-zero value not supported", repeat_str))
+                    }
+                }
             }
         }
         ".asciz" | ".string" => {

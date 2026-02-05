@@ -232,15 +232,24 @@ fn tokenize_expr(expr: &str) -> Result<Vec<ExprToken>, String> {
                 } else {
                     while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
                 }
-                let num_str = &expr[start..i];
-                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    i64::from_str_radix(&num_str[2..], 16)
-                        .map_err(|_| format!("bad hex number: {}", num_str))?
+                // Check for numeric label references: digits followed by 'b' or 'f'
+                // (e.g., "0b" = backward ref to label 0, "1f" = forward ref to label 1)
+                if i < bytes.len() && (bytes[i] == b'b' || bytes[i] == b'f')
+                    && (i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_alphanumeric())
+                {
+                    i += 1; // include the 'b' or 'f' suffix
+                    tokens.push(ExprToken::Symbol(expr[start..i].to_string()));
                 } else {
-                    num_str.parse::<i64>()
-                        .map_err(|_| format!("bad number: {}", num_str))?
-                };
-                tokens.push(ExprToken::Number(val));
+                    let num_str = &expr[start..i];
+                    let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
+                        i64::from_str_radix(&num_str[2..], 16)
+                            .map_err(|_| format!("bad hex number: {}", num_str))?
+                    } else {
+                        num_str.parse::<i64>()
+                            .map_err(|_| format!("bad number: {}", num_str))?
+                    };
+                    tokens.push(ExprToken::Number(val));
+                }
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'.' => {
                 let start = i;
@@ -838,7 +847,14 @@ impl<A: X86Arch> ElfWriterCore<A> {
         skips.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).reverse());
 
         for (sec_idx, offset, expr, fill) in &skips {
-            let val = self.evaluate_expr(expr)?;
+            // Temporarily insert "." (current position) into label_positions so
+            // expressions like "0b + 16 - ." can reference the directive's offset.
+            self.label_positions.insert(".".to_string(), (*sec_idx, *offset as u64));
+            // Pre-resolve numeric label references (e.g. "0b", "1f") in the expression
+            let resolved_expr = self.resolve_numeric_labels_in_expr(expr, *offset as u64, *sec_idx);
+            let val = self.evaluate_expr(&resolved_expr);
+            self.label_positions.remove(".");
+            let val = val?;
             let count = if val < 0 { 0usize } else { val as usize };
             if count == 0 { continue; }
 
@@ -903,6 +919,43 @@ impl<A: X86Arch> ElfWriterCore<A> {
             }
         }
         Ok(())
+    }
+
+    /// Pre-resolve numeric label references (e.g. `0b`, `1f`) in an expression string.
+    ///
+    /// GNU as numeric labels like `0:` can be referenced as `0b` (backward) or `0f`
+    /// (forward). The expression tokenizer doesn't handle these, so we substitute
+    /// them with their resolved byte offsets before evaluation.
+    fn resolve_numeric_labels_in_expr(&self, expr: &str, offset: u64, sec_idx: usize) -> String {
+        let bytes = expr.as_bytes();
+        let mut result = String::with_capacity(expr.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                if i < bytes.len() && (bytes[i] == b'b' || bytes[i] == b'f')
+                    && (i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_alphanumeric())
+                {
+                    // This is a numeric label reference like "0b" or "1f"
+                    let label_ref = &expr[start..=i];
+                    i += 1;
+                    if let Some((_, label_off)) = self.resolve_numeric_label(label_ref, offset, sec_idx) {
+                        result.push_str(&label_off.to_string());
+                    } else {
+                        // Can't resolve - keep the original text (will error during eval)
+                        result.push_str(label_ref);
+                    }
+                } else {
+                    // Regular number
+                    result.push_str(&expr[start..i]);
+                }
+            } else {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        result
     }
 
     // ─── Expression evaluator ─────────────────────────────────────────
