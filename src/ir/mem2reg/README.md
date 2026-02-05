@@ -14,7 +14,8 @@ The subsystem has two distinct passes that bracket the optimization pipeline:
 
 | Pass | Entry point | When it runs |
 |------|-------------|--------------|
-| **SSA construction** | `promote_allocas` / `promote_allocas_with_params` | Before and after inlining |
+| **SSA construction** | `promote_allocas` | After IR lowering, before inlining (skips parameter allocas) |
+| **SSA construction** | `promote_allocas_with_params` | After inlining (promotes all allocas including parameters) |
 | **Phi elimination** | `eliminate_phis` | After all SSA optimizations, immediately before codegen |
 
 SSA construction converts memory-form IR into SSA-form IR by removing loads and stores and
@@ -124,7 +125,8 @@ At each block, the renamer:
 
 **Uninitialized variables.** If a load occurs before any store (reading an uninitialized
 variable), the definition stack's initial entry provides a zero constant of the appropriate
-type, matching C's undefined-but-deterministic behavior for local variables.
+type. Reading an uninitialized local is undefined behavior in C, but using zero is a
+practical choice that provides predictable behavior and avoids exposing stale stack data.
 
 **Constant narrowing.** The IR front-end produces `I64` constants for all integer literals.
 When storing to a narrower alloca (e.g., `I32`), the renamer narrows the constant to match

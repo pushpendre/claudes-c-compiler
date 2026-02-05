@@ -2,10 +2,11 @@
 //!
 //! This implements the standard SSA construction algorithm:
 //! 1. Identify promotable allocas (scalar, only loaded/stored, not address-taken)
-//! 2. Build CFG and compute dominator tree (Cooper-Harvey-Kennedy algorithm)
-//! 3. Compute dominance frontiers
-//! 4. Insert phi nodes at iterated dominance frontiers of defining blocks
-//! 5. Rename variables via dominator tree DFS
+//! 2. Build CFG (from terminators and InlineAsm goto edges)
+//! 3. Compute dominator tree (Cooper-Harvey-Kennedy algorithm)
+//! 4. Compute dominance frontiers
+//! 5. Insert phi nodes at iterated dominance frontiers of defining blocks
+//! 6. Rename variables via dominator tree DFS
 //!
 //! Reference: "A Simple, Fast Dominance Algorithm" by Cooper, Harvey, Kennedy (2001)
 
@@ -172,10 +173,11 @@ fn promote_function(func: &mut IrFunction, promote_params: bool) {
 }
 
 /// Find all allocas that can be promoted to SSA registers.
+/// Scans all blocks (entry and non-entry) so that inlined locals are also found.
 /// A promotable alloca must:
-/// - Be in the entry block
-/// - Have scalar type (not used for arrays/structs via size > 8)
+/// - Have scalar type (size <= MAX_PROMOTABLE_ALLOCA_SIZE)
 /// - Only be used by Load and Store instructions (not address-taken)
+/// - Not be volatile
 fn find_promotable_allocas(func: &IrFunction, promote_params: bool) -> Vec<AllocaInfo> {
     let num_params = func.params.len();
 
