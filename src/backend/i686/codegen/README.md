@@ -501,8 +501,7 @@ intrinsics, avoiding function call overhead.
 
 ### Scalar Float Math
 
-`sqrtsd` / `sqrtss` (square root via x87 `fsqrt`), `fabsF64` / `fabsF32`
-(absolute value via x87 `fabs`)
+x87 `fsqrt` (square root for F32/F64), x87 `fabs` (absolute value for F32/F64)
 
 ### AES-NI
 
@@ -514,8 +513,8 @@ intrinsics, avoiding function call overhead.
 
 ### CRC32
 
-`crc32b`, `crc32l` (hardware CRC32C).  The 64-bit `crc32q` variant is
-emulated on i686 via two 32-bit CRC32 operations on each half.
+`crc32b`, `crc32w`, `crc32l` (hardware CRC32C).  The 64-bit `crc32q` variant
+is emulated on i686 via two 32-bit CRC32 operations on each half.
 
 ### Builtins
 
