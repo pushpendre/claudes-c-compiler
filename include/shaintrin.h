@@ -4,6 +4,125 @@
 
 #include <emmintrin.h>
 
+/* ========================================================================
+ * SHA-1 intrinsics
+ * ======================================================================== */
+
+/* SHA1NEXTE: Calculate SHA1 state variable E after four rounds.
+ * Result[127:96] = ROL32(SRC1[127:96], 30) + SRC2[127:96]
+ * Result[95:0]   = SRC2[95:0]
+ * Corresponds to x86 SHA1NEXTE instruction. */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_sha1nexte_epu32(__m128i __a, __m128i __b)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+
+    unsigned int __rotated = (__pa[3] << 30) | (__pa[3] >> 2);
+    __pr[3] = __rotated + __pb[3];
+    __pr[2] = __pb[2];
+    __pr[1] = __pb[1];
+    __pr[0] = __pb[0];
+
+    return __r;
+}
+
+/* SHA1MSG1: Perform an intermediate calculation for four SHA1 message dwords.
+ * Result[i] = SRC1[i] ^ SRC1[i+1], with SRC2[0] used for the last element.
+ * Corresponds to x86 SHA1MSG1 instruction. */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_sha1msg1_epu32(__m128i __a, __m128i __b)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+
+    __pr[0] = __pa[0] ^ __pa[1];
+    __pr[1] = __pa[1] ^ __pa[2];
+    __pr[2] = __pa[2] ^ __pa[3];
+    __pr[3] = __pa[3] ^ __pb[0];
+
+    return __r;
+}
+
+/* SHA1MSG2: Perform a final calculation for four SHA1 message dwords.
+ * Each dword is XOR'd with a previous result and then rotated left by 1.
+ * Corresponds to x86 SHA1MSG2 instruction. */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_sha1msg2_epu32(__m128i __a, __m128i __b)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+
+#define __SHA1_ROL1(x) (((x) << 1) | ((x) >> 31))
+
+    __pr[0] = __SHA1_ROL1(__pa[0] ^ __pb[2]);
+    __pr[1] = __SHA1_ROL1(__pa[1] ^ __pb[3]);
+    __pr[2] = __SHA1_ROL1(__pa[2] ^ __pr[0]);
+    __pr[3] = __SHA1_ROL1(__pa[3] ^ __pr[1]);
+
+#undef __SHA1_ROL1
+
+    return __r;
+}
+
+/* SHA1RNDS4: Perform four rounds of SHA1 operation.
+ * __func selects the boolean function:
+ *   0: Ch(b,c,d) = (b & c) ^ (~b & d)
+ *   1: Parity(b,c,d) = b ^ c ^ d
+ *   2: Maj(b,c,d) = (b & c) ^ (b & d) ^ (c & d)
+ *   3: Parity(b,c,d) = b ^ c ^ d
+ * SRC1 = {A,B,C,D} in [127:96],[95:64],[63:32],[31:0]
+ * SRC2 = {WK0,WK1,WK2,WK3} (pre-added with E via SHA1NEXTE)
+ * Each round: T = ROL5(A) + f(B,C,D) + SRC2[round]
+ *             E=D, D=C, C=ROL30(B), B=A, A=T
+ * Corresponds to x86 SHA1RNDS4 instruction. */
+static __inline__ __m128i __attribute__((__always_inline__))
+__ccc_sha1rnds4(__m128i __a, __m128i __b, int __func)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+
+    unsigned int A = __pa[3], B = __pa[2], C = __pa[1], D = __pa[0];
+
+#define __SHA1_ROL5(x)  (((x) << 5) | ((x) >> 27))
+#define __SHA1_ROL30(x) (((x) << 30) | ((x) >> 2))
+#define __SHA1_ROUND(wk) do {                                  \
+        unsigned int f;                                        \
+        if (__func == 0)      f = (B & C) ^ (~B & D);         \
+        else if (__func == 2) f = (B & C) ^ (B & D) ^ (C & D);\
+        else                  f = B ^ C ^ D;                   \
+        unsigned int T = __SHA1_ROL5(A) + f + (wk);            \
+        D = C; C = __SHA1_ROL30(B); B = A; A = T;             \
+    } while (0)
+
+    __SHA1_ROUND(__pb[3]);
+    __SHA1_ROUND(__pb[2]);
+    __SHA1_ROUND(__pb[1]);
+    __SHA1_ROUND(__pb[0]);
+
+#undef __SHA1_ROUND
+#undef __SHA1_ROL5
+#undef __SHA1_ROL30
+
+    __pr[3] = A; __pr[2] = B; __pr[1] = C; __pr[0] = D;
+    return __r;
+}
+/* __func must be a compile-time constant (0-3) per the Intel spec */
+#define _mm_sha1rnds4_epu32(a, b, func) \
+    __ccc_sha1rnds4((a), (b), (func))
+
+/* ========================================================================
+ * SHA-256 intrinsics
+ * ======================================================================== */
+
 /* SHA256 round function: perform 2 rounds of SHA-256 using state in __a, __b
  * and message/constant sum in __c (only low 2 dwords of __c are used).
  * Corresponds to x86 SHA256RNDS2 instruction. */
