@@ -424,9 +424,11 @@ The writer performs several bookkeeping tasks:
   `TPREL_*`, and `GOT_HI20` relocations to allow the linker to perform
   relaxation optimizations (unless suppressed by `.option norelax`).
   Additionally, `R_RISCV_ALIGN` relocations are emitted at `.align`,
-  `.balign`, and `.p2align` directives when relaxation is enabled. These
-  mark NOP padding regions so the linker can re-pad after relaxation
-  shrinks preceding instructions, maintaining correct alignment.
+  `.balign`, and `.p2align` directives when relaxation is enabled and the
+  current section is executable (`SHF_EXECINSTR`). These mark NOP padding
+  regions so the linker can re-pad after relaxation shrinks preceding
+  instructions, maintaining correct alignment. Data sections use static
+  zero-padding for alignment without relocations.
 
 - **ELF flags**: Default is `EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC` (0x05).
   The float ABI can be overridden via the `-mabi=` flag passed to
