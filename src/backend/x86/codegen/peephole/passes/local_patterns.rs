@@ -1,16 +1,17 @@
 //! Local peephole pattern matching passes.
 //!
-//! Merges 6 simple local passes into a single linear scan (`combined_local_pass`)
+//! Merges 7 simple local passes into a single linear scan (`combined_local_pass`)
 //! to avoid redundant iteration over the lines array. Also includes
 //! `fuse_movq_ext_truncation` which fuses movq + extension/truncation patterns.
 //!
 //! Merged passes in `combined_local_pass`:
-//!   1. eliminate_adjacent_store_load: store/load at same %rbp offset
-//!   2. eliminate_redundant_jumps: jmp to the immediately following label
-//!   3. eliminate_redundant_movq_self: movq %reg, %reg (same src/dst)
-//!   4. eliminate_redundant_cltq: cltq after movslq/movq$ to %rax
-//!   5. eliminate_redundant_zero_extend: redundant zero/sign extensions
-//!   6. eliminate_redundant_xorl_zero: xorl %eax,%eax when %rax already zero
+//!   1. eliminate_redundant_movq_self: movq %reg, %reg (same src/dst)
+//!   2. eliminate_reverse_move: movq %A,%B + movq %B,%A -> remove second
+//!   3. eliminate_redundant_jumps: jmp to the immediately following label
+//!   4. eliminate_cond_branch_inversion: jCC+jmp+label -> j!CC (inverted)
+//!   5. eliminate_adjacent_store_load: store/load at same %rbp offset
+//!   6. eliminate_redundant_zero_extend: redundant zero/sign extensions
+//!   7. eliminate_redundant_xorl_zero: xorl %eax,%eax when %rax already zero
 
 use super::super::types::*;
 use super::helpers::is_valid_gp_reg;

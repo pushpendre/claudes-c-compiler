@@ -22,8 +22,9 @@ unnecessary extensions that this optimizer systematically eliminates.
 9. [Phase 5: Tail Call Optimization](#phase-5-tail-call-optimization)
 10. [Phase 5b: Never-Read Store Elimination](#phase-5b-never-read-store-elimination)
 11. [Phase 6: Callee-Save Elimination](#phase-6-callee-save-elimination)
-12. [Design Decisions and Tradeoffs](#design-decisions-and-tradeoffs)
-13. [Files](#files)
+12. [Phase 7: Frame Compaction](#phase-7-frame-compaction)
+13. [Design Decisions and Tradeoffs](#design-decisions-and-tradeoffs)
+14. [Files](#files)
 
 ---
 
@@ -37,8 +38,8 @@ The optimizer has two architectural layers:
    All subsequent passes use integer/enum comparisons on these structs, never
    re-parsing the assembly text.
 
-2. **Optimization passes** (`passes/`): A pipeline of 14 distinct pass functions
-   organized into 7 phases. Passes range from simple single-line pattern matching (self-move
+2. **Optimization passes** (`passes/`): A pipeline of 15 distinct pass functions
+   organized into 8 phases. Passes range from simple single-line pattern matching (self-move
    elimination) to whole-function analysis (never-read store elimination and
    loop trampoline coalescing).
 
@@ -56,7 +57,7 @@ The entry point is `peephole_optimize(asm: String) -> String`. The full pipeline
 
 ```
 Phase 1: Iterative Local Passes (up to 8 rounds)
-    combined_local_pass         (6 merged pattern matchers)
+    combined_local_pass         (7 merged pattern matchers)
     fuse_movq_ext_truncation    (movq + extension -> single instruction)
     eliminate_push_pop_pairs    (only if local patterns changed or first round)
     eliminate_binop_push_pop    (only if local patterns changed or first round)
@@ -94,6 +95,10 @@ Phase 5b: Never-Read Store Elimination (once)
         v
 Phase 6: Callee-Save Elimination (once)
     eliminate_unused_callee_saves
+        |
+        v
+Phase 7: Frame Compaction (once)
+    compact_frame (repack callee-saves, shrink subq $N, %rsp)
 ```
 
 Push/pop elimination is conditioned on local patterns having changed (or being
@@ -249,7 +254,7 @@ convergence (no pass reports changes).
 
 ### Combined Local Pass (`local_patterns.rs`)
 
-A single forward scan merging 6 pattern matchers:
+A single forward scan merging 7 pattern matchers:
 
 **1. Self-move elimination.** Lines pre-classified as `SelfMove` during
 `classify_line` are simply marked as NOP. No string parsing needed.
@@ -290,6 +295,12 @@ would create, the consumer is eliminated. Examples:
 - Extended backward scan for `cltq`: if an upcoming `cltq` instruction can be
   proven redundant by a prior sign-extension producer (within 6 lines backward),
   it is eliminated.
+
+**7. Redundant `xorl %eax, %eax` elimination.** Tracks whether `%rax` is known
+to be zero (set by a previous `xorl %eax, %eax`). When a second `xorl %eax, %eax`
+is encountered while `%rax` is still known-zero, the duplicate is NOP-ed. The
+zero-tracking is invalidated by any instruction that writes to `%rax`, crosses
+a basic block boundary, or performs a call.
 
 ### Movq/Extension Fusion (`local_patterns.rs`)
 
@@ -582,11 +593,43 @@ Removes unused callee-saved register saves and restores
 4. If no body reference exists and the restore is found: NOP both the save
    and all restores.
 
-**Critical safety note:** The stack frame size (`subq $N, %rsp`) is
-intentionally NOT shrunk when saves are eliminated. The remaining saves still
-reference their original rbp-relative offsets. If the frame were shrunk, those
-offsets would fall below rsp, where interrupts or signal handlers could corrupt
-them. Unused stack slots become harmless dead space.
+**Safety note:** This pass does not shrink the stack frame (`subq $N, %rsp`)
+or relocate the remaining callee-save offsets. It only NOPs saves and restores
+for registers that are never referenced. The subsequent Phase 7 (frame
+compaction) handles repacking the surviving saves and reducing the frame size.
+
+---
+
+## Phase 7: Frame Compaction
+
+Repacks the stack frame after dead store and callee-save elimination create
+gaps (`frame_compact.rs`). Earlier phases may NOP callee-saved saves or dead
+stores, leaving unused holes in the frame layout. This pass reclaims that
+space by packing the surviving callee-saved saves tightly and shrinking the
+frame allocation.
+
+**Algorithm:**
+1. Find the function prologue (`pushq %rbp; movq %rsp, %rbp; subq $N, %rsp`)
+   and collect the callee-saved register saves immediately after.
+2. Scan the function body to find the deepest negative `%rbp` offset that is
+   actually **read** (loads, memory operands in ALU instructions). Store-only
+   offsets (never read) do not need frame space.
+3. Pack the surviving callee-saved saves tightly below the body area. The first
+   save goes at `-new_frame_size`, the next at `-new_frame_size + 8`, etc.
+4. Rewrite `subq $N, %rsp` to the new smaller size (16-byte aligned).
+5. Rewrite all callee-saved save offsets in the prologue and restore offsets in
+   epilogues to their new positions.
+6. NOP dead stores whose byte ranges fall entirely below the body read area,
+   since after relocation those stores would clobber the relocated callee-save
+   slots.
+
+**Safety constraints:**
+- Bails out if any `leaq ... (%rbp)` takes the address of a stack slot, since
+  address arithmetic would break if offsets change.
+- Bails out if any unrecognized `%rbp` reference exists in the function body.
+- Only relocates callee-saved save/restore offsets; body-area offsets are
+  unchanged since the body occupies the same `[%rbp - body_size, %rbp)` region
+  before and after compaction.
 
 ---
 
@@ -659,17 +702,18 @@ hot path.
 
 | File | Lines | Description |
 |------|------:|-------------|
-| `mod.rs` | 25 | Module root; re-exports `peephole_optimize` |
+| `mod.rs` | ~25 | Module root; re-exports `peephole_optimize` |
 | `types.rs` | ~1400 | `LineInfo`, `LineKind`, `ExtKind`, `MoveSize`, `LineStore`, `classify_line`, register tables, utility functions |
-| `passes/mod.rs` | ~960 | Pass pipeline orchestrator (`peephole_optimize` entry point) + unit tests |
+| `passes/mod.rs` | ~1200 | Pass pipeline orchestrator (`peephole_optimize` entry point) + unit tests |
 | `passes/helpers.rs` | ~290 | Shared utilities: register rewriting, label parsing, epilogue detection, instruction analysis |
-| `passes/local_patterns.rs` | ~400 | Phase 1: combined local pass (6 merged patterns) + movq/extension fusion |
+| `passes/local_patterns.rs` | ~490 | Phase 1: combined local pass (7 merged patterns) + movq/extension fusion |
 | `passes/push_pop.rs` | ~130 | Phase 1: push/pop pair elimination + binop/push/pop pattern |
 | `passes/store_forwarding.rs` | ~390 | Phase 2: global store-to-load forwarding across fallthrough labels |
 | `passes/copy_propagation.rs` | ~230 | Phase 2: register copy propagation across basic blocks |
-| `passes/dead_code.rs` | ~400 | Phase 2+5: dead register moves, dead stores (windowed), never-read stores (whole-function) |
+| `passes/dead_code.rs` | ~400 | Phase 2+5b: dead register moves, dead stores (windowed), never-read stores (whole-function) |
 | `passes/compare_branch.rs` | ~170 | Phase 2: compare-and-branch fusion |
 | `passes/memory_fold.rs` | ~150 | Phase 2: fold stack loads into ALU memory operands |
 | `passes/loop_trampoline.rs` | ~520 | Phase 4: SSA loop backedge trampoline coalescing |
 | `passes/tail_call.rs` | ~380 | Phase 5: tail call optimization (call+epilogue+ret -> epilogue+jmp) |
 | `passes/callee_saves.rs` | ~160 | Phase 6: unused callee-saved register save/restore elimination |
+| `passes/frame_compact.rs` | ~320 | Phase 7: stack frame compaction after dead store/callee-save elimination |

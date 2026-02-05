@@ -14,6 +14,7 @@
 //! - [`callee_saves`]: unused callee-saved register save/restore elimination
 //! - [`memory_fold`]: fold stack loads into ALU instructions as memory operands
 //! - [`tail_call`]: convert `call; epilogue; ret` to `epilogue; jmp` for tail calls
+//! - [`frame_compact`]: stack frame compaction after dead store/callee-save elimination
 //! - [`helpers`]: shared utilities (register rewriting, label parsing, etc.)
 
 use super::types::*;
