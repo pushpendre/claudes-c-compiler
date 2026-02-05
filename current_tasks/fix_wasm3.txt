@@ -1,0 +1,2 @@
+Fixing wasm3 project to compile and pass tests with ccc compilers.
+Investigating build failures and fixing compiler bugs as needed.
