@@ -1,0 +1,17 @@
+Fix brace-wrapped string literal initializer for char arrays
+
+Bug: `char b[5] = {"def"}` only stores the first character 'd', while
+`char a[5] = "def"` works correctly. This affects all backends.
+
+The C standard (C11 6.7.9 p14) allows a string literal optionally enclosed
+in braces as an initializer for an array of character type.
+
+Root cause: In lower_array_init_list_dispatch, brace-wrapped string literals
+were dispatched to lower_1d_array_init which uses da.elem_size (=1 for char)
+as the max_bytes for emit_string_to_alloca, truncating the string.
+
+Fix: Add early detection of brace-wrapped string literals in
+lower_array_init_list_dispatch and redirect to lower_char_array_init_expr
+which correctly uses da.alloc_size.
+
+Started: 2026-02-05
