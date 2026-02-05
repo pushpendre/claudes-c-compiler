@@ -117,11 +117,11 @@ pub fn link_shared(
 | `mod.rs` | ~28 | Module declarations and public re-exports (`link_builtin`, `link_shared`) |
 | `types.rs` | ~89 | `GlobalSymbol` struct with `GlobalSymbolOps` impl, arch constants (`BASE_ADDR`, `INTERP`), `x86_should_replace_extra` |
 | `elf.rs` | ~81 | x86-64 relocation constants (`R_X86_64_*`); type aliases mapping `linker_common` types to local names (`ElfObject`, `Symbol`, etc.); thin wrapper functions delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction; re-exports shared ELF constants from `crate::backend::elf` |
-| `input.rs` | ~77 | File loading dispatch: `load_file` (objects, archives, shared libs, linker scripts) |
-| `plt_got.rs` | ~131 | PLT/GOT entry construction from relocation scanning, IFUNC symbol collection |
-| `link.rs` | ~342 | Orchestration: `link_builtin` and `link_shared` entry points, dynamic symbol resolution, library group loading |
-| `emit_exec.rs` | ~1,228 | Executable emission (both static and dynamic): PLT/GOT/.dynamic, layout, relocation application, `resolve_sym` |
-| `emit_shared.rs` | ~1,134 | Shared library (`.so`) emission: PIC layout, `R_X86_64_RELATIVE`/`JUMP_SLOT`/`GLOB_DAT`, RELRO, rpath/runpath |
+| `input.rs` | ~78 | File loading dispatch: `load_file` (objects, archives, shared libs, linker scripts) |
+| `plt_got.rs` | ~141 | PLT/GOT entry construction from relocation scanning, IFUNC symbol collection |
+| `link.rs` | ~386 | Orchestration: `link_builtin` and `link_shared` entry points, dynamic symbol resolution, library group loading, `--gc-sections`, `--export-dynamic`, `--defsym` |
+| `emit_exec.rs` | ~1,239 | Executable emission (both static and dynamic): PLT/GOT/.dynamic, layout, relocation application, `resolve_sym` |
+| `emit_shared.rs` | ~1,137 | Shared library (`.so`) emission: PIC layout, `R_X86_64_RELATIVE`/`JUMP_SLOT`/`GLOB_DAT`, RELRO, rpath/runpath |
 
 
 ## Key Data Structures
@@ -749,6 +749,7 @@ processing input relocations.
 | `R_X86_64_PC32` | 2 | 32-bit PC-relative |
 | `R_X86_64_GOT32` | 3 | 32-bit GOT offset (defined but not currently handled) |
 | `R_X86_64_PLT32` | 4 | 32-bit PLT-relative |
+| `R_X86_64_COPY`* | 5 | Copy relocation for dynamic data objects (output only) |
 | `R_X86_64_GLOB_DAT`* | 6 | GOT slot filled at load time (output only) |
 | `R_X86_64_JUMP_SLOT`* | 7 | PLT GOT slot for lazy binding (output only) |
 | `R_X86_64_RELATIVE`* | 8 | Base-relative fixup for shared libraries (output only) |
@@ -758,6 +759,7 @@ processing input relocations.
 | `R_X86_64_GOTTPOFF` | 22 | TLS IE, PC-relative GOT |
 | `R_X86_64_TPOFF32` | 23 | TLS LE, direct offset |
 | `R_X86_64_PC64` | 24 | 64-bit PC-relative |
+| `R_X86_64_IRELATIVE`* | 37 | IFUNC resolver (output only, static linking) |
 | `R_X86_64_GOTPCRELX` | 41 | Relaxable GOTPCREL |
 | `R_X86_64_REX_GOTPCRELX` | 42 | Relaxable GOTPCREL with REX |
 
@@ -927,7 +929,32 @@ library paths provided by the caller (typically `/lib/x86_64-linux-gnu/` and
 is pragmatic but not portable.  A production linker would use the `ldconfig`
 cache or search paths from `/etc/ld.so.conf`.
 
-### 10. Section Headers in Output
+### 10. Linker Option Support
+
+The linker handles several GNU `ld`-compatible options parsed from `-Wl,...` args:
+
+- **`--gc-sections`**: Dead-code elimination.  After symbol resolution,
+  `gc_collect_sections_elf64()` identifies sections unreachable from entry
+  points.  Dead sections are excluded from merging, and undefined symbols
+  referenced only from dead code are pruned from `globals`.
+- **`--export-dynamic`**: Passed through to the emitter so all defined
+  globals appear in `.dynsym` (needed for `dlsym()` lookups).
+- **`--defsym=ALIAS=TARGET`**: Creates symbol aliases by cloning the
+  target's `GlobalSymbol` entry under the alias name.
+- **`--whole-archive` / `--no-whole-archive`**: Positional flags that
+  force all members of subsequent archives to be loaded (rather than
+  selective loading).  Tracked per-item in `link_shared`'s ordered item
+  list.
+
+### 11. Static Linking with IFUNC Support
+
+When linking with `-static`, the linker collects symbols with `STT_GNU_IFUNC`
+type and emits `R_X86_64_IRELATIVE` relocations in a `.rela.iplt` section.
+The CRT startup code calls the IFUNC resolver functions and patches the
+GOT entries before `main()` runs.  The linker-defined symbols
+`__rela_iplt_start` and `__rela_iplt_end` bracket this relocation array.
+
+### 12. Section Headers in Output
 
 The output executable includes a section header table appended after the main
 file data.  This enables tools like `strip`, `readelf -S`, and `objdump -d`
@@ -938,7 +965,7 @@ to work correctly.  The section header table describes all loadable sections
 string table.  The `e_shoff`, `e_shnum`, and `e_shstrndx` fields are patched
 back into the ELF header.
 
-### 11. Flat Output Buffer
+### 13. Flat Output Buffer
 
 The entire output file is allocated as a single `Vec<u8>` of the computed
 file size, initialized to zero.  All writes are done via helper functions
