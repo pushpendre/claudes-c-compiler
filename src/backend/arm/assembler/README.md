@@ -13,7 +13,7 @@ not enabled).  It accepts the same textual assembly that GCC's gas would consume
 and produces ABI-compatible `.o` files that any standard AArch64 ELF linker (or
 the companion built-in linker) can link.
 
-The implementation spans roughly 9,100 lines of Rust across four files and is
+The implementation spans roughly 9,200 lines of Rust across four files and is
 organized as a clean three-stage pipeline.  Shared ELF infrastructure (section
 management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
 `elf.rs`; the files here contain only AArch64-specific logic.
@@ -34,7 +34,7 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        v
   +------------------+
   |   elf_writer.rs   |   Stage 2: Process + Encode + Emit
-  |   (~560 lines)    |   AArch64-specific: branch resolution,
+  |   (~570 lines)    |   AArch64-specific: branch resolution,
   |                    |   sym diffs (uses ElfWriterBase)
   +------------------+
        |         ^
@@ -42,7 +42,7 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        v         |
   +------------------+
   |   encoder.rs      |   Instruction Encoding Library
-  |   (~5,980 lines)  |   Mnemonic + Operands -> u32 words
+  |   (~6,050 lines)  |   Mnemonic + Operands -> u32 words
   +------------------+
        |
        v
@@ -75,7 +75,7 @@ IR; no raw text parsing happens after this point.
 | Type | Role |
 |------|------|
 | `AsmStatement` | Top-level IR node: `Label`, `Directive`, `Instruction`, or `Empty`. |
-| `AsmDirective` | Fully-typed directive variant (27 kinds, from `.section` to `.cfi_*`). |
+| `AsmDirective` | Fully-typed directive variant (28 kinds, from `.section` to `.cfi_*`). |
 | `Operand` | Operand of an instruction (20 variants covering every AArch64 addressing mode). |
 | `SectionDirective` | Parsed `.section name, "flags", @type` triple. |
 | `DataValue` | Data that can be an integer, a symbol, a symbol+offset, or a symbol difference. |
@@ -204,7 +204,7 @@ Skip                             -- pseudo-instruction; no code emitted
 ### Supported Instruction Categories
 
 The encoder handles a comprehensive set of AArch64 instructions.
-The dispatch table in `encode_instruction()` maps ~240 base mnemonics
+The dispatch table in `encode_instruction()` maps ~400 base mnemonics
 (~440 including condition code variants):
 
 | Category | Mnemonics |
@@ -313,6 +313,7 @@ relocatable object file.
 | `ObjReloc` | A relocation entry: offset, type, symbol name, addend (from `elf.rs`). |
 | `PendingReloc` | A relocation for a local branch label (resolved after all labels are known). |
 | `PendingSymDiff` | A deferred symbol-difference expression (e.g., `.long .LBB3 - .Ljt_0`). |
+| `PendingExpr` | A deferred complex expression (section, offset, expression string, size). |
 
 ### ElfWriter State
 
@@ -321,6 +322,7 @@ pub struct ElfWriter {
     pub base: ElfWriterBase,              // Shared: sections, labels, symbols, directives
     pending_branch_relocs: Vec<PendingReloc>,  // Local branches to fix up
     pending_sym_diffs: Vec<PendingSymDiff>,     // Deferred A-B expressions
+    pending_exprs: Vec<PendingExpr>,            // Deferred complex expressions
 }
 ```
 
@@ -481,6 +483,6 @@ relaxation passes (unlike x86).  The only multi-word output is the
 |------|-------|---------|
 | `mod.rs` | ~220 | Public API: `assemble()` entry point, GNU numeric label resolution (`1f`/`1b`) |
 | `parser.rs` | ~2,340 | Preprocessor (macros, .rept, .irp, conditionals, aliases) and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | ~5,980 | Instruction encoder: ~240 base mnemonics + operands -> `u32` machine code |
-| `elf_writer.rs` | ~560 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
-| **Total** | **~9,100** | |
+| `encoder.rs` | ~6,050 | Instruction encoder: ~400 base mnemonics + operands -> `u32` machine code |
+| `elf_writer.rs` | ~570 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
+| **Total** | **~9,200** | |
