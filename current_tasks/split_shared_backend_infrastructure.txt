@@ -1,0 +1,10 @@
+Split shared backend infrastructure files (elf.rs, linker_common.rs, stack_layout.rs)
+
+These three files are all over 2000 lines and contain clearly separable concerns.
+
+Plan:
+- elf.rs (2674 lines) -> split into elf_constants.rs, elf_io.rs, elf_archive.rs, elf_writer.rs, elf_writer_base.rs
+- linker_common.rs (2292 lines) -> split into eh_frame.rs, dynamic_linking.rs, linker_args.rs
+- stack_layout.rs (2038 lines) -> split into escape_analysis.rs, slot_classification.rs
+
+Each new module will be self-contained with clear responsibilities.
