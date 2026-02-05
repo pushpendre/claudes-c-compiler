@@ -269,6 +269,7 @@ pub struct ElfWriterCore<A: X86Arch> {
     section_map: HashMap<String, usize>,
     symbol_map: HashMap<String, usize>,
     current_section: Option<usize>,
+    previous_section: Option<usize>,
     label_positions: HashMap<String, (usize, u64)>,
     numeric_label_positions: HashMap<String, Vec<(usize, u64)>>,
     pending_globals: Vec<String>,
@@ -298,6 +299,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
             section_map: HashMap::new(),
             symbol_map: HashMap::new(),
             current_section: None,
+            previous_section: None,
             label_positions: HashMap::new(),
             numeric_label_positions: HashMap::new(),
             pending_globals: Vec::new(),
@@ -353,6 +355,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
     fn switch_section(&mut self, dir: &SectionDirective) {
         let (section_type, flags) = parse_section_flags(&dir.name, dir.flags.as_deref(), dir.section_type.as_deref());
         let idx = self.get_or_create_section(&dir.name, section_type, flags, dir.comdat_group.clone());
+        self.previous_section = self.current_section;
         self.current_section = Some(idx);
     }
 
@@ -368,6 +371,11 @@ impl<A: X86Arch> ElfWriterCore<A> {
             AsmItem::PopSection => {
                 if let Some(prev) = self.section_stack.pop() {
                     self.current_section = prev;
+                }
+            }
+            AsmItem::Previous => {
+                if self.previous_section.is_some() {
+                    std::mem::swap(&mut self.current_section, &mut self.previous_section);
                 }
             }
             AsmItem::Global(name) => {

@@ -123,7 +123,7 @@ semicolon splitting, and some preprocessing helpers come from
 
 ## Key Data Structures
 
-### `AsmItem` enum (31 variants) -- parser.rs
+### `AsmItem` enum (32 variants) -- parser.rs
 
 The fundamental intermediate representation.  Each non-empty line of assembly
 maps to one `AsmItem` variant:
@@ -156,7 +156,8 @@ AsmItem
   |-- Instruction(Instruction)         encoded x86-64 instruction
   |-- OptionDirective(String)          .option (ignored on x86)
   |-- PushSection(SectionDirective)    .pushsection
-  |-- PopSection                       .popsection / .previous
+  |-- PopSection                       .popsection
+  |-- Previous                         .previous (swap current/previous)
   |-- Org(String, i64)                 .org expression, fill
   |-- Incbin { path, skip, count }     .incbin "file"[, skip[, count]]
   |-- Symver(String, String)           .symver name, alias@@VERSION
@@ -248,7 +249,7 @@ multi-stage pipeline:
    `.section`, `.globl`, `.type`, `.size`, `.align`/`.p2align`/`.balign`,
    `.byte`/`.short`/`.value`/`.2byte`/`.long`/`.4byte`/`.int`/`.quad`/`.8byte`,
    `.zero`, `.skip`, `.asciz`/`.string`/`.ascii`, `.comm`, `.set`,
-   `.cfi_*`, `.file`, `.loc`, `.pushsection`, `.popsection`/`.previous`,
+   `.cfi_*`, `.file`, `.loc`, `.pushsection`, `.popsection`, `.previous`,
    `.org`, `.incbin`, and more.  Unknown directives (`.ident`, `.addrsig`,
    etc.) are silently ignored and produce `AsmItem::Empty`.
 
@@ -659,7 +660,8 @@ provided flags/type instead of these defaults.
 | `.bss` | `.bss` | Switch to `.bss` section (shorthand) |
 | `.rodata` | `.rodata` | Switch to `.rodata` section (shorthand) |
 | `.pushsection` | `.pushsection name, "flags", @type` | Push current section, switch to named section |
-| `.popsection` / `.previous` | `.popsection` | Pop section stack, restore previous section |
+| `.popsection` | `.popsection` | Pop section stack (from `.pushsection`) |
+| `.previous` | `.previous` | Swap current and previous sections (toggle between last two) |
 | `.globl` / `.global` | `.globl name` | Mark symbol as global binding |
 | `.weak` | `.weak name` | Mark symbol as weak binding |
 | `.hidden` | `.hidden name` | Set symbol visibility to STV_HIDDEN |

@@ -73,6 +73,8 @@ pub enum AsmItem {
     PushSection(SectionDirective),
     /// Pop section stack and restore previous section: `.popsection`
     PopSection,
+    /// Swap current and previous sections: `.previous`
+    Previous,
     /// `.org` directive: advance to position symbol + offset within the section.
     Org(String, i64),
     /// `.incbin "file"[, skip[, count]]` — include binary file contents
@@ -594,7 +596,8 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
                 }
             })
         }
-        ".popsection" | ".previous" => Ok(AsmItem::PopSection),
+        ".popsection" => Ok(AsmItem::PopSection),
+        ".previous" => Ok(AsmItem::Previous),
         ".code16gcc" | ".code16" => Ok(AsmItem::CodeMode(16)),
         ".code32" => Ok(AsmItem::CodeMode(32)),
         ".code64" => Ok(AsmItem::CodeMode(64)),
