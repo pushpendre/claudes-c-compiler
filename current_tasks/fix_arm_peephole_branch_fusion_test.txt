@@ -1,7 +1,0 @@
-Fix ARM branch-over-branch fusion: treat unknown target labels as in-range.
-
-The peephole optimization fuse_branch_over_branch was too conservative -
-when the target label wasn't found in the current snippet, it assumed
-out-of-range and skipped the optimization. Since b.cond has ±1MB range
-and the original unconditional branch already reached the target, we
-should assume it's in range when the label isn't found locally.
