@@ -1,0 +1,17 @@
+Implement optimization level differentiation (-O0 through -O3, -Os, -Oz)
+=========================================================================
+Started: 2026-02-05
+
+Currently all optimization levels run the identical pipeline. This task
+implements proper per-level pass selection:
+
+- -O0: mem2reg + constant_fold only (fast debug builds)
+- -O1: core passes (cfg_simplify, copy_prop, dce, constant_fold, simplify, narrow)
+- -O2: full pipeline (current behavior)
+- -O3: full pipeline + aggressive inlining thresholds
+- -Os/-Oz: full pipeline with size-oriented settings
+
+Changes:
+1. CLI: pass actual opt_level (0/1/2/3) to the pipeline
+2. passes/mod.rs: select pass subsets based on opt_level
+3. inline: respect opt_level for inlining thresholds
