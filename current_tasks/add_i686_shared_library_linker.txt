@@ -1,0 +1,1 @@
+Adding shared library (ET_DYN/SO) linker support for i686 backend to fix postgres i686 build
