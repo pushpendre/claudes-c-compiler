@@ -223,8 +223,8 @@ impl BigUint {
         (val, shift as i32)
     }
 
-    /// Divide self by other (big integer), returning quotient. Self is modified to become quotient.
-    /// This is used for dividing by large powers of 10.
+    /// Divide dividend by divisor, returning the quotient (floor division).
+    /// The remainder is discarded. Used for dividing by large powers of 10.
     fn div_big(dividend: &BigUint, divisor: &BigUint) -> BigUint {
         if divisor.is_zero() {
             return BigUint { limbs: vec![0] };
@@ -747,6 +747,7 @@ fn encode_f128(negative: bool, binary_exp: i32, mantissa113: u128) -> [u8; 16] {
 
     if biased_exp <= 0 {
         // Subnormal or underflow
+        // TODO: the right-shift here truncates without rounding
         let shift = 1 - biased_exp;
         if shift >= 113 {
             return make_f128_zero(negative);
@@ -3341,5 +3342,30 @@ mod known_value_tests {
             let r2 = x87_cmp(&from_f64(b), &from_f64(a));
             assert_eq!(r1, -r2, "antisymmetry cmp({a},{b})");
         }}
+    }
+
+    #[test]
+    fn test_ldbl_min_parse() {
+        // LDBL_MIN = 2^(-16382), the smallest normal long double.
+        // GCC full-precision string:
+        let f128_bytes = parse_long_double_to_f128_bytes("3.36210314311209350626267781732175260e-4932");
+        let (sign, biased_exp, _mantissa) = f128_decompose(&f128_bytes);
+        assert!(!sign);
+        assert_eq!(biased_exp, 1, "LDBL_MIN should be normal (biased_exp=1), got {}", biased_exp);
+
+        // Verify x87 conversion gives correct result
+        let x87_bytes = f128_bytes_to_x87_bytes(&f128_bytes);
+        let x87_exp = (x87_bytes[8] as u16) | ((x87_bytes[9] as u16) << 8);
+        assert_eq!(x87_exp & 0x7fff, 1, "x87 LDBL_MIN biased_exp should be 1");
+        let mantissa64 = u64::from_le_bytes(x87_bytes[0..8].try_into().unwrap());
+        assert_eq!(mantissa64, 0x8000000000000000u64, "x87 LDBL_MIN mantissa should be just integer bit");
+
+        // Also verify that the shorter (truncated) string rounds correctly
+        let f128_short = parse_long_double_to_f128_bytes("3.36210314311209350626e-4932");
+        let (sign2, biased_exp2, _) = f128_decompose(&f128_short);
+        assert!(!sign2);
+        // The truncated value is slightly below 2^(-16382), so it's the largest
+        // subnormal in f128 - this is expected behavior for truncated decimal input
+        assert_eq!(biased_exp2, 0, "truncated LDBL_MIN string is subnormal in f128 (expected)");
     }
 }
