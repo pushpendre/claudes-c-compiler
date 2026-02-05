@@ -1373,7 +1373,11 @@ fn emit_dynamic_executable(
                 w64(&mut out, ds+8, gsym.value);
                 w64(&mut out, ds+16, gsym.size);
             } else {
-                if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | STT_FUNC; out[ds+5] = 0; }
+                // Preserve original binding (STB_WEAK vs STB_GLOBAL) and type
+                let bind = gsym.info >> 4;
+                let stype = gsym.info & 0xf;
+                let st_info = (bind << 4) | if stype != 0 { stype } else { STT_FUNC };
+                if ds+5 < out.len() { out[ds+4] = st_info; out[ds+5] = 0; }
                 w16(&mut out, ds+6, 0); w64(&mut out, ds+8, 0); w64(&mut out, ds+16, 0);
             }
         } else {
@@ -2549,9 +2553,11 @@ fn emit_shared_library(
                 w64(&mut out, ds+8, gsym.value);
                 w64(&mut out, ds+16, gsym.size);
             } else {
-                // Undefined/dynamic: use FUNC type for PLT symbols, NOTYPE for data
-                let stype = if so_plt_names.contains(name) { STT_FUNC } else { 0u8 /* STT_NOTYPE */ };
-                if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | stype; out[ds+5] = 0; }
+                // Undefined/dynamic: preserve original binding (STB_WEAK vs STB_GLOBAL)
+                let bind = gsym.info >> 4;
+                let orig_type = gsym.info & 0xf;
+                let stype = if so_plt_names.contains(name) { STT_FUNC } else if orig_type != 0 { orig_type } else { 0u8 };
+                if ds+5 < out.len() { out[ds+4] = (bind << 4) | stype; out[ds+5] = 0; }
                 w16(&mut out, ds+6, 0); w64(&mut out, ds+8, 0); w64(&mut out, ds+16, 0);
             }
         } else {

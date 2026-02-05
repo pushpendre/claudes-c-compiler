@@ -1,4 +1,0 @@
-Fix blosc project: shared library linker drops weak binding for undefined symbols.
-ZSTD_trace_* weak symbols become strong undefined (U) instead of weak undefined (w) in .dynsym.
-This causes runtime "undefined symbol" errors when the dynamic linker tries to resolve them.
-Fix needed in x86 (and potentially other arch) shared library linker code.

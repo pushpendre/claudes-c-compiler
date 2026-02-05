@@ -1007,8 +1007,14 @@ pub fn link_builtin(
                 entry[4] = (STB_GLOBAL << 4) | STT_OBJECT;
                 // st_shndx, st_value, st_size will be patched later
             } else {
-                // PLT function symbol - st_info: GLOBAL FUNC
-                entry[4] = (STB_GLOBAL << 4) | STT_FUNC;
+                // PLT function or undefined symbol - preserve original binding
+                if let Some(gsym) = global_syms.get(name) {
+                    let bind = gsym.binding;
+                    let stype = if gsym.sym_type != 0 { gsym.sym_type } else { STT_FUNC };
+                    entry[4] = (bind << 4) | stype;
+                } else {
+                    entry[4] = (STB_GLOBAL << 4) | STT_FUNC;
+                }
             }
             // st_other: DEFAULT
             entry[5] = STV_DEFAULT;
@@ -3463,7 +3469,10 @@ pub fn link_shared(
                     elf[ds+8..ds+16].copy_from_slice(&gsym.value.to_le_bytes());
                     elf[ds+16..ds+24].copy_from_slice(&gsym.size.to_le_bytes());
                 } else {
-                    elf[ds+4] = (STB_GLOBAL << 4) | STT_FUNC;
+                    // Preserve original binding (STB_WEAK vs STB_GLOBAL) and type
+                    let bind = gsym.binding;
+                    let stype = if gsym.sym_type != 0 { gsym.sym_type } else { STT_FUNC };
+                    elf[ds+4] = (bind << 4) | stype;
                     elf[ds+5] = 0;
                     elf[ds+6..ds+8].copy_from_slice(&0u16.to_le_bytes()); // UNDEF
                     elf[ds+8..ds+16].copy_from_slice(&0u64.to_le_bytes());

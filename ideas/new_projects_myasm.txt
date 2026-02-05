@@ -233,5 +233,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | libpng  | PASS | PASS | PASS | PASS | Fixed: -Wl flag splitting broke -soname/-rpath multi-arg flags; inliner now avoids bloating recursive function frames |
 | s2n-tls | PASS* | TODO | TODO | TODO | x86: 281/282 tests pass (1 codegen segfault in s2n_tls13_key_schedule_test). Fixed: COMMON symbol archive extraction, decimal constant type promotion (C11 6.4.4.1), nested designated initializer pointer placement |
 | crun    | PASS | PASS | PASS | FAIL | Fixed i686: DT_TEXTREL for WEAK dynamic data symbols (environ) referenced by R_386_32 |
-| lame    | PASS | TODO | TODO | TODO | Passes x86 out of the box |
+| lame    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | sdcc    | PASS (build script fix) | TODO | TODO | TODO | Build script fix: repo has stale RISC-V .o files; distclean bug (clean.mk lists "pic" not "pic14") leaves them; need find . -name "*.o" -delete before build |
+| blosc   | PASS | PASS | PASS | PASS | Fixed: weak undefined symbols in shared library .dynsym were emitted as STB_GLOBAL instead of STB_WEAK, causing runtime "undefined symbol" errors for ZSTD_trace_* |
+| TinyScheme | PASS | PASS | PASS | PASS | All architectures pass out of the box |

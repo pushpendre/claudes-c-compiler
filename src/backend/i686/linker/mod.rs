@@ -918,9 +918,15 @@ fn emit_executable(
     for name in plt_symbols {
         let idx = dynsym_entries.len();
         let name_off = dynstr.add(name);
+        // Preserve original binding (STB_WEAK vs STB_GLOBAL)
+        let (bind, stype) = if let Some(sym) = global_symbols.get(name) {
+            (sym.binding, if sym.sym_type != 0 { sym.sym_type } else { STT_FUNC })
+        } else {
+            (STB_GLOBAL, STT_FUNC)
+        };
         dynsym_entries.push(Elf32Sym {
             name: name_off, value: 0, size: 0,
-            info: (STB_GLOBAL << 4) | STT_FUNC, other: 0, shndx: SHN_UNDEF,
+            info: (bind << 4) | stype, other: 0, shndx: SHN_UNDEF,
         });
         dynsym_map.insert(name.clone(), idx);
         dynsym_names.push(name.clone());
