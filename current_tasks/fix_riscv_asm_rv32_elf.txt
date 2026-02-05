@@ -1,0 +1,3 @@
+Fix RISC-V assembler to produce 32-bit ELF when -march=rv32* -mabi=ilp32 is specified.
+Currently the assembler always produces 64-bit ELF regardless of -march/-mabi flags.
+This breaks the kernel compat_vdso build which needs 32-bit RISC-V objects.
