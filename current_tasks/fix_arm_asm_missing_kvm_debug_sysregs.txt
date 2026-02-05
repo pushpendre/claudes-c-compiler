@@ -1,0 +1,24 @@
+Fix ARM assembler: add missing KVM/debug system registers for defconfig kernel
+
+The ARM defconfig kernel build fails with "unsupported system register" for several
+KVM and debug registers used in kernel code:
+
+Missing registers:
+- spsel (SPSel): Stack Pointer Select register, encoding 0xc210
+  Used in kexec.h inline asm for faking PSTATE
+- mdccint_el1 (MDCCINT_EL1): Debug Comms Channel Interrupt, encoding 0x8010
+  Used in KVM debug-sr.c for save/restore of debug registers
+- fpexc32_el2 (FPEXC32_EL2): Floating-Point Exception Control, encoding 0xe298
+  Used in KVM switch.c for AArch32 FP exception handling
+- dbgauthstatus_el1 (DBGAUTHSTATUS_EL1): Debug Auth Status, encoding 0x83f6
+  Used in KVM debug-sr.c
+- spsr_abt (SPSR_ABT): Saved Program Status (Abort mode), encoding 0xe219
+  Used in KVM for AArch32 state save/restore
+
+Fix: Add these registers to both MRS and MSR lookup tables in
+src/backend/arm/assembler/encoder/system.rs
+
+Note: PMU registers (pmccfiltr_el0, pmceid0_el0, etc.) are being fixed separately
+in the fix_arm_asm_missing_pmu_sysregs task.
+
+Started: 2026-02-05
