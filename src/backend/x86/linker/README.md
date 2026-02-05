@@ -114,8 +114,14 @@ pub fn link_shared(
 
 | File | Lines | Role |
 |------|-------|------|
-| `mod.rs` | ~2950 | Linker orchestration for both executables and shared libraries: PLT/GOT creation, layout, relocation application, output emission.  Defines `GlobalSymbol`.  Delegates section merging, COMMON allocation, symbol registration, archive loading, argument parsing (`parse_linker_args`), undefined symbol checking (`check_undefined_symbols_elf64`), and ELF writing helpers (`write_elf64_shdr`) to `linker_common`. |
-| `elf.rs` | ~79 | x86-64 relocation constants (`R_X86_64_*`); type aliases mapping `linker_common` types to local names (`ElfObject`, `Symbol`, etc.); thin wrapper functions delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction; re-exports shared ELF constants from `crate::backend::elf` |
+| `mod.rs` | ~28 | Module declarations and public re-exports (`link_builtin`, `link_shared`) |
+| `types.rs` | ~89 | `GlobalSymbol` struct with `GlobalSymbolOps` impl, arch constants (`BASE_ADDR`, `INTERP`), `x86_should_replace_extra` |
+| `elf.rs` | ~81 | x86-64 relocation constants (`R_X86_64_*`); type aliases mapping `linker_common` types to local names (`ElfObject`, `Symbol`, etc.); thin wrapper functions delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction; re-exports shared ELF constants from `crate::backend::elf` |
+| `input.rs` | ~77 | File loading dispatch: `load_file` (objects, archives, shared libs, linker scripts) |
+| `plt_got.rs` | ~131 | PLT/GOT entry construction from relocation scanning, IFUNC symbol collection |
+| `link.rs` | ~342 | Orchestration: `link_builtin` and `link_shared` entry points, dynamic symbol resolution, library group loading |
+| `emit_exec.rs` | ~1,228 | Executable emission (both static and dynamic): PLT/GOT/.dynamic, layout, relocation application, `resolve_sym` |
+| `emit_shared.rs` | ~1,134 | Shared library (`.so`) emission: PIC layout, `R_X86_64_RELATIVE`/`JUMP_SLOT`/`GLOB_DAT`, RELRO, rpath/runpath |
 
 
 ## Key Data Structures
@@ -181,7 +187,7 @@ struct Elf64Rela {
 }
 ```
 
-### `GlobalSymbol` (mod.rs)
+### `GlobalSymbol` (types.rs)
 
 The linker's unified view of a resolved global symbol.  Implements the
 `GlobalSymbolOps` trait from `linker_common`:

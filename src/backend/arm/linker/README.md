@@ -14,11 +14,11 @@ archive member extraction, symbol resolution, section merging, virtual address
 layout, GOT/PLT construction, TLS handling, IFUNC support, relocation
 application, dynamic section emission, and final ELF output.
 
-The implementation spans roughly 4,000 lines of Rust across three files, plus shared
-infrastructure in `linker_common` (`GlobalSymbolOps` trait, `OutputSection` /
-`InputSection` types, section merging, symbol registration, common symbol
-allocation, archive loading, library resolution, section name mapping,
-`.eh_frame` processing, and dynamic symbol resolution).
+The implementation spans roughly 4,000 lines of Rust across ten modules, plus
+shared infrastructure in `linker_common` (`GlobalSymbolOps` trait,
+`OutputSection` / `InputSection` types, section merging, symbol registration,
+common symbol allocation, archive loading, library resolution, section name
+mapping, `.eh_frame` processing, and dynamic symbol resolution).
 
 ```
              AArch64 Built-in Linker
@@ -33,18 +33,36 @@ allocation, archive loading, library resolution, section name mapping,
   |   linker_common; AArch64 reloc consts    |
   +------------------------------------------+
                |
-               |  Vec<ElfObject>, HashMap<String, GlobalSymbol>
                v
   +------------------------------------------+
-  |           mod.rs  (~3,350 lines)         |
-  |   Orchestrator: file loading, layout,    |
-  |   GOT/PLT/IPLT, dynamic/shared emission |
+  |         input.rs  (~90 lines)            |
+  |   File loading: load_file, resolve_lib   |
   +------------------------------------------+
                |
-               |  output buffer + section map
                v
   +------------------------------------------+
-  |           reloc.rs  (~540 lines)         |
+  |   types.rs (~93)  |  plt_got.rs (~130)   |
+  |   GlobalSymbol,   |  PLT/GOT list        |
+  |   arch constants  |  construction        |
+  +------------------------------------------+
+               |
+               v
+  +------------------------------------------+
+  |          link.rs  (~411 lines)           |
+  |   Orchestrator: link_builtin,            |
+  |   link_shared entry points               |
+  +------------------------------------------+
+          /          |          \
+         v           v           v
+  +-----------+ +-----------+ +-----------+
+  | emit_     | | emit_     | | emit_     |
+  | dynamic   | | static    | | shared    |
+  | (~869)    | | (~645)    | | (~1098)   |
+  +-----------+ +-----------+ +-----------+
+               |
+               v
+  +------------------------------------------+
+  |          reloc.rs  (~540 lines)          |
   |   Relocation Application: 40+ reloc     |
   |   types, TLS relaxation, GOT refs       |
   +------------------------------------------+
@@ -123,13 +141,14 @@ shared `crate::backend::elf` module.
 
 ---
 
-## Stage 2: Orchestration (`mod.rs`)
+## Stage 2: Orchestration (`link.rs` + `input.rs` + `plt_got.rs`)
 
 ### Purpose
 
-This is the main linker driver.  It coordinates file loading, symbol
-resolution, section merging, address layout, GOT/IPLT construction, and
-ELF executable emission.
+These modules form the linker driver.  `link.rs` coordinates the pipeline:
+file loading (delegated to `input.rs`), symbol resolution, section merging,
+address layout, PLT/GOT construction (delegated to `plt_got.rs`), and
+dispatching to the appropriate emission module.
 
 ### Key Data Structures
 
@@ -601,7 +620,14 @@ resolution, section layout, GOT allocation, and final addresses.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | ~3,350 | Public API (`link_builtin`, `link_shared`), file loading/dispatch, address layout, GOT/PLT/IPLT construction, static/dynamic executable emission, shared library emission. Symbol registration, section merging, common allocation, and archive loading delegate to `linker_common`. |
+| `mod.rs` | ~40 | Module declarations and public re-exports (`link_builtin`, `link_shared`) |
+| `types.rs` | ~93 | `GlobalSymbol` struct with `GlobalSymbolOps` impl, arch constants (`BASE_ADDR`, `PAGE_SIZE`, `INTERP`), `arm_should_replace_extra` |
 | `elf.rs` | ~75 | AArch64 relocation constants (26 types); type aliases delegating to `linker_common` for ELF64 parsing |
+| `input.rs` | ~91 | File loading dispatch: `load_file`, `resolve_lib`, `resolve_lib_prefer_shared` |
+| `plt_got.rs` | ~130 | PLT/GOT entry list construction from relocation scanning |
+| `link.rs` | ~411 | Orchestration: `link_builtin` and `link_shared` entry points, dynamic symbol resolution, library group loading |
+| `emit_dynamic.rs` | ~869 | Dynamic executable emission: PLT/GOT/.dynamic section, address layout, copy relocations |
+| `emit_shared.rs` | ~1,098 | Shared library (`.so`) emission: PIC layout, `R_AARCH64_RELATIVE`/`JUMP_SLOT`/`GLOB_DAT`, RELRO |
+| `emit_static.rs` | ~645 | Static executable emission: IPLT/IRELATIVE, two-segment layout |
 | `reloc.rs` | ~540 | Relocation application (40+ types), TLS relaxation, GOT/TLS-IE references, instruction field patching helpers |
 | **Total** | **~4,000** | (plus shared infrastructure in `linker_common`) |

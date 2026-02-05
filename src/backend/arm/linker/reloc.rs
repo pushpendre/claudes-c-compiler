@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use super::elf::*;
-use super::{OutputSection, GlobalSymbol};
+use super::types::GlobalSymbol;
+use crate::backend::linker_common::OutputSection;
 
 // TLS relocation types (AArch64 Local Exec model for static linking)
 const R_AARCH64_TLSLE_ADD_TPREL_HI12: u32 = 549;

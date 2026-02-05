@@ -1,8 +1,0 @@
-Split the three remaining monolithic linker mod.rs files into modular phases.
-
-ARM linker: mod.rs (3282 lines) -> types.rs, input.rs, plt_got.rs, link.rs, emit_dynamic.rs, emit_shared.rs, emit_static.rs
-x86 linker: mod.rs (2970 lines) -> similar split
-i686 linker: mod.rs (3271 lines) -> similar split
-
-Following the pattern established in the RISC-V linker split (commit b7ae1967).
-Update READMEs for the linker subdirectories.

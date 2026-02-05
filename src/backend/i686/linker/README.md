@@ -539,19 +539,28 @@ headers matter) and reduces file size.
 
 ## File Inventory
 
-| File         | Role                                                        |
-|--------------|-------------------------------------------------------------|
-| `mod.rs`     | Main orchestration: `link_builtin()` and `link_shared()`    |
-|              | entry points, archive resolution, section merging, symbol   |
-|              | resolution, PLT/GOT construction, layout, ELF emission     |
-| `types.rs`   | ELF32-specific constants (relocation types, dynamic tags,   |
-|              | section flags), struct definitions (`InputObject`,          |
-|              | `LinkerSymbol`, `OutputSection`, etc.), helper functions    |
-| `parse.rs`   | ELF32 object file parsing (`parse_elf32`), regular and      |
-|              | thin archive extraction                                     |
-| `dynsym.rs`  | Dynamic symbol reading from ELF32 shared libraries,         |
-|              | GNU version info parsing, linker script resolution          |
-| `reloc.rs`   | i386 relocation application: all R_386_* types including    |
-|              | GOT32X relaxation and TLS relocations                       |
-| `gnu_hash.rs`| GNU hash table (.gnu.hash) builder for ELF32 with 32-bit   |
-|              | bloom filter words                                          |
+| File         | Lines | Role                                                        |
+|--------------|-------|-------------------------------------------------------------|
+| `mod.rs`     | ~50   | Module declarations, `DynStrTab` u32 wrapper, public re-exports |
+| `types.rs`   | ~323  | ELF32-specific constants (relocation types, dynamic tags,   |
+|              |       | section flags), struct definitions (`InputObject`,          |
+|              |       | `LinkerSymbol`, `OutputSection`, etc.), helper functions    |
+| `parse.rs`   | ~195  | ELF32 object file parsing (`parse_elf32`), regular and      |
+|              |       | thin archive extraction                                     |
+| `dynsym.rs`  | ~310  | Dynamic symbol reading from ELF32 shared libraries,         |
+|              |       | GNU version info parsing, linker script resolution          |
+| `reloc.rs`   | ~302  | i386 relocation application: all R_386_* types including    |
+|              |       | GOT32X relaxation and TLS relocations                       |
+| `gnu_hash.rs`| ~76   | GNU hash table (.gnu.hash) builder for ELF32 with 32-bit   |
+|              |       | bloom filter words                                          |
+| `input.rs`   | ~362  | Phases 1-4: argument parsing, file collection, library      |
+|              |       | loading, shared lib scanning, archive resolution            |
+| `sections.rs`| ~131  | Phase 5: section merging, COMDAT deduplication,             |
+|              |       | output section type/flag assignment                         |
+| `symbols.rs` | ~344  | Phases 6-9: symbol resolution, COMMON allocation,           |
+|              |       | PLT/GOT marking, undefined check, PLT/GOT list building    |
+| `link.rs`    | ~216  | Orchestration: `link_builtin` and `link_shared` entry points|
+| `emit.rs`    | ~1,188| Phase 10: executable layout, address assignment,            |
+|              |       | relocation application, ELF32 emission                      |
+| `shared.rs`  | ~1,046| Shared library (.so) emission: PIC layout, dynamic          |
+|              |       | relocations, symbol export, NEEDED discovery                |
