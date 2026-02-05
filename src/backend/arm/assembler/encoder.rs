@@ -1653,22 +1653,44 @@ fn encode_smulh(operands: &[Operand]) -> Result<EncodeResult, String> {
 }
 
 fn encode_neg(operands: &[Operand]) -> Result<EncodeResult, String> {
-    // NEG Rd, Rm -> SUB Rd, XZR, Rm
+    // NEG Rd, Rm [, shift #amount] -> SUB Rd, XZR, Rm [, shift #amount]
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (((sf << 31) | (1 << 30) | (0b01011 << 24))
-        | (rm << 16)) | (0b11111 << 5) | rd;
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(2) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+    let word = (sf << 31) | (1 << 30) | (0b01011 << 24) | (shift_type << 22)
+        | (rm << 16) | ((shift_amount & 0x3F) << 10) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
 fn encode_negs(operands: &[Operand]) -> Result<EncodeResult, String> {
-    // NEGS Rd, Rm -> SUBS Rd, XZR, Rm
+    // NEGS Rd, Rm [, shift #amount] -> SUBS Rd, XZR, Rm [, shift #amount]
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (((sf << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24))
-        | (rm << 16)) | (0b11111 << 5) | rd;
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(2) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+    let word = (sf << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24) | (shift_type << 22)
+        | (rm << 16) | ((shift_amount & 0x3F) << 10) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1677,12 +1699,24 @@ fn encode_mvn(operands: &[Operand]) -> Result<EncodeResult, String> {
     if let Some(Operand::RegArrangement { .. }) = operands.first() {
         return encode_neon_not(operands);
     }
-    // MVN Rd, Rm -> ORN Rd, XZR, Rm
+    // MVN Rd, Rm [, shift #amount] -> ORN Rd, XZR, Rm [, shift #amount]
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (((sf << 31) | (0b01 << 29) | (0b01010 << 24)) | (1 << 21)
-        | (rm << 16)) | (0b11111 << 5) | rd;
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(2) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            "ror" => 0b11,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+    let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
+        | (rm << 16) | ((shift_amount & 0x3F) << 10) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 

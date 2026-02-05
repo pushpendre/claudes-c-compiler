@@ -1,9 +1,0 @@
-Fix ARM encoder: mvn, neg, negs ignore shifted register operands.
-
-Instructions like `mvn x0, x1, lsl #8` and `neg x0, x1, lsl #3` produce
-incorrect code because encode_mvn(), encode_neg(), and encode_negs() don't
-read the optional Operand::Shift at operands[2]. The shift_type (bits 22-23)
-and imm6 (bits 10-15) are always zero.
-
-Fix: add shift operand handling to these three functions, mirroring how
-encode_orn() and encode_add_sub() already handle it.
