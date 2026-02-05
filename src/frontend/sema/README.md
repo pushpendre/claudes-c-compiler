@@ -88,7 +88,8 @@ The `SemanticAnalyzer` struct holds the following fields:
 logic between sema and the lowerer. The trait provides a default
 `resolve_type_spec_to_ctype` method that handles all 22 primitive C types,
 pointers, arrays, and function pointers identically. `SemanticAnalyzer`
-supplies the four divergent methods:
+supplies the five required methods (four for type resolution, one for
+constant expression evaluation):
 
 | Trait Method | Sema Behavior |
 |---|---|
@@ -450,7 +451,9 @@ When `analyze_declaration` encounters a declaration:
 
 1. **Enum constants** are collected recursively from the type specifier, walking
    into struct/union field types to catch inline enum definitions.
-2. The base type is resolved via `type_spec_to_ctype`.
+2. The base type is resolved via `type_spec_to_ctype`. For `__auto_type`
+   declarations (a GCC extension), the type is inferred from the first
+   declarator's initializer expression using `ExprTypeChecker`.
 3. **Typedefs** are handled specially: the resolved CType is stored in
    `TypeContext.typedefs`, function typedef info is extracted into
    `function_typedefs` or `func_ptr_typedef_info`, and alignment overrides
@@ -498,6 +501,11 @@ Sema emits structured diagnostics through the `DiagnosticEngine`, which supports
     via `check_member_exists`)
   - Negative array sizes ("size of array is negative", emitted from
     `eval_const_expr_as_usize`)
+  - Incompatible pointer/float implicit conversions in assignments, variable
+    initializers, and function call arguments (C11 6.5.16.1p1, via
+    `check_pointer_float_conversion`)
+  - Incompatible pointer subtraction operand types (C11 6.5.6p3, via
+    `check_pointer_subtraction_compat`)
 - **Warnings**: `-Wimplicit-function-declaration` (C89-style implicit declarations),
   `-Wreturn-type` (non-void functions that may not return a value).
 
@@ -617,10 +625,11 @@ own context-specific cases.
 
 - **Limited type checking.** Sema validates pointer<->float type incompatibility
   in assignments, variable initializers, and function call arguments (C11 6.5.16.1p1),
-  but does not perform full type compatibility checking. Return statement types,
-  function pointer call arguments, and other implicit conversions are not validated.
-  Programs with non-pointer/float type errors may pass sema and cause panics or
-  incorrect codegen in the lowerer.
+  and checks pointer subtraction operand compatibility (C11 6.5.6p3), but does not
+  perform full type compatibility checking. Return statement types, function pointer
+  call arguments, and other implicit conversions are not validated. Programs with
+  non-pointer/float type errors may pass sema and cause panics or incorrect codegen
+  in the lowerer.
 
 - **Incomplete `typeof(expr)` support.** The `ExprTypeChecker` returns `None` for
   expressions it cannot type (complex expression chains through typeof, expressions
