@@ -1,0 +1,7 @@
+Restore the emit_align_with_reloc method and R_RISCV_ALIGN constant in RISC-V elf_writer.rs.
+
+Commit db363896 accidentally removed BOTH copies of the method when it should have
+only removed the first (duplicate) copy. The second copy (the newer, correct one that
+only emits R_RISCV_ALIGN in executable sections) needs to be restored.
+
+This is a build-breaking bug — the compiler fails to compile without this method.
