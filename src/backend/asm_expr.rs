@@ -10,8 +10,28 @@
 ///   - Multiplication/Division/Modulo: `*`, `/`, `%`
 ///   - Unary: `-`, `+`, `~`, `!` (logical NOT)
 ///
-/// Integer literals: decimal, hex (0x), binary (0b), octal (leading 0).
+/// Integer literals: decimal, hex (0x), binary (0b), octal (leading 0),
+/// character literals ('c', '\n').
 /// Used by all four assembler backends (x86, i686, ARM, RISC-V).
+
+/// Map a C escape character to its ASCII value (e.g., b'n' -> 10 for '\n').
+fn char_escape_value(esc: u8) -> i64 {
+    match esc {
+        b'n' => 10,
+        b't' => 9,
+        b'r' => 13,
+        b'0' => 0,
+        b'\\' => b'\\' as i64,
+        b'\'' => b'\'' as i64,
+        b'"' => b'"' as i64,
+        b'a' => 7,
+        b'b' => 8,
+        b'f' => 12,
+        b'v' => 11,
+        _ => esc as i64,
+    }
+}
+
 /// Token type for the expression evaluator.
 #[derive(Debug)]
 enum ExprToken {
@@ -43,6 +63,30 @@ fn tokenize_expr(s: &str) -> Result<Vec<ExprToken>, String> {
         } else if c == b'>' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
             tokens.push(ExprToken::Op2(">>"));
             i += 2;
+        } else if c == b'\'' {
+            // Character literal: 'c' or '\n', '\t', '\\', etc.
+            i += 1; // skip opening quote
+            if i >= bytes.len() {
+                return Err("unterminated character literal".to_string());
+            }
+            let ch_val = if bytes[i] == b'\\' {
+                i += 1;
+                if i >= bytes.len() {
+                    return Err("unterminated character escape".to_string());
+                }
+                let esc = bytes[i];
+                i += 1;
+                char_escape_value(esc)
+            } else {
+                let val = bytes[i] as i64;
+                i += 1;
+                val
+            };
+            // Skip closing quote if present
+            if i < bytes.len() && bytes[i] == b'\'' {
+                i += 1;
+            }
+            tokens.push(ExprToken::Num(ch_val));
         } else if c.is_ascii_digit() {
             let start = i;
             if c == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
@@ -179,11 +223,44 @@ fn eval_unary(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
 }
 
 /// Parse a single integer value (no arithmetic expressions).
-/// Supports decimal, hex (0x/0X), binary (0b/0B), and octal (leading 0).
+/// Supports decimal, hex (0x/0X), binary (0b/0B), octal (leading 0),
+/// and character literals ('c', '\n', etc.).
 fn parse_single_integer(s: &str) -> Result<i64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty integer".to_string());
+    }
+
+    // Character literal: 'c' or '\n' etc. Must be the entire string
+    // (e.g., "'!'" or "'\n'"), not part of a larger expression.
+    if s.starts_with('\'') {
+        let bytes = s.as_bytes();
+        let mut i = 1;
+        if i >= bytes.len() {
+            return Err("unterminated character literal".to_string());
+        }
+        let val;
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i >= bytes.len() {
+                return Err("unterminated character escape".to_string());
+            }
+            val = char_escape_value(bytes[i]);
+            i += 1;
+        } else {
+            val = bytes[i] as i64;
+            i += 1;
+        }
+        // Skip closing quote
+        if i < bytes.len() && bytes[i] == b'\'' {
+            i += 1;
+        }
+        // Only accept if we consumed the whole string
+        if i == bytes.len() {
+            return Ok(val);
+        }
+        // Otherwise, fall through to let tokenize_expr handle it as an expression
+        return Err("character literal has trailing content".to_string());
     }
 
     let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
@@ -309,6 +386,25 @@ mod tests {
         assert_eq!(parse_integer_expr("3 * 4 + 2").unwrap(), 14);
         // | binds looser than +
         assert_eq!(parse_integer_expr("1 | 2 + 4").unwrap(), 7); // 1 | (2+4) = 1 | 6 = 7
+    }
+
+    #[test]
+    fn test_character_literals() {
+        // Simple ASCII characters
+        assert_eq!(parse_integer_expr("'!'").unwrap(), 33);
+        assert_eq!(parse_integer_expr("'A'").unwrap(), 65);
+        assert_eq!(parse_integer_expr("'0'").unwrap(), 48);
+        assert_eq!(parse_integer_expr("' '").unwrap(), 32);
+        // Escape sequences
+        assert_eq!(parse_integer_expr("'\\n'").unwrap(), 10);
+        assert_eq!(parse_integer_expr("'\\t'").unwrap(), 9);
+        assert_eq!(parse_integer_expr("'\\r'").unwrap(), 13);
+        assert_eq!(parse_integer_expr("'\\0'").unwrap(), 0);
+        assert_eq!(parse_integer_expr("'\\\\").unwrap(), 92);
+        assert_eq!(parse_integer_expr("'\\''").unwrap(), 39);
+        // Character literals in expressions
+        assert_eq!(parse_integer_expr("'A' + 1").unwrap(), 66);
+        assert_eq!(parse_integer_expr("'!' | 0x80").unwrap(), 0xA1);
     }
 
 }

@@ -1,7 +1,0 @@
-Fix specific x86 assembler encoding bugs and inline asm issues:
-
-1. pextrw instruction encoding: segfault (run1) and wrong results (run2) - likely REX prefix or immediate encoding issue
-2. Character literal parsing: $'!' in inline asm produces "undefined symbols: !" error
-3. vprold instruction: unhandled EVEX-encoded packed rotate instruction
-4. XMM register allocation wraparound: when >16 XMM operands needed, wrap-around reuses same register for multiple inputs
-5. %a modifier in inline asm: strips $ but leaves raw number as symbol reference

@@ -768,14 +768,16 @@ impl InstructionEncoder {
 
             // SSE insert/extract
             "pinsrw" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0xC4], false),
-            // TODO: pextrw memory dest needs SSE4.1 opcode 66 0F 3A 15, not legacy 66 0F C5
-            "pextrw" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0xC5], false),
+            // Legacy pextrw (66 0F C5): GP reg is in the ModRM "reg" field,
+            // XMM src is in the "r/m" field. This is inverted vs SSE4.1 extracts.
+            // TODO: pextrw with memory dest needs SSE4.1 opcode 66 0F 3A 15, not legacy 66 0F C5
+            "pextrw" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0xC5], false, true),
             "pinsrd" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22], false),
-            "pextrd" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], false),
+            "pextrd" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], false, false),
             "pinsrb" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x20], false),
-            "pextrb" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x14], false),
+            "pextrb" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x14], false, false),
             "pinsrq" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22], true),
-            "pextrq" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], true),
+            "pextrq" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], true, false),
 
             // AES-NI
             "aesenc" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0xDC]),
@@ -1240,6 +1242,11 @@ impl InstructionEncoder {
             "vpandq" => self.encode_evex_3op(ops, 0xDB, 1, 1),  // EVEX.NDS.66.0F.W1 DB /r
             "vpord" => self.encode_evex_3op(ops, 0xEB, 1, 0),   // EVEX.NDS.66.0F.W0 EB /r
             "vporq" => self.encode_evex_3op(ops, 0xEB, 1, 1),   // EVEX.NDS.66.0F.W1 EB /r
+            // AVX-512 packed rotate by immediate
+            "vprold" => self.encode_evex_rotate_imm(ops, 0x72, 1, 0),  // EVEX.NDS.66.0F.W0 72 /1 ib
+            "vprolq" => self.encode_evex_rotate_imm(ops, 0x72, 1, 1),  // EVEX.NDS.66.0F.W1 72 /1 ib
+            "vprord" => self.encode_evex_rotate_imm(ops, 0x72, 0, 0),  // EVEX.NDS.66.0F.W0 72 /0 ib
+            "vprorq" => self.encode_evex_rotate_imm(ops, 0x72, 0, 1),  // EVEX.NDS.66.0F.W1 72 /0 ib
 
             // ---- BMI2 instructions (VEX-encoded, GPR) ----
             "shrxq" => self.encode_bmi2_shift(ops, 0xF7, 3, 1), // F2.0F38.W1
@@ -3974,7 +3981,11 @@ impl InstructionEncoder {
         }
     }
 
-    fn encode_sse_extract(&mut self, ops: &[Operand], opcode: &[u8], rex_w: bool) -> Result<(), String> {
+    /// Encode SSE/SSE4.1 extract instructions (pextrw, pextrd, pextrb, pextrq).
+    /// `swap_reg_rm`: if true, the GP register goes in the ModRM "reg" field and the
+    /// XMM register goes in "r/m". This is needed for legacy pextrw (66 0F C5) which
+    /// uses inverted field assignment compared to SSE4.1 extracts (66 0F 3A xx).
+    fn encode_sse_extract(&mut self, ops: &[Operand], opcode: &[u8], rex_w: bool, swap_reg_rm: bool) -> Result<(), String> {
         if ops.len() != 3 {
             return Err("pextrX requires 3 operands".to_string());
         }
@@ -3988,9 +3999,17 @@ impl InstructionEncoder {
                     self.bytes.push(b);
                 }
                 let size = if rex_w { 8 } else { 0 };
-                self.emit_rex_rr(size, &src.name, &dst.name);
-                self.bytes.extend_from_slice(&opcode[prefix_len..]);
-                self.bytes.push(self.modrm(3, src_num, dst_num));
+                if swap_reg_rm {
+                    // Legacy pextrw: GP in reg field, XMM in r/m field
+                    self.emit_rex_rr(size, &dst.name, &src.name);
+                    self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                    self.bytes.push(self.modrm(3, dst_num, src_num));
+                } else {
+                    // SSE4.1: XMM in reg field, GP in r/m field
+                    self.emit_rex_rr(size, &src.name, &dst.name);
+                    self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                    self.bytes.push(self.modrm(3, src_num, dst_num));
+                }
                 self.bytes.push(*imm as u8);
                 Ok(())
             }
@@ -4680,6 +4699,34 @@ impl InstructionEncoder {
                 self.encode_modrm_mem(dst_num, mem)
             }
             _ => Err("unsupported EVEX 3-op operands".to_string()),
+        }
+    }
+
+    /// Encode EVEX rotate-by-immediate instructions (vprold, vprolq, vprord, vprorq).
+    /// AT&T syntax: `vprold $imm8, %src, %dst`
+    ///   ops[0] = imm8 (rotation count)
+    ///   ops[1] = src  (in ModRM r/m field)
+    ///   ops[2] = dst  (in EVEX.vvvv field)
+    /// Extension digit `ext` goes in ModRM reg field (/0 for ror, /1 for rol).
+    fn encode_evex_rotate_imm(&mut self, ops: &[Operand], opcode: u8, ext: u8, w: u8) -> Result<(), String> {
+        if ops.len() != 3 { return Err("EVEX rotate requires 3 operands (imm, src, dst)".to_string()); }
+        let ll = self.evex_ll_from_ops(ops);
+
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let b = needs_vex_ext(&src.name);
+                let dst_ext = needs_vex_ext(&dst.name);
+                let vvvv_enc = dst_num | (if dst_ext { 8 } else { 0 });
+                // pp=1 (66), mm=1 (0F map), no R extension needed for reg field (it's a fixed /ext)
+                self.emit_evex(false, false, b, false, 1, w, vvvv_enc, false, 1, ll, false, 0);
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, ext, src_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            _ => Err("unsupported EVEX rotate operands".to_string()),
         }
     }
 

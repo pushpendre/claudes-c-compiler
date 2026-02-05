@@ -880,6 +880,24 @@ fn parse_operand(s: &str) -> Result<Operand, String> {
         return parse_memory_operand(s);
     }
 
+    // Check if this is a bare numeric address like `42` (used in `movl 42, %eax`).
+    // In AT&T syntax, a bare number without `$` prefix is an absolute memory address.
+    // Only treat it as a memory operand if it parses as a pure integer and doesn't
+    // look like a numeric label reference (e.g., `1f`, `1b`).
+    if s.bytes().next().map_or(false, |c| c.is_ascii_digit() || c == b'-')
+        && !s.ends_with('f') && !s.ends_with('b')
+    {
+        if let Ok(val) = crate::backend::asm_expr::parse_integer_expr(s) {
+            return Ok(Operand::Memory(MemoryOperand {
+                segment: None,
+                displacement: Displacement::Integer(val),
+                base: None,
+                index: None,
+                scale: None,
+            }));
+        }
+    }
+
     // Plain label reference (for jmp/call targets)
     // Could be: .LBB42, funcname, funcname@PLT, 1f, 1b
     Ok(Operand::Label(s.to_string()))

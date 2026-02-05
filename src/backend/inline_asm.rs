@@ -709,8 +709,25 @@ fn assign_scratch_registers(
     let num_plus = outputs.iter().filter(|(c, _, _)| c.contains('+')).count();
 
     // First pass: assign registers to output operands only.
+    // Build a dynamic exclusion list that grows as registers are assigned,
+    // so the wraparound fallback never reuses an already-assigned register.
+    let mut output_excluded: Vec<String> = specific_regs.to_vec();
     for i in 0..outputs.len() {
-        assign_one_scratch(emitter, operands, input_tied_to, specific_regs, outputs, inputs, i, num_plus);
+        assign_one_scratch(emitter, operands, input_tied_to, &output_excluded, outputs, inputs, i, num_plus);
+        // Track the just-assigned register so it won't be reused by the
+        // next output operand when the scratch pool wraps around.
+        if !operands[i].reg.is_empty() {
+            let reg = &operands[i].reg;
+            if !output_excluded.contains(reg) {
+                output_excluded.push(reg.clone());
+            }
+            if !operands[i].reg_hi.is_empty() {
+                let reg_hi = &operands[i].reg_hi;
+                if !output_excluded.contains(reg_hi) {
+                    output_excluded.push(reg_hi.clone());
+                }
+            }
+        }
     }
 
     // Collect registers assigned to early-clobber outputs ("&" in constraint).
@@ -744,8 +761,21 @@ fn assign_scratch_registers(
 
     // Second pass: assign registers to non-synthetic input operands using the
     // extended exclusion list that includes early-clobber output registers.
+    // Also track assigned registers to avoid reuse when the pool wraps around.
     for i in outputs.len()..total_operands {
         assign_one_scratch(emitter, operands, input_tied_to, &input_excluded, outputs, inputs, i, num_plus);
+        if !operands[i].reg.is_empty() {
+            let reg = &operands[i].reg;
+            if !input_excluded.contains(reg) {
+                input_excluded.push(reg.clone());
+            }
+            if !operands[i].reg_hi.is_empty() {
+                let reg_hi = &operands[i].reg_hi;
+                if !input_excluded.contains(reg_hi) {
+                    input_excluded.push(reg_hi.clone());
+                }
+            }
+        }
     }
 }
 
