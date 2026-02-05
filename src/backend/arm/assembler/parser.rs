@@ -2271,14 +2271,32 @@ fn try_parse_symbol_diff(expr: &str) -> Option<DataValue> {
 }
 
 /// Try to parse symbol+offset or symbol-offset.
+/// Also handles offset+symbol (e.g., 0x9b000000 + some_symbol).
 fn try_parse_symbol_offset(s: &str) -> Option<DataValue> {
     for (i, c) in s.char_indices().skip(1) {
         if c == '+' || c == '-' {
-            let sym = s[..i].trim();
-            let offset_str = &s[i..]; // includes the sign
-            if let Ok(offset) = parse_int_literal(offset_str) {
-                if !sym.is_empty() && !sym.contains(' ') {
-                    return Some(DataValue::SymbolOffset(sym.to_string(), offset));
+            let left = s[..i].trim();
+            let right_with_sign = &s[i..]; // includes the sign
+
+            // Case 1: symbol+offset or symbol-offset
+            if let Ok(offset) = parse_int_literal(right_with_sign) {
+                if !left.is_empty() && !left.contains(' ') {
+                    return Some(DataValue::SymbolOffset(left.to_string(), offset));
+                }
+            }
+
+            // Case 2: offset+symbol (e.g., "0x9b000000 + some_symbol") - only for '+'
+            if c == '+' {
+                if let Ok(offset) = parse_int_literal(left) {
+                    let sym = right_with_sign[1..].trim(); // skip the '+'
+                    if !sym.is_empty()
+                        && !sym.contains(' ')
+                        && sym
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                    {
+                        return Some(DataValue::SymbolOffset(sym.to_string(), offset));
+                    }
                 }
             }
         }

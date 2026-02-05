@@ -674,6 +674,28 @@ fn parse_single_data_value(s: &str) -> Result<DataValue, String> {
         }
     }
 
+    // Try to parse as constant+symbol (e.g., "0x80000000 + some_symbol")
+    // This handles cases where the constant comes before the symbol in an additive expression.
+    if could_be_numeric_ref || first == '(' {
+        for (i, c) in s.char_indices().skip(1) {
+            if c == '+' {
+                let left = s[..i].trim();
+                let right = s[i + 1..].trim();
+                if let Ok(offset) = parse_data_value_int(left) {
+                    // Check if right side looks like a symbol
+                    let r_first = right.chars().next().unwrap_or('\0');
+                    if r_first.is_ascii_alphabetic() || r_first == '_' || r_first == '.' {
+                        let (sym, extra_addend) = parse_symbol_addend(right);
+                        return Ok(DataValue::Symbol {
+                            name: sym,
+                            addend: offset + extra_addend,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Try to parse as integer; if it fails and contains symbol-like chars,
     // store as a raw expression for alias resolution at emit time.
     match parse_data_value_int(s) {
