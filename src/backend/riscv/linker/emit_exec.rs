@@ -548,19 +548,22 @@ pub fn emit_executable(
     drop(define_linker_sym);
 
     // __start_<section> / __stop_<section> symbols
-    for sec in merged_sections.iter() {
+    // Note: we use section_vaddrs[] for the final virtual address, not sec.vaddr,
+    // because MergedSection::vaddr is not updated during layout.
+    for (si, sec) in merged_sections.iter().enumerate() {
         if linker_common::is_valid_c_identifier_for_section(&sec.name) {
+            let sec_vaddr = section_vaddrs[si];
             let start_name = format!("__start_{}", sec.name);
             let stop_name = format!("__stop_{}", sec.name);
             if let Some(entry) = global_syms.get_mut(&start_name) {
                 if !entry.defined {
-                    entry.value = sec.vaddr;
+                    entry.value = sec_vaddr;
                     entry.defined = true;
                 }
             }
             if let Some(entry) = global_syms.get_mut(&stop_name) {
                 if !entry.defined {
-                    entry.value = sec.vaddr + sec.data.len() as u64;
+                    entry.value = sec_vaddr + sec.data.len() as u64;
                     entry.defined = true;
                 }
             }

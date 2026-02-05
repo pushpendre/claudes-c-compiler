@@ -437,6 +437,10 @@ pub(super) fn emit_executable(
         fini_vaddr = 0; fini_size = 0;
     }
 
+    // Layout custom executable sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, SHF_EXECINSTR);
+
     // .iplt (IFUNC PLT entries for static linking)
     let iplt_entry_size: u32 = 8;
     let iplt_total_size = (num_ifunc as u32) * iplt_entry_size;
@@ -494,6 +498,10 @@ pub(super) fn emit_executable(
         }
     }
 
+    // Layout custom read-only sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, 0);
+
     let rodata_seg_file_end = file_offset;
     let rodata_seg_vaddr_end = vaddr;
 
@@ -516,6 +524,10 @@ pub(super) fn emit_executable(
     let (fini_array_vaddr, fini_array_size) = layout_section(
         ".fini_array", section_name_to_idx, output_sections, &mut file_offset, &mut vaddr, 4,
     );
+
+    // Layout custom writable sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, SHF_WRITE);
 
     // .dynamic
     file_offset = align_up(file_offset, 4); vaddr = align_up(vaddr, 4);
@@ -974,6 +986,54 @@ pub(super) fn layout_section(
         (sec_vaddr, sec_size)
     } else {
         (0, 0)
+    }
+}
+
+/// Layout custom sections with a given flag requirement.
+///
+/// Custom sections are those not in the standard set (.text, .rodata, .data, etc.)
+/// that have the SHF_ALLOC flag plus the specified additional flag. This is needed
+/// for `__start_<section>` / `__stop_<section>` symbol auto-generation and for
+/// sections placed via `__attribute__((section("name")))`.
+///
+/// `required_flag` selects which type:
+///   - SHF_EXECINSTR: custom executable sections (placed in text segment)
+///   - 0: custom read-only sections (placed in rodata segment, no write/exec)
+///   - SHF_WRITE: custom writable sections (placed in data segment)
+pub(super) fn layout_custom_sections(
+    section_name_to_idx: &HashMap<String, usize>,
+    output_sections: &mut [OutputSection],
+    file_offset: &mut u32,
+    vaddr: &mut u32,
+    required_flag: u32,
+) {
+    let standard_sections: &[&str] = &[
+        ".text", ".rodata", ".data", ".bss", ".init", ".fini",
+        ".init_array", ".fini_array", ".eh_frame", ".note",
+        ".tdata", ".tbss", ".tm_clone_table",
+    ];
+    let mut custom: Vec<String> = section_name_to_idx.keys()
+        .filter(|name| {
+            if standard_sections.contains(&name.as_str()) { return false; }
+            let idx = match section_name_to_idx.get(name.as_str()) {
+                Some(&i) => i,
+                None => return false,
+            };
+            let sec = &output_sections[idx];
+            if sec.flags & SHF_ALLOC == 0 { return false; }
+            // Classify by flags: 0 = read-only (no write, no exec),
+            // SHF_EXECINSTR = executable, SHF_WRITE = writable (but not executable,
+            // since writable+executable sections go in the text segment).
+            match required_flag {
+                0 => sec.flags & SHF_WRITE == 0 && sec.flags & SHF_EXECINSTR == 0,
+                f => sec.flags & f != 0 && (f != SHF_WRITE || sec.flags & SHF_EXECINSTR == 0),
+            }
+        })
+        .cloned()
+        .collect();
+    custom.sort(); // Deterministic order
+    for name in &custom {
+        layout_section(name, section_name_to_idx, output_sections, file_offset, vaddr, 4);
     }
 }
 

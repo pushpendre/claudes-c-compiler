@@ -9,7 +9,7 @@ use std::path::Path;
 use super::types::*;
 use super::reloc::{RelocContext, resolve_got_reloc, resolve_tls_ie, resolve_tls_gotie};
 use super::gnu_hash::build_gnu_hash_32;
-use super::emit::{layout_section, layout_tls, build_plt};
+use super::emit::{layout_section, layout_custom_sections, layout_tls, build_plt};
 use super::DynStrTab;
 use crate::backend::linker_common;
 
@@ -392,6 +392,10 @@ pub(super) fn emit_shared_library_32(
     let (fini_vaddr, fini_size) = layout_section(
         ".fini", section_name_to_idx, output_sections, &mut file_offset, &mut vaddr, 4);
 
+    // Layout custom executable sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, SHF_EXECINSTR);
+
     let text_seg_file_end = file_offset;
     let text_seg_vaddr_end = vaddr;
 
@@ -407,6 +411,10 @@ pub(super) fn emit_shared_library_32(
         ".rodata", section_name_to_idx, output_sections, &mut file_offset, &mut vaddr, 16);
     let (_, _) = layout_section(
         ".eh_frame", section_name_to_idx, output_sections, &mut file_offset, &mut vaddr, 4);
+
+    // Layout custom read-only sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, 0);
 
     let rodata_seg_file_end = file_offset;
     let rodata_seg_vaddr_end = vaddr;
@@ -430,6 +438,10 @@ pub(super) fn emit_shared_library_32(
     // .fini_array
     let (fini_array_vaddr, fini_array_size) = layout_section(
         ".fini_array", section_name_to_idx, output_sections, &mut file_offset, &mut vaddr, 4);
+
+    // Layout custom writable sections (for __start_/__stop_ symbol auto-generation)
+    layout_custom_sections(section_name_to_idx, output_sections,
+        &mut file_offset, &mut vaddr, SHF_WRITE);
 
     // .data
     let (_, _) = layout_section(

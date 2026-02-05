@@ -56,10 +56,22 @@ pub(super) fn resolve_symbols(
 
             match global_symbols.get(&sym.name) {
                 None => {
+                    // Note: STB_LOCAL symbols are deliberately inserted here when no
+                    // entry exists yet. Unlike ELF64 backends that skip locals entirely,
+                    // the i686 backend must allow locals as fallback definitions because
+                    // glibc's static archives contain cross-object references that resolve
+                    // through local symbols. The Some arm below prevents locals from
+                    // *overriding* any existing entry (global, weak, or other local).
                     global_symbols.insert(sym.name.clone(), new_sym);
                 }
                 Some(existing) => {
-                    if (sym.binding == STB_GLOBAL && existing.binding == STB_WEAK)
+                    // Local symbols must not override any existing entry.
+                    // They have file scope only and should not shadow globals
+                    // or weaks from other objects (e.g. a static "data" in one
+                    // file must not shadow a global "data" in another).
+                    if sym.binding == STB_LOCAL {
+                        // Already have a definition; keep it.
+                    } else if sym.binding == STB_GLOBAL && (existing.binding == STB_WEAK || existing.binding == STB_LOCAL)
                         || (!existing.is_defined && new_sym.is_defined)
                     {
                         global_symbols.insert(sym.name.clone(), new_sym);

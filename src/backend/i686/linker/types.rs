@@ -304,8 +304,17 @@ pub(super) fn output_section_name(name: &str, flags: u32, sh_type: u32) -> Optio
         return Some(".data".to_string());
     }
 
-    // For sections with alloc flag, use flag-based grouping
+    // For alloc sections whose names are valid C identifiers, preserve the
+    // original name. This is needed for __start_<section> / __stop_<section>
+    // symbol auto-generation (GNU ld feature). Without this, custom sections
+    // like "my_cbs" would be merged into .text/.data/.rodata and the linker
+    // could not resolve __start_my_cbs / __stop_my_cbs symbols.
     if flags & SHF_ALLOC != 0 {
+        if crate::backend::linker_common::is_valid_c_identifier_for_section(name) {
+            return Some(name.to_string());
+        }
+        // Fall back to flag-based grouping for other alloc sections
+        // (e.g. .gcc_except_table, .stapsdt.base, .gnu.warning.*)
         if flags & SHF_EXECINSTR != 0 {
             return Some(".text".to_string());
         }
