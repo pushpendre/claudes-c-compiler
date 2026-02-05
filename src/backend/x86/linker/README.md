@@ -53,7 +53,7 @@ pub fn link_shared(
     |  - Parse ELF .o  (linker_common::parse_elf64_object)           |
     |  - Parse .a archives  (linker_common::load_archive_elf64)      |
     |  - Parse .so dynamic symbols  (parse_shared_library_symbols)   |
-    |  - Parse linker scripts  (parse_linker_script)                 |
+    |  - Parse linker scripts  (parse_linker_script_entries)         |
     +----------------------------------------------------------------+
                               |
                     Objects + Global Symbol Table
@@ -114,30 +114,31 @@ pub fn link_shared(
 
 | File | Lines | Role |
 |------|-------|------|
-| `mod.rs` | ~2820 | Linker orchestration for both executables and shared libraries: PLT/GOT creation, layout, relocation application, output emission. Delegates section merging, COMMON allocation, symbol registration, and archive loading to `linker_common`. |
-| `elf.rs` | ~77 | x86-64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction |
+| `mod.rs` | ~3020 | Linker orchestration for both executables and shared libraries: PLT/GOT creation, layout, relocation application, output emission.  Defines `GlobalSymbol`.  Delegates section merging, COMMON allocation, symbol registration, and archive loading to `linker_common`. |
+| `elf.rs` | ~79 | x86-64 relocation constants (`R_X86_64_*`); type aliases mapping `linker_common` types to local names (`ElfObject`, `Symbol`, etc.); thin wrapper functions delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction; re-exports shared ELF constants from `crate::backend::elf` |
 
 
 ## Key Data Structures
 
-### `ElfObject` (elf.rs)
+### `ElfObject` (linker_common, aliased in elf.rs)
 
-The parsed representation of one relocatable object file:
+The parsed representation of one relocatable object file.  Defined as
+`Elf64Object` in `linker_common.rs`; aliased as `ElfObject` in `elf.rs`:
 
 ```rust
-struct ElfObject {
-    sections:     Vec<SectionHeader>,   // parsed section headers
-    symbols:      Vec<Symbol>,          // parsed symbol table
-    section_data: Vec<Vec<u8>>,         // raw bytes for each section
-    relocations:  Vec<Vec<Rela>>,       // relocations indexed by target section
-    source_name:  String,               // file path for diagnostics
+struct Elf64Object {
+    sections:     Vec<Elf64Section>,   // parsed section headers
+    symbols:      Vec<Elf64Symbol>,    // parsed symbol table
+    section_data: Vec<Vec<u8>>,        // raw bytes for each section
+    relocations:  Vec<Vec<Elf64Rela>>, // relocations indexed by target section
+    source_name:  String,              // file path for diagnostics
 }
 ```
 
-### `SectionHeader` (elf.rs)
+### `Elf64Section` (linker_common, aliased as `SectionHeader`)
 
 ```rust
-struct SectionHeader {
+struct Elf64Section {
     name_idx:  u32,
     name:      String,      // resolved from .shstrtab
     sh_type:   u32,         // SHT_PROGBITS, SHT_NOBITS, SHT_RELA, ...
@@ -152,10 +153,10 @@ struct SectionHeader {
 }
 ```
 
-### `Symbol` (elf.rs)
+### `Elf64Symbol` (linker_common, aliased as `Symbol`)
 
 ```rust
-struct Symbol {
+struct Elf64Symbol {
     name_idx: u32,
     name:     String,   // resolved from .strtab
     info:     u8,       // (binding << 4) | type
@@ -169,10 +170,10 @@ struct Symbol {
 Helper methods: `binding()`, `sym_type()`, `visibility()`, `is_undefined()`,
 `is_global()`, `is_weak()`, `is_local()`.
 
-### `Rela` (elf.rs)
+### `Elf64Rela` (linker_common, aliased as `Rela`)
 
 ```rust
-struct Rela {
+struct Elf64Rela {
     offset:    u64,    // offset within the section
     sym_idx:   u32,    // index into the object's symbol table
     rela_type: u32,    // R_X86_64_* constant
@@ -182,24 +183,27 @@ struct Rela {
 
 ### `GlobalSymbol` (mod.rs)
 
-The linker's unified view of a resolved global symbol:
+The linker's unified view of a resolved global symbol.  Implements the
+`GlobalSymbolOps` trait from `linker_common`:
 
 ```rust
 struct GlobalSymbol {
-    value:       u64,            // virtual address (after layout)
-    size:        u64,
-    info:        u8,             // original ELF st_info
-    defined_in:  Option<usize>,  // object index, or None for undefined
-    from_lib:    Option<String>, // SONAME if from a shared library
-    plt_idx:     Option<usize>,  // index into PLT, if any
-    got_idx:     Option<usize>,  // index into GOT entries, if any
-    section_idx: u16,            // section index in defining object
-    is_dynamic:  bool,           // true if resolved from a .so
-    copy_reloc:  bool,           // true if needs R_X86_64_COPY
+    value:         u64,            // virtual address (after layout)
+    size:          u64,
+    info:          u8,             // original ELF st_info
+    defined_in:    Option<usize>,  // object index, or None for undefined
+    from_lib:      Option<String>, // SONAME if from a shared library
+    plt_idx:       Option<usize>,  // index into PLT, if any
+    got_idx:       Option<usize>,  // index into GOT entries, if any
+    section_idx:   u16,            // section index in defining object
+    is_dynamic:    bool,           // true if resolved from a .so
+    copy_reloc:    bool,           // true if needs R_X86_64_COPY
+    lib_sym_value: u64,            // original value from shared library symbol
+    version:       Option<String>, // GLIBC version string (e.g. "GLIBC_2.3")
 }
 ```
 
-### `OutputSection` (linker_common.rs)
+### `OutputSection` (linker_common)
 
 Represents one merged output section in the final executable:
 
@@ -217,7 +221,7 @@ struct OutputSection {
 }
 ```
 
-### `InputSection` (linker_common.rs)
+### `InputSection` (linker_common)
 
 Tracks where one input section is placed within an output section:
 
@@ -230,7 +234,7 @@ struct InputSection {
 }
 ```
 
-### `DynStrTab` (linker_common.rs)
+### `DynStrTab` (linker_common)
 
 A simple dynamic string table builder with deduplication, used for `.dynstr`.
 Defined in the shared `linker_common` module and re-used by x86 and other backends:
@@ -265,50 +269,63 @@ The `load_file()` function dispatches based on file format:
 |-------|--------|---------|
 | `\x7fELF` + `ET_REL` | Relocatable object | `parse_object()` -> register symbols |
 | `\x7fELF` + `ET_DYN` | Shared library | `load_shared_library()` -> extract dynamic symbols |
-| `!<arch>\n` | Static archive | `load_archive()` -> selective member extraction |
-| Text | Linker script | `parse_linker_script()` -> follow `GROUP(...)` references |
+| `!<arch>\n` | Static archive | `load_archive_elf64()` -> selective member extraction |
+| `!<thin>\n` | Thin archive | `load_thin_archive_elf64()` -> selective member extraction |
+| Text | Linker script | `parse_linker_script_entries()` -> follow `GROUP(...)` / `INPUT(...)` references |
 
-**Archive loading** (`load_archive`):
+**Archive loading** (`load_archive_elf64`):
 
 Archives are loaded selectively.  The algorithm:
-1. Parse all archive members into `ElfObject` values.
-2. Iterate: for each unpulled member, check if it defines a symbol that is
+1. Parse all archive members (via `parse_archive_members` in `crate::backend::elf`).
+2. Parse each ELF member into an `Elf64Object`, skipping non-ELF members and
+   members with mismatched `e_machine`.
+3. Iterate: for each unpulled member, check if it defines a symbol that is
    currently undefined in `globals`.
-3. If yes, pull the member: register its symbols and add it to `objects`.
-4. Repeat until no more members are pulled (fixed-point iteration).
+4. If yes, pull the member: register its symbols and add it to `objects`.
+5. Repeat until no more members are pulled (fixed-point iteration).
 
 This handles transitive dependencies between archive members.
 
-**Shared library loading** (`load_shared_library`):
+**Shared library loading** (`load_shared_library_elf64`):
 
-1. Parse the `.dynsym` section to extract exported symbol names.
-2. Extract the SONAME from the `.dynamic` section.
+1. Parse the `.dynsym` section to extract exported symbol names (with version
+   information from `.gnu.version` / `.gnu.verdef`).
+2. Extract the SONAME from the `.dynamic` section (falls back to the file
+   basename at the call site if no SONAME is found).
 3. For each dynamic symbol, if it satisfies an undefined reference in
    `globals`, create a `GlobalSymbol` entry with `is_dynamic = true`.
+   Alias matching is also performed: if a matched weak `STT_OBJECT` symbol
+   shares the same `(value, size)` as another library export, the alias is
+   also added to `globals`.
 4. Add the SONAME to `needed_sonames` for the `DT_NEEDED` entries.
 
-**Fallback dynamic resolution** (`resolve_dynamic_symbols`):
+**Fallback dynamic resolution** (`resolve_dynamic_symbols_elf64`):
 
 After all user-specified inputs are loaded, any remaining undefined symbols
 are searched in system libraries (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`)
-at well-known paths.  Linker-defined symbols (`_GLOBAL_OFFSET_TABLE_`, `__bss_start`,
-`_edata`, `_end`, `__end`, `__ehdr_start`, `__executable_start`, `_etext`, `etext`,
-`__dso_handle`, `_DYNAMIC`, `__data_start`, `data_start`, init/fini/preinit array
-boundary symbols, and `__rela_iplt_start`/`__rela_iplt_end`) are excluded from this
-check since they are defined during the layout phase.
+at well-known paths.  Linker-defined symbols are excluded from this check
+since they are provided during the layout phase.  The full exclusion list
+is maintained in `linker_common::is_linker_defined_symbol()` and includes
+`_GLOBAL_OFFSET_TABLE_`, `__bss_start`, `_edata`, `_end`, `__end`,
+`__ehdr_start`, `__executable_start`, `_etext`, `etext`, `__dso_handle`,
+`_DYNAMIC`, `__data_start`, `data_start`, init/fini/preinit array boundary
+symbols, `__rela_iplt_start`/`__rela_iplt_end`, `_IO_stdin_used`,
+`_init`/`_fini`, `__tls_get_addr`, and various unwinder/ITM symbols.
 
 ### Phase 2: Symbol Resolution
 
 `linker_common::register_symbols_elf64()` processes each object file's symbol table:
 
-1. **Local symbols** are skipped (not relevant to inter-object linking).
-2. **Section symbols** and **file symbols** are skipped.
+1. **Section symbols** and **file symbols** are skipped.
+2. **Local symbols** and empty-named symbols are skipped.
 3. **Defined non-local symbols** are inserted into `globals`:
    - A new definition replaces an undefined reference.
    - A global definition replaces a weak definition.
-   - A dynamic definition can be replaced by a static definition.
+   - A dynamic definition can be replaced by a static definition (via
+     the `x86_should_replace_extra` callback).
 4. **COMMON symbols** are recorded but can be overridden by real definitions.
-5. **Undefined symbols** create placeholder entries in `globals`.
+5. **Undefined symbols** create placeholder entries in `globals` (only if
+   not already present).
 
 Resolution priority: `static defined > dynamic defined > weak > undefined`.
 
@@ -319,28 +336,34 @@ objects into output sections:
 
 1. **Filtering** -- Only `SHF_ALLOC` sections are included.  Non-allocatable
    sections (`.strtab`, `.symtab`, `.rela.*`, group sections) and
-   `SHF_EXCLUDE` sections are skipped.  Zero-size `SHT_PROGBITS` sections
-   are also skipped.
-2. **Name mapping** -- Input section names are mapped to canonical output names:
+   `SHF_EXCLUDE` sections are skipped.
+2. **Name mapping** -- Input section names are mapped to canonical output names
+   (evaluated in order, first match wins):
    ```
-   .text.*       -> .text
-   .data.*       -> .data
-   .data.rel.ro* -> .data.rel.ro
-   .rodata.*     -> .rodata
-   .bss.*        -> .bss
-   .tdata.*      -> .tdata
-   .tbss.*       -> .tbss
-   .init_array*  -> .init_array
-   .fini_array*  -> .fini_array
+   .text.*            -> .text
+   .data.rel.ro*      -> .data.rel.ro    (checked before .data.*)
+   .data.*            -> .data
+   .rodata.*          -> .rodata
+   .bss.*             -> .bss
+   .init_array*       -> .init_array
+   .fini_array*       -> .fini_array
+   .tbss.*            -> .tbss
+   .tdata.*           -> .tdata
+   .gcc_except_table* -> .gcc_except_table
+   .eh_frame*         -> .eh_frame
+   .note.*            -> (unchanged, kept as-is)
+   (anything else)    -> (unchanged, kept as-is)
    ```
 3. **Offset computation** -- Each input section is assigned an offset within
    its output section, respecting its alignment requirement.
-4. **Sorting** -- Output sections are sorted by permission profile:
+4. **Sorting** -- Output sections are sorted by a `(category, is_nobits)` key:
    ```
-   Read-only (no write, no exec)  -> first
-   Executable (exec flag)         -> second
-   Read-write PROGBITS            -> third
-   Read-write NOBITS (BSS)        -> last
+   (0, 0)  Read-only PROGBITS     (e.g., .rodata, .eh_frame)
+   (0, 1)  Read-only NOBITS
+   (1, 0)  Executable PROGBITS    (e.g., .text)
+   (1, 1)  Executable NOBITS
+   (2, 0)  Read-write PROGBITS    (e.g., .data, .init_array)
+   (2, 1)  Read-write NOBITS      (e.g., .bss)
    ```
 5. **Section map** -- A `(object_idx, section_idx) -> (output_idx, offset)`
    map is built for relocation processing.
@@ -351,7 +374,8 @@ objects into output sections:
 `.comm` directives) into the `.bss` section:
 
 1. Collect all globals with `SHN_COMMON`.
-2. For each, align and append to `.bss`'s `mem_size`.
+2. For each, align and append to `.bss`'s `mem_size` (the symbol's `value`
+   field is used as its alignment requirement).
 3. Update the symbol's `value` to its offset within `.bss`.
 
 ### Phase 5: PLT/GOT Construction
@@ -362,24 +386,28 @@ entries, GOT entries, or copy relocations:
 | Relocation | Symbol Type | Action |
 |------------|------------|--------|
 | `R_X86_64_PLT32` / `R_X86_64_PC32` | Dynamic function | Create PLT entry |
-| `R_X86_64_PLT32` / `R_X86_64_PC32` | Dynamic object | Create copy relocation |
+| `R_X86_64_PLT32` / `R_X86_64_PC32` | Dynamic object (`STT_OBJECT`) | Create copy relocation |
 | `R_X86_64_GOTPCREL` / `R_X86_64_REX_GOTPCRELX` / `R_X86_64_GOTPCRELX` | Any | Create GOT entry |
-| `R_X86_64_GOTTPOFF` | TLS symbol | Create GOT entry |
+| `R_X86_64_GOTTPOFF` | Any | Create GOT entry |
 | `R_X86_64_64` | Dynamic function | Create PLT entry (function pointer) |
-| Any other | Dynamic symbol | Create GOT entry |
+| Any other | Dynamic symbol (non-object) | Create GOT entry |
+
+Copy relocation aliasing is also handled: symbols at the same library address
+share the same BSS copy slot.
 
 **GOT layout:**
 
 ```
-GOT[0]: .dynamic address (for ld.so)
-GOT[1]: link_map pointer (reserved, filled by ld.so)
-GOT[2]: _dl_runtime_resolve (reserved, filled by ld.so)
-GOT[3..3+N_plt]: PLT GOT entries (one per PLT stub)
-GOT[3+N_plt..]: GLOB_DAT entries (non-PLT dynamic symbols)
-```
+.got.plt:
+  GOT[0]:          .dynamic address (for ld.so)
+  GOT[1]:          link_map pointer (reserved, filled by ld.so)
+  GOT[2]:          _dl_runtime_resolve (reserved, filled by ld.so)
+  GOT[3..3+N_plt]: PLT GOT entries (one per PLT stub)
 
-The `.got.plt` section holds GOT[0..3+N_plt].  The `.got` section holds the
-remaining GLOB_DAT entries.
+.got:
+  Entries for GLOB_DAT symbols (non-PLT dynamic data), TLS GOTTPOFF
+  entries, and locally-resolved GOT entries.
+```
 
 ### Phase 6: Address Layout
 
@@ -424,8 +452,10 @@ Additional program headers:
 - `PT_PHDR` -- Points to the program header table itself.
 - `PT_INTERP` -- Points to the `.interp` section.
 - `PT_DYNAMIC` -- Points to the `.dynamic` section.
-- `PT_GNU_STACK` -- Declares a non-executable stack (`PF_R | PF_W`).
+- `PT_GNU_STACK` -- Declares a non-executable stack (`PF_R | PF_W`, align 16).
 - `PT_TLS` -- Present only if TLS sections exist; describes the TLS template.
+
+Note: Executables do **not** emit `PT_GNU_RELRO` (only shared libraries do).
 
 **TLS layout** (x86-64 variant II):
 
@@ -491,20 +521,24 @@ Where:
 
 1. **Section symbols** -- Resolved via the section map to the output section
    address plus input section offset.
-2. **Named symbols** -- Looked up in the `globals` table.  Linker-defined symbols
-   (e.g., `_GLOBAL_OFFSET_TABLE_`, `__bss_start`, `_edata`, `_end`, `__ehdr_start`,
-   `_etext`, `__dso_handle`, `_DYNAMIC`, `__data_start`, init/fini array boundaries)
-   are inserted into `globals` during the layout phase in `emit_executable` and
+2. **Named non-local symbols** -- Looked up in the `globals` table.  Linker-defined
+   symbols (e.g., `_GLOBAL_OFFSET_TABLE_`, `__bss_start`, `_edata`, `_end`,
+   `__ehdr_start`, `_etext`, `__dso_handle`, `_DYNAMIC`, `__data_start`,
+   init/fini array boundaries) are inserted into `globals` during the layout
+   phase via `get_standard_linker_symbols()` (from `crate::backend::elf`) and
    resolved through the normal lookup path.
    - Defined globals: use `value` directly.
    - Dynamic symbols: use PLT address if available.
    - Weak undefined: resolve to 0.
-3. **Local symbols** (non-global, non-section) -- Resolved via section map.
+3. **Weak undefined** -- Resolve to 0 (even without checking globals).
+4. **Undefined** -- Resolve to 0.
+5. **`SHN_ABS` symbols** -- Use `sym.value` directly.
+6. **Other local symbols** -- Resolved via section map plus `sym.value`.
 
 **GOT-to-direct relaxation** (GOTPCRELX / REX_GOTPCRELX):
 
-When the target symbol is locally defined (not dynamic), the linker can
-relax a GOT-indirect load into a direct LEA:
+When the target symbol is locally defined (not dynamic) and has no GOT entry,
+the linker can relax a GOT-indirect load into a direct LEA:
 
 ```
 Before:  mov symbol@GOTPCREL(%rip), %reg   (48 8b XX YY YY YY YY)
@@ -525,8 +559,8 @@ After:   movq $tpoff, %reg                 (48 c7 CX YY YY YY YY)
 ```
 
 The `mov r/m64, reg` instruction (`0x8b`) is rewritten to `mov $imm32, reg`
-(`0xc7`), and the ModR/M byte is adjusted to encode the register in the
-`/0` extension field.
+(`0xc7`), and the ModR/M byte is adjusted to `0xc0 | reg` to encode the
+register in the `/0` extension field.
 
 
 ## Dynamic Linking Support
@@ -543,7 +577,7 @@ dynamic linker (`ld-linux-x86-64.so.2`) reads at program startup:
 | `DT_SYMTAB` | Address of `.dynsym` |
 | `DT_STRSZ` | Size of `.dynstr` |
 | `DT_SYMENT` | Size of one `.dynsym` entry (24) |
-| `DT_DEBUG` | Reserved for debugger use |
+| `DT_DEBUG` | Reserved for debugger use (executables only) |
 | `DT_PLTGOT` | Address of `.got.plt` |
 | `DT_PLTRELSZ` | Size of `.rela.plt` |
 | `DT_PLTREL` | Relocation type (7 = RELA) |
@@ -558,17 +592,22 @@ dynamic linker (`ld-linux-x86-64.so.2`) reads at program startup:
 | `DT_FINI_ARRAYSZ` | Size of `.fini_array` (if present) |
 | `DT_SONAME` | Shared library name (shared libraries only) |
 | `DT_RPATH` / `DT_RUNPATH` | Runtime library search path (if `-rpath` specified) |
-| `DT_RELACOUNT` | Number of R_X86_64_RELATIVE entries (shared libraries) |
-| `DT_VERSYM` | Address of `.gnu.version` (if versioned symbols present) |
-| `DT_VERNEED` | Address of `.gnu.version_r` (if versioned symbols present) |
-| `DT_VERNEEDNUM` | Number of Verneed entries (if versioned symbols present) |
+| `DT_RELACOUNT` | Number of R_X86_64_RELATIVE entries (shared libraries only) |
+| `DT_VERSYM` | Address of `.gnu.version` (executables only, if versioned symbols present) |
+| `DT_VERNEED` | Address of `.gnu.version_r` (executables only, if versioned symbols present) |
+| `DT_VERNEEDNUM` | Number of Verneed entries (executables only, if versioned symbols present) |
 | `DT_NULL` | Terminator |
+
+Note: For shared libraries, `DT_PLTGOT`/`DT_PLTRELSZ`/`DT_PLTREL`/`DT_JMPREL`
+are only emitted when PLT entries are present.  `DT_DEBUG` and symbol versioning
+entries are not emitted for shared libraries.
 
 ### .rela.dyn Entries
 
 Contains `R_X86_64_GLOB_DAT` entries (type 6) for GOT slots that need to be
 filled at load time, plus `R_X86_64_COPY` entries (type 5) for copy-relocated
-data objects.
+data objects.  For shared libraries, also contains `R_X86_64_RELATIVE` entries
+(type 8) for internal absolute address fixups.
 
 ### .rela.plt Entries
 
@@ -587,6 +626,18 @@ When code references a global data object defined in a shared library (e.g.,
 
 This is detected when a `R_X86_64_PC32`/`R_X86_64_PLT32` relocation targets
 a dynamic symbol with `STT_OBJECT` type.
+
+### Symbol Versioning (Executables Only)
+
+For executables with versioned dynamic symbols, the linker emits `.gnu.version`
+(SHT_GNU_VERSYM) and `.gnu.version_r` (SHT_GNU_VERNEED) sections.  Each
+`.dynsym` entry has a corresponding 16-bit version index in `.gnu.version`:
+- 0 (`VER_NDX_LOCAL`) for the null symbol
+- 1 (`VER_NDX_GLOBAL`) for unversioned symbols
+- 2+ for specific version strings (e.g., `GLIBC_2.17`)
+
+Version requirement entries in `.gnu.version_r` use `sysv_hash()` for the
+`vna_hash` field.  Shared libraries do not emit versioning sections.
 
 
 ## Shared Library Output (`link_shared` / `emit_shared_library`)
@@ -626,6 +677,9 @@ PostgreSQL extension modules like `plpgsql.so` and `libpq.so`).
 +-----------------------------------------------------------------------+
 ```
 
+Shared libraries use a base address of `0x0` (position-independent) and
+do not emit `.interp` or `.gnu.version`/`.gnu.version_r` sections.
+
 ### Key Shared Library Features
 
 - **PLT/GOT for external symbols**: Shared libraries can call functions from
@@ -640,7 +694,8 @@ PostgreSQL extension modules like `plpgsql.so` and `libpq.so`).
   `.data.rel.ro` sections are placed in the RELRO region, which the dynamic
   linker marks read-only after relocations are applied.  The `.got.plt` is
   deliberately placed *after* the RELRO boundary so it remains writable for
-  lazy PLT binding.
+  lazy PLT binding.  PT_GNU_RELRO is conditional on having RELRO-eligible
+  sections.
 
 - **SONAME**: Set via `-Wl,-soname,<name>`.  Emitted as a DT_SONAME entry in
   the `.dynamic` section.
@@ -651,27 +706,36 @@ PostgreSQL extension modules like `plpgsql.so` and `libpq.so`).
 
 - **.gnu.hash layout**: Undefined symbols (imports) are placed before the
   `symoffset` boundary in `.dynsym`; defined (exported) symbols are placed
-  after and included in the hash table.
+  after and included in the hash table.  The bloom filter scales with the
+  number of hashed symbols (1 word for <= 32 symbols, then
+  `((n+31)/32).next_power_of_two()` words).
 
 ### Shared Library Symbol Extraction (PT_DYNAMIC Fallback)
 
 When parsing input shared libraries that lack section headers (e.g., our own
 emitted `.so` files), `parse_shared_library_symbols` in `linker_common.rs`
 falls back to using `PT_DYNAMIC` program headers.  It walks the dynamic
-entries to find `DT_SYMTAB`, `DT_STRTAB`, `DT_STRSZ`, `DT_SYMENT`, and
+entries to find `DT_SYMTAB`, `DT_STRTAB`, `DT_STRSZ`, and
 `DT_GNU_HASH` (for symbol count), then translates virtual addresses to file
 offsets using `PT_LOAD` segments.  The same fallback is used by `parse_soname`.
 
 
 ## Supported Relocation Types
 
+These are the x86-64 relocation type constants defined in `elf.rs`.  Types
+marked with `*` are used only for output dynamic relocations, not for
+processing input relocations.
+
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `R_X86_64_NONE` | 0 | No relocation |
 | `R_X86_64_64` | 1 | 64-bit absolute |
 | `R_X86_64_PC32` | 2 | 32-bit PC-relative |
-| `R_X86_64_GOT32` | 3 | 32-bit GOT offset |
+| `R_X86_64_GOT32` | 3 | 32-bit GOT offset (defined but not currently handled) |
 | `R_X86_64_PLT32` | 4 | 32-bit PLT-relative |
+| `R_X86_64_GLOB_DAT`* | 6 | GOT slot filled at load time (output only) |
+| `R_X86_64_JUMP_SLOT`* | 7 | PLT GOT slot for lazy binding (output only) |
+| `R_X86_64_RELATIVE`* | 8 | Base-relative fixup for shared libraries (output only) |
 | `R_X86_64_GOTPCREL` | 9 | 32-bit PC-relative GOT |
 | `R_X86_64_32` | 10 | 32-bit absolute unsigned |
 | `R_X86_64_32S` | 11 | 32-bit absolute signed |
@@ -682,58 +746,69 @@ offsets using `PT_LOAD` segments.  The same fallback is used by `parse_soname`.
 | `R_X86_64_REX_GOTPCRELX` | 42 | Relaxable GOTPCREL with REX |
 
 
-## ELF Parsing Details (linker_common.rs / elf.rs)
+## ELF Parsing Details (linker_common / elf.rs)
 
-### Object File Parsing (`parse_object`)
+The ELF types (`Elf64Object`, `Elf64Section`, `Elf64Symbol`, `Elf64Rela`)
+and core parsing functions live in `linker_common.rs`, shared across all
+64-bit backends.  The x86 `elf.rs` provides type aliases and thin wrappers
+that supply `EM_X86_64` as the expected machine type.
 
-The x86 `elf.rs` delegates to `linker_common::parse_elf64_object()`, which:
+### Object File Parsing (`parse_elf64_object`)
 
 1. Validates ELF magic, class (ELFCLASS64), endianness (ELFDATA2LSB),
    type (`ET_REL`), and machine (parameterized, `EM_X86_64` for x86).
 2. Parses section headers from `e_shoff`.
 3. Resolves section names from the `.shstrtab` section.
 4. Reads section data into per-section byte vectors.
-5. Finds `.symtab` and parses all `Elf64_Sym` entries (24 bytes each).
+5. Finds `SHT_SYMTAB` and parses all `Elf64_Sym` entries (24 bytes each).
    Resolves symbol names from the associated `.strtab`.
-6. Finds all `.rela.*` sections and parses `Elf64_Rela` entries (24 bytes each).
+6. Finds all `SHT_RELA` sections and parses `Elf64_Rela` entries (24 bytes each).
    Indexes relocations by their target section (`sh_info`).
 
 ### Archive Parsing (`parse_archive_members`)
 
-Parses the `!<arch>\n` format:
-1. Each member has a 60-byte header with name, size, and `\`\`\n` magic.
+Defined in `crate::backend::elf` (not `linker_common`).  Parses the
+`!<arch>\n` format:
+1. Each member has a 60-byte header with name, size, and `` `\n `` magic.
 2. Special members: `/` (symbol table), `//` (extended name table).
 3. Long names use `/offset` syntax into the extended name table.
 4. Members are aligned to 2-byte boundaries.
 
+Thin archives (`!<thin>\n`) are also supported via `parse_thin_archive_members`.
+
 ### Shared Library Symbol Extraction (`parse_shared_library_symbols`)
 
 1. Validate as `ET_DYN` ELF file.
-2. Find the `SHT_DYNSYM` section and the `SHT_GNU_VERSYM` section (if present).
-3. Parse each `Elf64_Sym` entry, resolving names from the linked string table.
-4. Include only defined symbols (`shndx != SHN_UNDEF`).
-5. Filter out non-default versioned symbols using `.gnu.version`: if the hidden
+2. Find the `SHT_DYNSYM` section, `SHT_GNU_VERSYM`, and `SHT_GNU_VERDEF`
+   sections (if present).
+3. Build a version name map from `.gnu.verdef` entries.
+4. Parse each `Elf64_Sym` entry, resolving names from the linked string table.
+5. Include only defined symbols (`shndx != SHN_UNDEF`).
+6. Filter out non-default versioned symbols using `.gnu.version`: if the hidden
    bit (`0x8000`) is set and the version index is >= 2, the symbol is a non-default
-   version (`symbol@VERSION`, not `symbol@@VERSION`) and is skipped. This matches
+   version (`symbol@VERSION`, not `symbol@@VERSION`) and is skipped.  This matches
    GNU ld behavior and prevents linking against deprecated/hidden symbols like
    `sysctl@GLIBC_2.2.5`.
-6. Skip the null symbol at index 0.
+7. Skip the null symbol at index 0.
+8. Attach version information (`DynSymbol.version`, `DynSymbol.is_default_ver`)
+   from the verdef mapping.
 
 When section headers are unavailable, falls back to `PT_DYNAMIC` program headers,
 reading `DT_SYMTAB`, `DT_STRTAB`, `DT_STRSZ`, `DT_GNU_HASH`, and `DT_VERSYM`
-to perform the same filtering.
+to perform the same filtering (without version name resolution).
 
 ### SONAME Extraction (`parse_soname`)
 
-1. Find the `SHT_DYNAMIC` section.
+1. Find the `SHT_DYNAMIC` section (or `PT_DYNAMIC` program header as fallback).
 2. Scan for a `DT_SONAME` entry.
 3. Resolve the name from the section's linked string table.
-4. Falls back to the file's basename if no SONAME is found.
+4. Returns `None` if no SONAME is found; the caller is responsible for
+   falling back to the file's basename.
 
-### Linker Script Parsing (`parse_linker_script`)
+### Linker Script Parsing (`parse_linker_script_entries`)
 
-Handles the common case where a `.so` file is actually a text linker script
-(e.g., glibc's `libc.so`):
+Defined in `crate::backend::elf`.  Handles the common case where a `.so` file
+is actually a text linker script (e.g., glibc's `libc.so`):
 
 ```
 /* GNU ld script */
@@ -741,9 +816,9 @@ GROUP ( /lib/x86_64-linux-gnu/libc.so.6 /usr/lib/x86_64-linux-gnu/libc_nonshared
 ```
 
 The parser:
-1. Finds `GROUP ( ... )`.
-2. Extracts file paths, skipping `AS_NEEDED()` blocks.
-3. Returns the list of paths for recursive loading.
+1. Finds `GROUP ( ... )` or `INPUT ( ... )`.
+2. Extracts file paths and `-l` library references, skipping `AS_NEEDED()` blocks.
+3. Returns a list of `LinkerScriptEntry` values (either `Path` or `Lib`).
 
 
 ## Key Design Decisions and Trade-offs
@@ -760,9 +835,14 @@ addresses.  PIE executable support is not yet implemented.
 
 For executables, four `PT_LOAD` segments are used (RO metadata, executable
 code, read-only data, read-write data) plus `PT_TLS` when TLS is present.
+Executables use 8 program headers (9 with TLS): `PT_PHDR`, `PT_INTERP`,
+4x `PT_LOAD`, `PT_DYNAMIC`, `PT_GNU_STACK`, and optionally `PT_TLS`.
+
 For shared libraries, four `PT_LOAD` segments are also used, plus
-`PT_GNU_RELRO` to protect `.got`, `.dynamic`, and `.data.rel.ro` after
-load-time relocations are applied.
+`PT_GNU_RELRO` (conditional) to protect `.got`, `.dynamic`, and
+`.data.rel.ro` after load-time relocations are applied.  Shared libraries
+use 7-9 program headers: `PT_PHDR`, 4x `PT_LOAD`, `PT_DYNAMIC`,
+`PT_GNU_STACK`, optionally `PT_GNU_RELRO`, and optionally `PT_TLS`.
 
 ### 3. Lazy PLT Binding
 
@@ -772,14 +852,22 @@ the default behavior and does not require `DT_BIND_NOW` or `DT_FLAGS`.
 
 ### 4. .gnu.hash with Copy-Reloc Symbol Support
 
-The `.gnu.hash` section contains a proper hash table covering all copy-reloc
-symbols (e.g. `optind`, `stderr`, `stdout`).  Non-hashed symbols (PLT imports,
-GLOB_DAT imports) are placed first in `.dynsym`, followed by hashed copy-reloc
-symbols.  The hash table includes a bloom filter (1 word, shift=6), bucket
-array, and chain array with the standard GNU hash function (DJB hash starting
-at 5381).  This is required for symbol interposition to work: the dynamic
-linker must be able to find copy-reloc symbols in the executable via `.gnu.hash`
-so that shared library references resolve to the executable's BSS copy.
+For executables, the `.gnu.hash` section covers copy-reloc symbols (e.g.
+`optind`, `stderr`, `stdout`).  Non-hashed symbols (PLT imports, GLOB_DAT
+imports) are placed first in `.dynsym`, followed by hashed copy-reloc
+symbols.  The executable hash table uses a single 64-bit bloom word with
+shift=6.
+
+For shared libraries, all defined (exported) symbols are hashed, with
+undefined symbols (imports) placed before the `symoffset` boundary.  The
+bloom filter scales: 1 word for <= 32 symbols, otherwise
+`((n+31)/32).next_power_of_two()` words.
+
+Both use the standard GNU hash function (DJB hash starting at 5381),
+`next_power_of_two` buckets, and the chain-with-stop-bit format.
+This is required for symbol interposition to work: the dynamic linker must
+be able to find copy-reloc symbols in the executable via `.gnu.hash` so
+that shared library references resolve to the executable's BSS copy.
 
 ### 5. Archive Selective Loading (Group Resolution)
 
@@ -828,10 +916,11 @@ cache or search paths from `/etc/ld.so.conf`.
 The output executable includes a section header table appended after the main
 file data.  This enables tools like `strip`, `readelf -S`, and `objdump -d`
 to work correctly.  The section header table describes all loadable sections
-(.interp, .gnu.hash, .dynsym, .dynstr, .rela.dyn, .rela.plt, .plt, merged
-text/rodata/data sections, TLS sections, .init_array, .fini_array, .dynamic,
-.got, .got.plt, .bss) plus a `.shstrtab` string table.  The `e_shoff`,
-`e_shnum`, and `e_shstrndx` fields are patched back into the ELF header.
+(.interp, .gnu.hash, .dynsym, .dynstr, .gnu.version, .gnu.version_r,
+.rela.dyn, .rela.plt, .plt, merged text/rodata/data sections, TLS sections,
+.init_array, .fini_array, .dynamic, .got, .got.plt, .bss) plus a `.shstrtab`
+string table.  The `e_shoff`, `e_shnum`, and `e_shstrndx` fields are patched
+back into the ELF header.
 
 ### 11. Flat Output Buffer
 
