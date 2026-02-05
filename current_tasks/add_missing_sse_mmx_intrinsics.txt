@@ -1,0 +1,5 @@
+Add missing SSE intrinsics that operate on __m64 (MMX) types to xmmintrin.h.
+These include _mm_movemask_pi8, _mm_mulhi_pu16, _mm_shuffle_pi16, and many others.
+Needed by cairo, pixman, and other graphics libraries.
+Also add other commonly missing SSE intrinsics like scalar min/max,
+comieq/ucomieq comparisons, conversions, and more.
