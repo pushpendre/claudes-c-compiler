@@ -1,0 +1,8 @@
+Fix ARM assembler: encode `mov Xd, #imm` as ORR with logical immediate
+
+When `mov Xd, #imm` is used with a value that fits a bitmask/logical immediate
+encoding (e.g., 0x0101010101010101), encode it as a single ORR Xd, XZR, #imm
+instruction instead of a 4-instruction MOVZ+MOVK sequence.
+
+The encode_bitmask_imm() function already exists and works correctly.
+Just need to add a check in encode_mov() before falling through to the wide sequence.
