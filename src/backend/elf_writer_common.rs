@@ -1329,6 +1329,20 @@ impl<A: X86Arch> ElfWriterCore<A> {
                         }
                     }
 
+                    // Update deferred skip offsets
+                    for (s_idx, s_off, _, _) in self.deferred_skips.iter_mut() {
+                        if *s_idx == sec_idx && *s_off > offset {
+                            *s_off -= shrink;
+                        }
+                    }
+
+                    // Update deferred byte diff offsets
+                    for (s_idx, s_off, _, _, _, _) in self.deferred_byte_diffs.iter_mut() {
+                        if *s_idx == sec_idx && *s_off > offset {
+                            *s_off -= shrink;
+                        }
+                    }
+
                     self.sections[sec_idx].jumps[j_idx].relaxed = true;
                     self.sections[sec_idx].jumps[j_idx].len = new_len;
                     any_relaxed = true;
