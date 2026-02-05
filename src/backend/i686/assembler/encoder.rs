@@ -1168,10 +1168,11 @@ impl InstructionEncoder {
                     self.bytes.push(val as u8);
                 }
             }
-            ImmediateValue::Symbol(sym) => {
+            ImmediateValue::Symbol(sym) | ImmediateValue::SymbolPlusOffset(sym, _) => {
+                let addend = if let ImmediateValue::SymbolPlusOffset(_, a) = imm { *a } else { 0 };
                 if size == 4 {
                     self.bytes.push(0xB8 + dst_num);
-                    self.add_relocation(sym, R_386_32, 0);
+                    self.add_relocation(sym, R_386_32, addend);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 } else {
                     return Err("symbol immediate only supported for 32-bit mov".to_string());
@@ -1280,9 +1281,10 @@ impl InstructionEncoder {
                     _ => unreachable!(),
                 }
             }
-            ImmediateValue::Symbol(sym) => {
+            ImmediateValue::Symbol(sym) | ImmediateValue::SymbolPlusOffset(sym, _) => {
+                let addend = if let ImmediateValue::SymbolPlusOffset(_, a) = imm { *a } else { 0 };
                 if size == 4 {
-                    self.add_relocation(sym, R_386_32, 0);
+                    self.add_relocation(sym, R_386_32, addend);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 } else {
                     return Err("symbol immediate only supported for 32-bit mov to memory".to_string());
@@ -1387,9 +1389,11 @@ impl InstructionEncoder {
                 }
                 Ok(())
             }
-            Operand::Immediate(ImmediateValue::Symbol(sym)) => {
+            Operand::Immediate(ImmediateValue::Symbol(sym)) |
+            Operand::Immediate(ImmediateValue::SymbolPlusOffset(sym, _)) => {
+                let addend = if let Operand::Immediate(ImmediateValue::SymbolPlusOffset(_, a)) = &ops[0] { *a } else { 0 };
                 self.bytes.push(0x68);
-                self.add_relocation(sym, R_386_32, 0);
+                self.add_relocation(sym, R_386_32, addend);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
@@ -1490,7 +1494,9 @@ impl InstructionEncoder {
                 }
                 Ok(())
             }
-            (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Register(dst)) => {
+            (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Register(dst)) |
+            (Operand::Immediate(ImmediateValue::SymbolPlusOffset(sym, _)), Operand::Register(dst)) => {
+                let addend = match &ops[0] { Operand::Immediate(ImmediateValue::SymbolPlusOffset(_, a)) => *a, _ => 0 };
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 if size == 2 { self.bytes.push(0x66); }
                 let opcode_len = if dst_num == 0 {
@@ -1508,7 +1514,7 @@ impl InstructionEncoder {
                     self.add_relocation(sym, R_386_GOTPC, 0);
                     self.bytes.extend_from_slice(&opcode_len.to_le_bytes());
                 } else {
-                    self.add_relocation(sym, R_386_32, 0);
+                    self.add_relocation(sym, R_386_32, addend);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 }
                 Ok(())
@@ -1580,11 +1586,13 @@ impl InstructionEncoder {
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
-            (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Memory(mem)) => {
+            (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Memory(mem)) |
+            (Operand::Immediate(ImmediateValue::SymbolPlusOffset(sym, _)), Operand::Memory(mem)) => {
+                let addend = match &ops[0] { Operand::Immediate(ImmediateValue::SymbolPlusOffset(_, a)) => *a, _ => 0 };
                 if size == 2 { self.bytes.push(0x66); }
                 self.bytes.push(0x81);
                 self.encode_modrm_mem(alu_op, mem)?;
-                self.add_relocation(sym, R_386_32, 0);
+                self.add_relocation(sym, R_386_32, addend);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }

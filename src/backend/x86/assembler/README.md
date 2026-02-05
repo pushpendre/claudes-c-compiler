@@ -173,6 +173,7 @@ AsmItem
   `SymbolDiff(String, String)`, or `SymbolRef(String)` (for `.set` aliases).
 
 - **`ImmediateValue`** -- `Integer(i64)`, `Symbol(String)`,
+  `SymbolPlusOffset(String, i64)` (e.g., `init_top_pgt - 0xffffffff80000000`),
   `SymbolMod(String, String)` (e.g., `symbol@GOTPCREL`), or
   `SymbolDiff(String, String)` (e.g., `$_DYNAMIC-1b`).
 

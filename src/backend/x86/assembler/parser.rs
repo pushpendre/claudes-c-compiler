@@ -197,6 +197,8 @@ impl fmt::Display for Register {
 pub enum ImmediateValue {
     Integer(i64),
     Symbol(String),
+    /// Symbol with integer offset, e.g., init_top_pgt - 0xffffffff80000000
+    SymbolPlusOffset(String, i64),
     /// Symbol with @modifier, e.g., symbol@GOTPCREL
     #[allow(dead_code)] // Constructed by parser; handled by encoder for GOT/TLS relocations
     SymbolMod(String, String),
@@ -1019,6 +1021,31 @@ fn parse_register_operand(s: &str) -> Result<Operand, String> {
 fn parse_immediate_operand(s: &str) -> Result<Operand, String> {
     let s = s.trim();
 
+    // Strip outer parentheses used for grouping, e.g. $(init_top_pgt - 0xffffffff80000000)
+    // In AT&T syntax, $(...) wraps the expression inside parens for grouping.
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        // Verify balanced parens
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        balanced = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if balanced && depth == 0 {
+            return parse_immediate_operand(inner);
+        }
+    }
+
     // Try integer
     if let Ok(val) = parse_integer_expr(s) {
         return Ok(Operand::Immediate(ImmediateValue::Integer(val)));
@@ -1035,6 +1062,11 @@ fn parse_immediate_operand(s: &str) -> Result<Operand, String> {
     // Scan for '-' after position 0 where both sides look like labels.
     if let Some(diff) = parse_immediate_label_diff(s) {
         return Ok(Operand::Immediate(diff));
+    }
+
+    // Check for symbol+/-offset expression (e.g., init_top_pgt - 0xffffffff80000000)
+    if let Some(sym_offset) = try_parse_immediate_symbol_offset(s) {
+        return Ok(Operand::Immediate(sym_offset));
     }
 
     // Plain symbol
@@ -1107,6 +1139,25 @@ fn parse_memory_inner(s: &str) -> Result<MemoryOperand, String> {
         let disp_str = s[..paren_start].trim();
         let inner = &s[paren_start + 1..paren_end];
 
+        // If there's no displacement before the parens AND the inner content doesn't
+        // look like register references (i.e., first part doesn't start with %),
+        // then this is a parenthesized displacement expression like (pcpu_hot + 16),
+        // not a register reference like (%rsp). Treat the whole thing as displacement.
+        if disp_str.is_empty() && !inner.is_empty() {
+            let first_part = inner.split(',').next().unwrap_or("").trim();
+            if !first_part.starts_with('%') && !first_part.is_empty() {
+                // This is a parenthesized expression used as displacement
+                let displacement = parse_displacement(inner)?;
+                return Ok(MemoryOperand {
+                    segment: None,
+                    displacement,
+                    base: None,
+                    index: None,
+                    scale: None,
+                });
+            }
+        }
+
         let displacement = parse_displacement(disp_str)?;
 
         // Parse base, index, scale from inside parens
@@ -1156,6 +1207,33 @@ fn parse_displacement(s: &str) -> Result<Displacement, String> {
     let s = s.trim();
     if s.is_empty() {
         return Ok(Displacement::None);
+    }
+
+    // Strip outer parentheses used for grouping expressions like (pcpu_hot + 16).
+    // In AT&T syntax, parenthesized displacement expressions like %gs:(pcpu_hot + 16)(%rip)
+    // produce a displacement string of "(pcpu_hot + 16)" that we need to unwrap.
+    // Only strip if the entire string is wrapped in balanced parens.
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        // Verify the parens are balanced (not e.g. "(a)+(b)")
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        balanced = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if balanced && depth == 0 {
+            return parse_displacement(inner);
+        }
     }
 
     // Try integer
@@ -1219,6 +1297,44 @@ fn try_parse_symbol_plus_offset(s: &str) -> Option<Displacement> {
     None
 }
 
+
+/// Try to parse a `symbol+offset` or `symbol-offset` expression as an immediate value.
+/// This handles cases like `init_top_pgt - 0xffffffff80000000` where the expression
+/// mixes a symbol with a large integer constant.
+fn try_parse_immediate_symbol_offset(s: &str) -> Option<ImmediateValue> {
+    let is_valid_sym = |s: &str| -> bool {
+        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$')
+    };
+
+    // Scan for '+' or '-' that separates the symbol from the offset.
+    for (i, c) in s.char_indices().skip(1) {
+        if c == '+' || c == '-' {
+            let left = s[..i].trim();
+            let right_with_sign = s[i..].trim();
+            if left.is_empty() {
+                continue;
+            }
+
+            // Case 1: symbol+/-offset (e.g. "init_top_pgt - 0xffffffff80000000")
+            if let Ok(offset) = parse_integer_expr(right_with_sign) {
+                if is_valid_sym(left) {
+                    return Some(ImmediateValue::SymbolPlusOffset(left.to_string(), offset));
+                }
+            }
+
+            // Case 2: offset+symbol (e.g. "32+init_top_pgt") - only for '+'
+            if c == '+' {
+                if let Ok(offset) = parse_integer_expr(left) {
+                    let sym = right_with_sign[1..].trim();
+                    if is_valid_sym(sym) {
+                        return Some(ImmediateValue::SymbolPlusOffset(sym.to_string(), offset));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Split `.skip expr, fill` arguments, respecting parentheses.
 /// Returns the expression string and the fill byte (default 0).

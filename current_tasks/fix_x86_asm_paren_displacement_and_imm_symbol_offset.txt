@@ -1,0 +1,15 @@
+Fix x86 assembler: parenthesized displacement expressions and immediate symbol+offset
+
+1. parse_displacement() now strips outer parentheses, e.g. (pcpu_hot + 16) -> pcpu_hot + 16
+2. parse_memory_inner() detects when parens contain a non-register expression and treats
+   it as displacement rather than trying to parse it as a base register
+3. parse_immediate_operand() strips outer parentheses for expressions like
+   $(init_top_pgt - 0xffffffff80000000)
+4. New ImmediateValue::SymbolPlusOffset variant for symbol+offset immediates with
+   proper relocation addend handling in encoder
+
+These fix undefined symbol references in x86 kernel builds:
+- (pcpu_hot + 16), (cpu_tss_rw + 20) in %gs-relative percpu references
+- (init_top_pgt - 0xffffffff80000000) in addq immediate operands
+
+Started: 2026-02-05
