@@ -1,0 +1,9 @@
+Fix GAS macro parameter substitution boundary checking in x86 assembler.
+
+Problem: \orig was matching as prefix of \orig_len in .macro expansion,
+causing altinstr_entry parameters to produce broken symbol names like
+"140b_len" and "143f_len" instead of properly expanding to "142b-140b"
+and "144f-143f".
+
+Fix: Use replace_macro_param() which checks that the character after
+\param is not an identifier continuation character (alphanumeric or _).

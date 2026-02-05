@@ -376,7 +376,7 @@ fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
                 // Substitute \var with val in each body line
                 let subst_body: Vec<String> = body.iter().map(|line| {
                     let pattern = format!("\\{}", var);
-                    line.replace(&pattern, val)
+                    asm_preprocess::replace_macro_param(line, &pattern, val)
                 }).collect();
                 let subst_refs: Vec<&str> = subst_body.iter().map(|s| s.as_str()).collect();
                 let expanded = expand_rept_blocks(&subst_refs)?;
@@ -396,7 +396,7 @@ fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
                 let ch_str = ch.to_string();
                 let subst_body: Vec<String> = body.iter().map(|line| {
                     let pattern = format!("\\{}", var);
-                    let substituted = line.replace(&pattern, &ch_str);
+                    let substituted = asm_preprocess::replace_macro_param(line, &pattern, &ch_str);
                     // Strip GAS macro argument delimiters: \() resolves to empty string
                     substituted.replace("\\()", "")
                 }).collect();
@@ -697,7 +697,7 @@ fn substitute_params(body: &[String], params: &[String], defaults: &[Option<Stri
         let mut expanded = body_line.clone();
         for &pi in &sorted_indices {
             let pattern = format!("\\{}", params[pi]);
-            expanded = expanded.replace(&pattern, &param_values[pi]);
+            expanded = asm_preprocess::replace_macro_param(&expanded, &pattern, &param_values[pi]);
         }
         // Strip GAS macro argument delimiters: \() resolves to empty string.
         // Used in GAS macros to separate parameter names from adjacent text,

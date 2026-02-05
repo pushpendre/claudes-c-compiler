@@ -405,7 +405,7 @@ pub(crate) fn expand_rept_blocks_with_insn_size(
             for val in &values {
                 let subst_body: Vec<String> = body.iter().map(|line| {
                     let pattern = format!("\\{}", var);
-                    let substituted = line.replace(&pattern, val);
+                    let substituted = replace_macro_param(line, &pattern, val);
                     // Strip GAS macro argument delimiters: \() resolves to empty string
                     substituted.replace("\\()", "")
                 }).collect();
@@ -812,7 +812,7 @@ pub fn expand_macros(
                                 .and_then(|d| d.as_deref())
                                 .unwrap_or("0")
                         });
-                        expanded = expanded.replace(&pattern, replacement);
+                        expanded = replace_macro_param(&expanded, &pattern, replacement);
                     }
                     // Strip GAS macro argument delimiters: \() resolves to empty string.
                     // Used to separate parameter names from adjacent text,
@@ -832,6 +832,43 @@ pub fn expand_macros(
         i += 1;
     }
     Ok(result)
+}
+
+/// Replace `\param` in a macro body line with the argument value, but only
+/// when `\param` is followed by a non-identifier character (or end of string).
+///
+/// GAS macro parameter references like `\orig` should NOT match as a prefix
+/// of `\orig_len`. In GAS, `\()` is used to explicitly delimit parameter names
+/// from adjacent identifier characters (e.g., `\op\()_safe_regs`).
+pub fn replace_macro_param(text: &str, pattern: &str, replacement: &str) -> String {
+    let pat_bytes = pattern.as_bytes();
+    let pat_len = pat_bytes.len();
+    let text_bytes = text.as_bytes();
+    let text_len = text_bytes.len();
+    let mut result = String::with_capacity(text_len);
+    let mut i = 0;
+    while i < text_len {
+        if i + pat_len <= text_len && &text_bytes[i..i + pat_len] == pat_bytes {
+            // Check that the character after the match is not an identifier continuation
+            let after = if i + pat_len < text_len {
+                text_bytes[i + pat_len]
+            } else {
+                b' ' // end of string counts as delimiter
+            };
+            if after.is_ascii_alphanumeric() || after == b'_' {
+                // Not a full match -- the parameter name continues
+                result.push(text_bytes[i] as char);
+                i += 1;
+            } else {
+                result.push_str(replacement);
+                i += pat_len;
+            }
+        } else {
+            result.push(text_bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
 }
 
 /// Re-expand macro invocations using already-collected macro definitions.
@@ -869,7 +906,7 @@ fn expand_macros_with(
                             .and_then(|d| d.as_deref())
                             .unwrap_or("0")
                     });
-                    expanded = expanded.replace(&pattern, replacement);
+                    expanded = replace_macro_param(&expanded, &pattern, replacement);
                 }
                 // Strip GAS macro argument delimiters: \() resolves to empty string
                 expanded = expanded.replace("\\()", "");
@@ -1339,5 +1376,59 @@ mod tests {
         assert_eq!(nop_count, 1, "macro should only expand once before .purgem");
         let mymacro_count = result.iter().filter(|l| l.trim() == "mymacro").count();
         assert_eq!(mymacro_count, 1, "after .purgem, 'mymacro' should be passed through literally");
+    }
+
+    #[test]
+    fn test_replace_macro_param_basic() {
+        // Basic replacement
+        assert_eq!(replace_macro_param(".byte \\orig", "\\orig", "140b"), ".byte 140b");
+    }
+
+    #[test]
+    fn test_replace_macro_param_boundary_rejection() {
+        // \orig should NOT match as prefix of \orig_len
+        assert_eq!(replace_macro_param(".byte \\orig_len", "\\orig", "140b"), ".byte \\orig_len");
+    }
+
+    #[test]
+    fn test_replace_macro_param_end_of_string() {
+        // \orig at end of text should be replaced
+        assert_eq!(replace_macro_param("\\orig", "\\orig", "140b"), "140b");
+    }
+
+    #[test]
+    fn test_replace_macro_param_followed_by_operator() {
+        // \orig followed by '-' (not an identifier char) should be replaced
+        assert_eq!(replace_macro_param("\\orig-\\alt", "\\orig", "142b"), "142b-\\alt");
+    }
+
+    #[test]
+    fn test_replace_macro_param_multiple() {
+        // Multiple occurrences
+        assert_eq!(
+            replace_macro_param(".long \\sym - . ; .byte \\sym", "\\sym", "foo"),
+            ".long foo - . ; .byte foo"
+        );
+    }
+
+    #[test]
+    fn test_replace_macro_param_no_match() {
+        // Pattern not present
+        assert_eq!(replace_macro_param(".byte 42", "\\orig", "140b"), ".byte 42");
+    }
+
+    #[test]
+    fn test_replace_macro_param_adjacent_digit() {
+        // \orig followed by digit should NOT be replaced (digit is identifier continuation)
+        assert_eq!(replace_macro_param("\\orig2", "\\orig", "foo"), "\\orig2");
+    }
+
+    #[test]
+    fn test_replace_macro_param_before_delimiter() {
+        // \op followed by \() delimiter — \op IS replaced, \() stripped later
+        assert_eq!(
+            replace_macro_param("\\op\\()_safe_regs", "\\op", "rdmsr"),
+            "rdmsr\\()_safe_regs"
+        );
     }
 }

@@ -1687,7 +1687,7 @@ fn expand_gas_macros_with_state(
             let mut all_expanded = Vec::new();
             for item in &items {
                 for bline in &body {
-                    let mut expanded = bline.replace(&format!("\\{}", var), item);
+                    let mut expanded = asm_preprocess::replace_macro_param(bline, &format!("\\{}", var), item);
                     // Strip GAS macro argument delimiters: \() resolves to empty string
                     expanded = expanded.replace("\\()", "");
                     all_expanded.push(expanded);
@@ -1851,7 +1851,7 @@ fn expand_gas_macros_with_state(
             let mut expanded_body: Vec<String> = mac.body.iter().map(|line| {
                 let mut l = line.clone();
                 for (pname, pval) in &sorted_args {
-                    l = l.replace(&format!("\\{}", pname), pval);
+                    l = asm_preprocess::replace_macro_param(&l, &format!("\\{}", pname), pval);
                 }
                 // Strip GAS macro argument delimiters: \() resolves to empty string.
                 // Used to separate parameter names from adjacent text,
