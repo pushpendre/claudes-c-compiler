@@ -1,0 +1,1 @@
+Fix abstract array parameters in parenthesized declarators

@@ -1,9 +1,0 @@
-Fix ECL (Embeddable Common Lisp) project compilation with ccc-x86.
-
-Root cause: x86 assembler encode_jmp and encode_jcc don't strip @PLT suffix from labels
-and use R_X86_64_PC32 instead of R_X86_64_PLT32 for PLT-suffixed jump targets.
-This causes the linker to see "xmalloc@PLT" etc. as undefined symbols.
-
-Same issue exists in i686 assembler's encode_jmp/encode_jcc.
-
-Fix: Strip @PLT suffix from labels in encode_jmp/encode_jcc and use PLT32 relocation type.

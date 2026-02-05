@@ -2152,8 +2152,8 @@ impl InstructionEncoder {
 
         match &ops[0] {
             Operand::Label(label) => {
-                self.bytes.push(0xE9);
                 // Strip @PLT suffix and use PLT32 relocation (same as call)
+                self.bytes.push(0xE9);
                 let (sym, reloc_type) = if label.ends_with("@PLT") {
                     (label.trim_end_matches("@PLT"), R_386_PLT32)
                 } else {
@@ -2254,8 +2254,8 @@ impl InstructionEncoder {
 
         match &ops[0] {
             Operand::Label(label) => {
-                self.bytes.extend_from_slice(&[0x0F, 0x80 + cc]);
                 // Strip @PLT suffix and use PLT32 relocation (same as call)
+                self.bytes.extend_from_slice(&[0x0F, 0x80 + cc]);
                 let (sym, reloc_type) = if label.ends_with("@PLT") {
                     (label.trim_end_matches("@PLT"), R_386_PLT32)
                 } else {
