@@ -1,0 +1,2 @@
+Fixing diffutils project for x86 target. Diagnosing build/test failures and fixing compiler bugs as needed.
+Started 2026-02-05.
