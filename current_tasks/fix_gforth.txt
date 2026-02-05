@@ -1,0 +1,1 @@
+Fixing gforth project to compile and pass tests with ccc-x86 (standalone asm+ld).

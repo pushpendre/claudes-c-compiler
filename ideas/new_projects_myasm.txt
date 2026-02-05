@@ -243,3 +243,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | CPython | PASS | TODO | TODO | TODO | Fixed: __STRICT_ANSI__ for -std=c11, -Xlinker flag, -export-dynamic, shared lib R_X86_64_64 dynamic relocs for external symbols, compound literal address-of in static struct array initializer |
 | curl    | PASS | TODO | TODO | TODO | Fixed: reject implicit pointer<->float conversions (C11 6.5.16.1p1); cmake strerror_r detection passed both POSIX and GLIBC tests |
 | lexbor  | PASS | TODO | TODO | TODO | Fixed x86 shared lib linker: emit R_X86_64_64 dynamic relocs for named global symbols in data sections (function pointer tables); scale .gnu.hash bloom filter for large symbol tables |
+| libressl | PASS (build script fix) | TODO | TODO | TODO | Build script fix: -DENABLE_ASM=OFF (s2n-bignum uses Intel syntax); fixed x86 asm pinsrw/pinsrd/pinsrb/pinsrq memory operand encoding |

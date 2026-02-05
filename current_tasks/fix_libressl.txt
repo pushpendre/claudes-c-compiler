@@ -1,3 +1,0 @@
-Fixing libressl project compilation and tests.
-Testing with GCC first, then with ccc-x86 standalone assembler/linker.
-Will diagnose and fix any compiler bugs found.

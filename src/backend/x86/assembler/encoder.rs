@@ -703,14 +703,15 @@ impl InstructionEncoder {
             "pshufhw" => self.encode_sse_op_imm8(ops, &[0xF3, 0x0F, 0x70]),
 
             // SSE insert/extract
-            "pinsrw" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0xC4]),
-            "pextrw" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0xC5]),
-            "pinsrd" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22]),
-            "pextrd" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16]),
-            "pinsrb" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x20]),
-            "pextrb" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x14]),
-            "pinsrq" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22]),
-            "pextrq" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16]),
+            "pinsrw" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0xC4], false),
+            // TODO: pextrw memory dest needs SSE4.1 opcode 66 0F 3A 15, not legacy 66 0F C5
+            "pextrw" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0xC5], false),
+            "pinsrd" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22], false),
+            "pextrd" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], false),
+            "pinsrb" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x20], false),
+            "pextrb" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x14], false),
+            "pinsrq" => self.encode_sse_insert(ops, &[0x66, 0x0F, 0x3A, 0x22], true),
+            "pextrq" => self.encode_sse_extract(ops, &[0x66, 0x0F, 0x3A, 0x16], true),
 
             // AES-NI
             "aesenc" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x38, 0xDC]),
@@ -3505,22 +3506,35 @@ impl InstructionEncoder {
         }
     }
 
-    fn encode_sse_insert(&mut self, ops: &[Operand], opcode: &[u8]) -> Result<(), String> {
+    fn encode_sse_insert(&mut self, ops: &[Operand], opcode: &[u8], rex_w: bool) -> Result<(), String> {
         if ops.len() != 3 {
             return Err("pinsrX requires 3 operands".to_string());
         }
         // pinsrX $imm, r/m, xmm
+        let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
         match (&ops[0], &ops[1], &ops[2]) {
             (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
-                let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
                 for &b in &opcode[..prefix_len] {
                     self.bytes.push(b);
                 }
-                self.emit_rex_rr(0, &dst.name, &src.name);
+                let size = if rex_w { 8 } else { 0 };
+                self.emit_rex_rr(size, &dst.name, &src.name);
                 self.bytes.extend_from_slice(&opcode[prefix_len..]);
                 self.bytes.push(self.modrm(3, dst_num, src_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                for &b in &opcode[..prefix_len] {
+                    self.bytes.push(b);
+                }
+                let size = if rex_w { 8 } else { 0 };
+                self.emit_rex_rm(size, &dst.name, mem);
+                self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
                 Ok(())
             }
@@ -3528,22 +3542,35 @@ impl InstructionEncoder {
         }
     }
 
-    fn encode_sse_extract(&mut self, ops: &[Operand], opcode: &[u8]) -> Result<(), String> {
+    fn encode_sse_extract(&mut self, ops: &[Operand], opcode: &[u8], rex_w: bool) -> Result<(), String> {
         if ops.len() != 3 {
             return Err("pextrX requires 3 operands".to_string());
         }
         // pextrX $imm, xmm, r/m
+        let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
         match (&ops[0], &ops[1], &ops[2]) {
             (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Register(dst)) => {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
-                let prefix_len = opcode.iter().position(|&b| b == 0x0F).unwrap_or(0);
                 for &b in &opcode[..prefix_len] {
                     self.bytes.push(b);
                 }
-                self.emit_rex_rr(0, &src.name, &dst.name);
+                let size = if rex_w { 8 } else { 0 };
+                self.emit_rex_rr(size, &src.name, &dst.name);
                 self.bytes.extend_from_slice(&opcode[prefix_len..]);
                 self.bytes.push(self.modrm(3, src_num, dst_num));
+                self.bytes.push(*imm as u8);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Memory(mem)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                for &b in &opcode[..prefix_len] {
+                    self.bytes.push(b);
+                }
+                let size = if rex_w { 8 } else { 0 };
+                self.emit_rex_rm(size, &src.name, mem);
+                self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                self.encode_modrm_mem(src_num, mem)?;
                 self.bytes.push(*imm as u8);
                 Ok(())
             }
