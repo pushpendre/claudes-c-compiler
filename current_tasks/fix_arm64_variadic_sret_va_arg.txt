@@ -1,0 +1,10 @@
+Fix ARM64 ABI bug: variadic functions with large struct return (sret)
+skip the first variadic argument.
+
+Root cause: The sret pointer goes in x8 (dedicated register) on ARM64,
+but the argument classifier counts it as consuming a GP register slot
+(x0-x7). This causes two problems:
+1. Caller: one fewer GP register available for real args (x7 not used)
+2. Callee: va_start computes wrong __gr_offs, skipping first variadic arg
+
+Fix in traits.rs (caller) and arm/codegen/prologue.rs (callee).
