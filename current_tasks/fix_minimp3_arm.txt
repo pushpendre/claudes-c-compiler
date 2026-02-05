@@ -1,0 +1,2 @@
+Fixing minimp3 ARM compilation/test failure.
+Investigating why minimp3 fails on ARM with ccc-arm (builtin asm+ld).
