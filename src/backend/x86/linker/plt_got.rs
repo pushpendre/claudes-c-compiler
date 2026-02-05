@@ -47,8 +47,18 @@ pub(super) fn create_plt_got(
                             if !plt_names.contains(&sym.name) { plt_names.push(sym.name.clone()); }
                         }
                     }
-                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX
-                    | R_X86_64_GOTTPOFF => {
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
+                        // GOTPCREL always needs a dedicated GOT entry, even if the
+                        // symbol also has a PLT entry. The PLT's GOT.PLT slot uses
+                        // JUMP_SLOT (lazy binding, initially PLT+6) which is wrong
+                        // for address-of. For symbols with PLT, the GOT entry is
+                        // statically filled with the PLT address (no GLOB_DAT);
+                        // for other dynamic symbols, GLOB_DAT is used.
+                        if !got_only_names.contains(&sym.name) {
+                            got_only_names.push(sym.name.clone());
+                        }
+                    }
+                    R_X86_64_GOTTPOFF => {
                         if !got_only_names.contains(&sym.name) && !plt_names.contains(&sym.name) {
                             got_only_names.push(sym.name.clone());
                         }

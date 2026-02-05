@@ -1,2 +1,0 @@
-Fixing libexpat project for x86 target. Diagnosing build/test failures.
-Started 2026-02-05.

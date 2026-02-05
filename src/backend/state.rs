@@ -391,6 +391,21 @@ impl CodegenState {
         !self.local_symbols.contains(name)
     }
 
+    /// Returns true if taking the address of a symbol requires GOT indirection.
+    /// Unlike needs_got(), this returns true for external symbols even in non-PIC
+    /// mode (x86-64 only). Modern toolchains default to PIE, so object files must
+    /// use GOTPCREL for external symbol addresses to be compatible with PIE linking
+    /// by the system linker. Locally-defined symbols can still use direct leaq.
+    pub fn needs_got_for_addr(&self, name: &str) -> bool {
+        if self.code_model_kernel {
+            return false;
+        }
+        if name.starts_with('.') {
+            return false;
+        }
+        !self.local_symbols.contains(name)
+    }
+
     /// Returns true if a function call needs PLT indirection in PIC mode.
     pub fn needs_plt(&self, name: &str) -> bool {
         self.needs_got(name)

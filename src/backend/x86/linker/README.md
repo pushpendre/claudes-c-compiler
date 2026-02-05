@@ -393,8 +393,8 @@ entries, GOT entries, or copy relocations:
 |------------|------------|--------|
 | `R_X86_64_PLT32` / `R_X86_64_PC32` | Dynamic function | Create PLT entry |
 | `R_X86_64_PLT32` / `R_X86_64_PC32` | Dynamic object (`STT_OBJECT`) | Create copy relocation |
-| `R_X86_64_GOTPCREL` / `R_X86_64_REX_GOTPCRELX` / `R_X86_64_GOTPCRELX` | Any | Create GOT entry |
-| `R_X86_64_GOTTPOFF` | Any | Create GOT entry |
+| `R_X86_64_GOTPCREL` / `R_X86_64_REX_GOTPCRELX` / `R_X86_64_GOTPCRELX` | Any | Create dedicated GOT entry (even if symbol has PLT) |
+| `R_X86_64_GOTTPOFF` | Any | Create GOT entry (skipped if symbol has PLT) |
 | `R_X86_64_64` | Dynamic function | Create PLT entry (function pointer) |
 | Any other | Dynamic symbol (non-object) | Create GOT entry |
 
@@ -412,8 +412,18 @@ share the same BSS copy slot.
 
 .got:
   Entries for GLOB_DAT symbols (non-PLT dynamic data), TLS GOTTPOFF
-  entries, and locally-resolved GOT entries.
+  entries, locally-resolved GOT entries, and GOTPCREL entries for
+  symbols that also have PLT entries.
 ```
+
+**GOTPCREL + PLT coexistence:** A symbol can have both a PLT entry (for
+function calls) and a separate `.got` entry (for address-of via GOTPCREL).
+The PLT's `.got.plt` slot uses `R_X86_64_JUMP_SLOT` with lazy binding
+(initially pointing to PLT+6), which is unsuitable for address-of.  The
+dedicated `.got` entry is statically filled with the PLT entry address (the
+canonical function address in a non-PIE executable), avoiding a GLOB_DAT
+dynamic relocation.  This ensures that `movq sym@GOTPCREL(%rip)` and
+`.quad sym` both resolve to the same canonical PLT address.
 
 ### Phase 6: Address Layout
 

@@ -6,7 +6,7 @@ use super::emit::X86Codegen;
 
 impl X86Codegen {
     pub(super) fn emit_global_addr_impl(&mut self, dest: &Value, name: &str) {
-        if self.state.needs_got(name) {
+        if self.state.needs_got_for_addr(name) {
             self.state.emit_fmt(format_args!("    movq {}@GOTPCREL(%rip), %rax", name));
         } else {
             self.state.out.emit_instr_sym_base_reg("    leaq", name, "rip", "rax");

@@ -73,7 +73,7 @@ The codegen is split into focused modules, all implementing or supporting `ArchC
 | `alu.rs` | Integer and float unary/binary arithmetic. Accumulator-based fallback path (load to `%rax`/`%rcx`, operate, store result) and register-direct fast path for values assigned to callee-saved registers. Covers add, sub, mul, imul, div, idiv, rem, and/or/xor, shl/shr/sar, neg, not, clz (`lzcnt`), ctz (`tzcnt`), bswap, and popcount (`popcnt`). |
 | `comparison.rs` | Integer and float comparisons, `SETcc`/`CMOVcc` emission, fused compare-and-branch for conditional jumps, conditional select via `cmovneq`, and F128 comparisons via x87 `fucomip`. |
 | `memory.rs` | Load and store operations. Type-specific move instruction selection (`movb`/`movw`/`movl`/`movq`), stack slot access via `rbp`-relative addressing, GEP constant-offset folding, over-aligned alloca handling, and indirect pointer slot dereferencing. |
-| `globals.rs` | Global symbol address computation. RIP-relative `leaq` for local symbols, `GOTPCREL` for GOT-indirected symbols, TLS access via `GOTTPOFF`/`TPOFF`, absolute address loads for kernel code model, and label address (`&&label`) via RIP-relative `leaq`. |
+| `globals.rs` | Global symbol address computation. RIP-relative `leaq` for local symbols, `GOTPCREL` for external symbols (always, for PIE compatibility) and all non-local symbols in PIC mode, TLS access via `GOTTPOFF`/`TPOFF`, absolute address loads for kernel code model, and label address (`&&label`) via RIP-relative `leaq`. |
 | `f128.rs` | F128 (long double) support via the x87 FPU. `fldt`/`fstpt` for 80-bit extended precision load/store, f64-to-x87 promotion, x87-to-integer conversion via `fisttpq` (with unsigned 64-bit special case), raw 10-byte constant materialization, and SlotAddr resolution for Direct/OverAligned/Indirect memory. |
 | `float_ops.rs` | Floating-point binary operations (SSE `addss`/`addsd`/`subss`/`subsd`/`mulss`/`mulsd`/`divss`/`divsd`) and F128 binary operations via x87 (`faddp`/`fsubrp`/`fmulp`/`fdivrp`). Float negation for F32/F64 via SSE `xorps`/`xorpd` sign-bit flip, and F128 negation via x87 `fchs`. |
 | `cast_ops.rs` | Type cast operations. Intercepts casts to/from F128 for full x87 precision: int-to-F128 via `fildq`, float-to-F128 via `fldl`/`flds`, F128-to-float via `fstpl`/`fstps`, F128-to-int via `fisttpq`. Unsigned-to-F128 uses a 2^63 correction path. All other casts fall through to the shared default. |
@@ -308,11 +308,12 @@ GEP constant offsets are folded into the `rbp` displacement at codegen time.
 
 ### GOT / PLT (Position-Independent Code)
 
-When PIC mode is enabled:
+External symbol address-of always uses GOTPCREL (even in non-PIC mode) for
+PIE compatibility.  In PIC mode, all non-local symbol addresses use GOTPCREL:
 
 ```asm
     movq symbol@GOTPCREL(%rip), %rax    # load address via GOT
-    call function@PLT                    # call via PLT
+    call function@PLT                    # call via PLT (PIC mode only)
 ```
 
 ### TLS (Thread-Local Storage)
@@ -597,7 +598,7 @@ code generation behaviors:
 
 | Option | CLI Flag | Effect |
 |--------|----------|--------|
-| `pic` | `-fPIC` | Position-independent code: use `@GOTPCREL` for global addresses, `@PLT` for external calls |
+| `pic` | `-fPIC` | Position-independent code: use `@GOTPCREL` for all non-local addresses (external symbols always use GOTPCREL even without PIC), `@PLT` for external calls |
 | `function_return_thunk` | `-mfunction-return=thunk-extern` | Replace `ret` with `jmp __x86_return_thunk` (Spectre v2 mitigation) |
 | `indirect_branch_thunk` | `-mindirect-branch=thunk-extern` | Replace `call *%r10` / `jmp *%rax` with calls to `__x86_indirect_thunk_r10` / `__x86_indirect_thunk_rax` (retpoline) |
 | `patchable_function_entry` | `-fpatchable-function-entry=N,M` | Emit N NOPs at function entry (M before the label, N-M after), with `__patchable_function_entries` section pointer for ftrace |

@@ -164,7 +164,7 @@ pub(super) fn emit_executable(
     let dynstr_size = dynstr.as_bytes().len() as u64;
     let rela_plt_size = plt_names.len() as u64 * 24;
     let rela_dyn_glob_count = got_entries.iter().filter(|(n, p)| {
-        !n.is_empty() && !*p && globals.get(n).map(|g| g.is_dynamic && !g.copy_reloc).unwrap_or(false)
+        !n.is_empty() && !*p && globals.get(n).map(|g| g.is_dynamic && !g.copy_reloc && g.plt_idx.is_none()).unwrap_or(false)
     }).count();
     let rela_dyn_count = rela_dyn_glob_count + copy_reloc_syms.len();
     let rela_dyn_size = rela_dyn_count as u64 * 24;
@@ -707,8 +707,13 @@ pub(super) fn emit_executable(
         let mut gd_a = got_addr;
         for (name, is_plt) in got_entries {
             if name.is_empty() || *is_plt { continue; }
-            let is_dynamic = globals.get(name).map(|g| g.is_dynamic && !g.copy_reloc).unwrap_or(false);
-            if is_dynamic {
+            let gsym_info = globals.get(name);
+            let is_dynamic = gsym_info.map(|g| g.is_dynamic && !g.copy_reloc).unwrap_or(false);
+            let has_plt = gsym_info.map(|g| g.plt_idx.is_some()).unwrap_or(false);
+            // Skip GLOB_DAT for dynamic symbols that also have a PLT entry:
+            // their GOT entry is statically filled with the PLT address to match
+            // the canonical address used by R_X86_64_64 data relocations.
+            if is_dynamic && !has_plt {
                 let si = dyn_sym_names.iter().position(|n| n == name).map(|i| i+1).unwrap_or(0) as u64;
                 w64(&mut out, rd, gd_a); w64(&mut out, rd+8, (si << 32) | R_X86_64_GLOB_DAT as u64); w64(&mut out, rd+16, 0);
                 rd += 24;
@@ -816,6 +821,12 @@ pub(super) fn emit_executable(
                     }
                 } else if gsym.copy_reloc && gsym.value != 0 {
                     w64(&mut out, go, gsym.value);
+                } else if gsym.is_dynamic && gsym.plt_idx.is_some() {
+                    // Dynamic function with both PLT and GOTPCREL: fill GOT with
+                    // PLT entry address so address-of via GOTPCREL matches the
+                    // canonical PLT address used by R_X86_64_64 data relocations.
+                    let plt_entry_addr = plt_addr + 16 + gsym.plt_idx.unwrap() as u64 * 16;
+                    w64(&mut out, go, plt_entry_addr);
                 }
             }
             go += 8;

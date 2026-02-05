@@ -1085,11 +1085,13 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
         Instruction::GlobalAddr { dest, name } => {
             // Skip GlobalAddr when all its uses are folded into direct symbol(%rip)
             // loads/stores by generate_load/generate_store. The needs_got check
-            // ensures we don't skip when PIC mode requires GOT indirection.
+            // ensures we don't skip when GOT indirection is required.
+            // needs_got_for_addr is used because x86-64 needs GOT for external
+            // symbol addresses even in non-PIC mode (for PIE compatibility).
             // TLS symbols must never be folded: they need %fs:sym@TPOFF access,
             // not symbol(%rip).
             let is_dead = dead_global_addrs.contains(&dest.0)
-                && !cg.state_ref().needs_got(name)
+                && !cg.state_ref().needs_got_for_addr(name)
                 && !cg.state_ref().tls_symbols.contains(name.as_str());
             if !is_dead {
                 if cg.state_ref().tls_symbols.contains(name.as_str()) {
@@ -1285,12 +1287,14 @@ fn generate_load(
     // Fold GlobalAddr + Load into a direct PC-relative memory access.
     // On x86-64 this emits `movl symbol(%rip), %eax` instead of separate
     // `leaq symbol(%rip), %rax` + `movl (%rax), %eax`.
-    // Works for kernel and default code models. Skipped for PIC symbols
+    // Works for kernel and default code models. Skipped for symbols
     // that require GOT indirection (the pointer comes from the GOT), and
     // for TLS symbols which require %fs:sym@TPOFF access patterns.
+    // Uses needs_got_for_addr to block folding for external symbols even
+    // in non-PIC mode (x86-64 needs GOTPCREL for PIE compatibility).
     if cg.supports_global_addr_fold() && !is_wide_int_type(ty) && ty != IrType::F128 {
         if let Some(sym) = global_addr_map.get(&ptr.0) {
-            if !cg.state_ref().needs_got(sym) && !cg.state_ref().tls_symbols.contains(sym.as_str()) {
+            if !cg.state_ref().needs_got_for_addr(sym) && !cg.state_ref().tls_symbols.contains(sym.as_str()) {
                 cg.emit_global_load_rip_rel(dest, sym, ty);
                 return;
             }
@@ -1328,9 +1332,10 @@ fn generate_store(
     }
     // Fold GlobalAddr + Store into a direct PC-relative memory access.
     // Skipped for TLS symbols which require %fs:sym@TPOFF access patterns.
+    // Uses needs_got_for_addr: same as Load fold above.
     if cg.supports_global_addr_fold() && !is_wide_int_type(ty) && ty != IrType::F128 {
         if let Some(sym) = global_addr_map.get(&ptr.0) {
-            if !cg.state_ref().needs_got(sym) && !cg.state_ref().tls_symbols.contains(sym.as_str()) {
+            if !cg.state_ref().needs_got_for_addr(sym) && !cg.state_ref().tls_symbols.contains(sym.as_str()) {
                 cg.emit_global_store_rip_rel(val, sym, ty);
                 return;
             }
