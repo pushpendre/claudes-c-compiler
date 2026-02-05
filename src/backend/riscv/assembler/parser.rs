@@ -351,12 +351,12 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
 
         ".align" | ".p2align" => {
             let val: u64 = args.trim().split(',').next()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
+                .and_then(|s| parse_int_literal(s.trim()).ok())
+                .unwrap_or(0) as u64;
             Directive::Align(val)
         }
         ".balign" => {
-            let val: u64 = args.trim().parse().unwrap_or(1);
+            let val: u64 = parse_int_literal(args.trim()).unwrap_or(1) as u64;
             Directive::Balign(val)
         }
 
