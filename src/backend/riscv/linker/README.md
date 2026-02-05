@@ -141,8 +141,10 @@ A separate 5-phase pipeline (with sub-phases) produces `ET_DYN` shared objects:
 
 | File              | Lines | Role                                                          |
 |-------------------|-------|---------------------------------------------------------------|
-| `mod.rs`          | ~30   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
-| `link.rs`         | ~2350 | Orchestration: `link_builtin` (executable) and `link_shared` (shared library). Delegates to phase modules for input, section merging, symbols, and relocations. Layout and ELF emission remain inline. |
+| `mod.rs`          | ~35   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
+| `link.rs`         | ~280  | Orchestration: `link_builtin` (executable) and `link_shared` (shared library). Phases 1-3 (input loading, section merging, symbol resolution) then dispatches to emit modules. |
+| `emit_exec.rs`    | ~1160 | Phases 4-14: Executable ELF emission (ET_EXEC). Layout, PLT/GOT construction, TLS support, relocation, dynamic linking tables, RELRO, and ELF header/section/program header writing. |
+| `emit_shared.rs`  | ~1050 | Phases 4-5: Shared library ELF emission (ET_DYN). PLT/GOT layout, R_RISCV_RELATIVE relocations, dynsym/dynstr, .dynamic section, SONAME, and PT_GNU_RELRO support. |
 | `input.rs`        | ~395  | Phase 1: Input file loading, archive resolution (with group iteration), shared library symbol discovery. Used by both executable and shared library linking. |
 | `sections.rs`     | ~115  | Phase 2: Section merging - groups input sections by canonical output name with proper alignment. |
 | `symbols.rs`      | ~270  | Phase 3: Global symbol table construction, COMMON symbol allocation, PLT/GOT symbol identification, local symbol vaddr computation. |

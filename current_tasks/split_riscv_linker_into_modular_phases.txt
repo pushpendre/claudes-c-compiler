@@ -1,9 +1,0 @@
-Split the RISC-V linker's monolithic link.rs (2622 lines) into modular phases,
-matching the pattern already used by ARM, x86, and i686 linkers.
-
-Plan:
-- Extract executable emission into emit_exec.rs
-- Extract shared library emission into emit_shared.rs
-- Keep link.rs as thin orchestration (~200-300 lines)
-- Add a plt_got.rs for PLT/GOT construction helpers
-- Update mod.rs and README
