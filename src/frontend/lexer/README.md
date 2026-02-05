@@ -2,7 +2,7 @@
 
 The lexer transforms preprocessed C source text into a flat sequence of tokens. It operates on a single byte buffer (the output of the preprocessor), scanning left-to-right in a single pass with no backtracking beyond local lookahead. Every token carries a `Span` that records its exact byte range and file identity, enabling precise diagnostics downstream.
 
-The lexer lives in two files:
+The lexer lives in two main files (plus a minimal `mod.rs` that re-exports `Lexer`):
 
 | File | Purpose |
 |------|---------|
@@ -22,7 +22,7 @@ pub struct Token {
 }
 ```
 
-`TokenKind` is a large enum whose variants fall into six categories:
+`TokenKind` is a large enum whose variants fall into eight categories:
 
 ### 1. Integer Literals
 
@@ -65,7 +65,7 @@ Multi-character constants like `'AB'` produce an `IntLiteral` with the bytes pac
 
 ### 4. Keywords
 
-All C89, C99, and C11 keywords have dedicated variants (`Auto`, `Break`, `Case`, `Char`, ..., `Bool`, `Complex`, `Generic`, `StaticAssert`, `ThreadLocal`, etc.). This means the parser never string-compares against keyword text; it pattern-matches on enum variants directly.
+All C89, C99, and C11 keywords have dedicated variants (`Auto`, `Break`, `Case`, `Char`, ..., `Bool`, `Complex`, `Generic`, `StaticAssert`, `ThreadLocal`, etc.). The C23 spelling `static_assert` (without underscore prefix) is also accepted alongside `_Static_assert`. The parser never string-compares against keyword text; it pattern-matches on enum variants directly.
 
 ### 5. GCC Extension Keywords
 
@@ -89,7 +89,7 @@ The lexer recognizes a broad set of GCC built-in keywords:
 
 Double-underscore forms are always recognized. The bare forms `typeof` and `asm` are only keywords when `gnu_extensions` is enabled (the default); in strict standard mode (`-std=c99` etc.) they become ordinary identifiers.
 
-GCC-style qualifier aliases (`__const__`, `__volatile__`, `__inline__`, `__restrict__`, `__signed__`, `__complex__`, `__noreturn__`, `__thread`) map to their standard C counterparts.
+GCC-style qualifier aliases (`__const`/`__const__`, `__volatile`/`__volatile__`, `__inline`/`__inline__`, `__restrict`/`__restrict__`, `__signed__`, `__complex`/`__complex__`, `__noreturn__`, `__thread`) map to their standard C counterparts. Both single- and double-underscore-suffix forms are accepted where shown.
 
 ### 6. Pragma Tokens
 
@@ -154,7 +154,7 @@ This ordering means that `.5` is correctly lexed as a float (not dot-then-5), an
 `skip_whitespace_and_comments` runs in a loop, consuming:
 
 - ASCII whitespace bytes
-- GCC-style line markers (`# <digit>...`), which are preprocessor artifacts that must not become tokens. A line marker is identified by `#` at column 0 (or preceded only by a newline) followed by a digit.
+- GCC-style line markers (`# <digit>...`), which are preprocessor artifacts that must not become tokens. A line marker is identified by `#` at position 0 or immediately after a newline, followed by optional spaces and then a digit.
 - Line comments (`//` to end of line)
 - Block comments (`/*` to `*/`)
 
@@ -183,6 +183,8 @@ value = (int_part + frac_part) * 2^exp
 
 where `frac_part = hex_frac_digits / 16^(number_of_frac_digits)`.
 
+Hex floats use a simplified suffix parser that recognizes `f`/`F` and `l`/`L` but does not handle imaginary suffixes (`i`/`j`). This matches typical usage -- imaginary hex floats are extremely rare in practice.
+
 ### Binary Integers
 
 `lex_binary_number` consumes `0b` then binary digits (`0`/`1`) and parses via `u64::from_str_radix(s, 2)`.
@@ -203,7 +205,7 @@ where `frac_part = hex_frac_digits / 16^(number_of_frac_digits)`.
 - `l` / `L` (long) or `ll` / `LL` (long long)
 - `i` / `I` / `j` / `J` (imaginary, GCC extension)
 
-The suffix order is flexible: `ULL`, `LLU`, `uLL`, etc. are all accepted. A standalone `i`/`I` suffix is recognized as imaginary only if the next character is not alphanumeric (to avoid consuming the `i` in an identifier like `int`).
+The suffix order is flexible: `ULL`, `LLU`, `uLL`, etc. are all accepted. A standalone `i`/`I` suffix is recognized as imaginary only if the next character is not alphanumeric or underscore (to avoid consuming the `i` in an identifier like `int`).
 
 ### Integer Type Promotion
 
@@ -224,7 +226,7 @@ The suffix order is flexible: `ULL`, `LLU`, `uLL`, etc. are all accepted. A stan
 | `f` / `F` | `float` | 1 |
 | `l` / `L` | `long double` | 2 |
 
-Each of these can be combined with an imaginary suffix (`i`/`I`/`j`/`J`) in either order: `1.0fi`, `1.0if`, `1.0Lj`, etc.
+Each of these can be combined with an imaginary suffix. The `i`/`I` suffix can appear before or after the type suffix (`1.0fi`, `1.0if`, `1.0Li`, `1.0iL`). The `j`/`J` suffix can appear after the type suffix or standalone (`1.0fj`, `1.0Lj`, `1.0j`).
 
 ---
 
@@ -331,7 +333,7 @@ All other GCC extension keywords (`__attribute__`, `__extension__`, `__builtin_v
 
 ### Imaginary Suffixes
 
-Integer and float literals accept `i`, `I`, `j`, and `J` suffixes to denote imaginary constants (GCC `_Complex` extension). The suffix can appear alone (`5i`) or combined with type suffixes in either order (`1.0fi`, `1.0if`, `5Li`, `5uLLj`).
+Integer and float literals accept `i`, `I`, `j`, and `J` suffixes to denote imaginary constants (GCC `_Complex` extension). The `i`/`I` suffix can appear alone (`5i`) or combined with type suffixes in either order (`1.0fi`, `1.0if`, `5Li`). The `j`/`J` suffix works standalone or after type suffixes (`1.0fj`, `5uLLj`).
 
 ### `\e` / `\E` Escape
 
