@@ -1,5 +1,0 @@
-Fixing libseccomp project for x86 target.
-The project fails only on x86 while passing on i686/arm/riscv.
-Diagnosing and fixing compiler bugs.
-
-Started: 2026-02-05

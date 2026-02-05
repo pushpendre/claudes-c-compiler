@@ -267,3 +267,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | iperf3  | PASS | PASS | PASS | PASS | Fixed: -pthread flag now defines _REENTRANT=1 (matching GCC/Clang); configure scripts use ax_pthread.m4 which checks for _REENTRANT |
 | libgrapheme | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
 | h2o     | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
+| redis   | PASS | TODO | TODO | TODO | Fixed x86: added missing SSSE3 (hadd_epi32, etc.), AVX2 (cvtepi8_epi16, madd_epi16, etc.), and AVX-512 (add_epi32, xor_si512, extracti64x4, cvtepi8_epi16, madd_epi16, reduce_add_epi32, etc.) intrinsics to bundled headers |
+| libseccomp | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
+| ldns    | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
+| io_uring_liburing | PASS | TODO | TODO | TODO | Passes x86 out of the box (was previously failing, now fixed by other improvements) |
