@@ -255,7 +255,7 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         | "fyl2x" | "fyl2xp1" | "fptan" | "fsin" | "fcos" | "fxtract" | "fnclex" | "fxch"
         | "fadd" | "fmul" | "fsub" | "fdiv" | "fnstenv" | "fldenv" | "fnstsw"
         | "ldmxcsr" | "stmxcsr" | "wbinvd" | "invd" | "rdsspq" | "rdsspd"
-        | "pushf" | "pushfq" | "popf" | "popfq" | "int3"
+        | "pushf" | "pushfq" | "pushfl" | "popf" | "popfq" | "popfl" | "int3"
         | "movsq" | "stosq" | "movsw" | "stosw" | "lodsb" | "lodsw" | "lodsd" | "lodsq"
         | "scasb" | "scasw" | "scasd" | "scasq" | "cmpsb" | "cmpsw" | "cmpsd" | "cmpsq"
         | "insb" | "insw" | "insd" | "insl" | "outsb" | "outsw" | "outsd" | "outsl"
@@ -380,8 +380,8 @@ impl InstructionEncoder {
             "leal" => self.encode_lea(ops, 4),
 
             // Stack ops
-            "pushq" => self.encode_push(ops),
-            "popq" => self.encode_pop(ops),
+            "pushq" | "pushl" => self.encode_push(ops),
+            "popq" | "popl" => self.encode_pop(ops),
 
             // Arithmetic
             "addq" | "addl" | "addw" | "addb" => self.encode_alu(ops, mnemonic, 0),
@@ -835,7 +835,11 @@ impl InstructionEncoder {
             "sahf" => { self.bytes.push(0x9E); Ok(()) }
             "lahf" => { self.bytes.push(0x9F); Ok(()) }
             "pushf" | "pushfq" => { self.bytes.push(0x9C); Ok(()) }
+            // pushfl: 32-bit pushf (needs operand-size override prefix in 64-bit mode,
+            // but in .code16gcc/.code32 sections it's the native size)
+            "pushfl" => { self.bytes.push(0x9C); Ok(()) }
             "popf" | "popfq" => { self.bytes.push(0x9D); Ok(()) }
+            "popfl" => { self.bytes.push(0x9D); Ok(()) }
 
             // ---- System instructions ----
             "int3" => { self.bytes.push(0xCC); Ok(()) }

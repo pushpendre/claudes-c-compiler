@@ -123,7 +123,8 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         | "outb" | "outw" | "outl" | "inb" | "inw" | "inl"
         | "verw" | "lsl" | "sgdt" | "sidt" | "lgdt" | "lidt"
         | "sgdtl" | "sidtl" | "lgdtl" | "lidtl"
-        | "wbinvd" | "invlpg" | "rdpmc" => return None,
+        | "wbinvd" | "invlpg" | "rdpmc"
+        | "ljmpl" | "ljmpw" | "ljmp" | "lret" | "lretl" | "lretq" => return None,
         _ => {}
     }
     let last = mnemonic.as_bytes().last()?;
@@ -336,6 +337,25 @@ impl InstructionEncoder {
                 } else {
                     return Err("unsupported ret operand".to_string());
                 }
+                Ok(())
+            }
+            // Far jump
+            "ljmpl" | "ljmpw" | "ljmp" => self.encode_ljmp(ops),
+            // Far return
+            "lret" | "lretl" => {
+                if ops.is_empty() {
+                    self.bytes.push(0xCB);
+                } else if let Some(Operand::Immediate(ImmediateValue::Integer(val))) = ops.first() {
+                    self.bytes.push(0xCA);
+                    self.bytes.extend_from_slice(&(*val as u16).to_le_bytes());
+                } else {
+                    return Err("unsupported lret operand".to_string());
+                }
+                Ok(())
+            }
+            // 64-bit far return (in .code64 sections, encoded with REX.W prefix)
+            "lretq" => {
+                self.bytes.extend_from_slice(&[0x48, 0xCB]); // REX.W + lret
                 Ok(())
             }
 
@@ -2026,6 +2046,38 @@ impl InstructionEncoder {
                 self.bytes.push(*val as u8);
                 Ok(())
             }
+            // bt $imm, label (treat label as absolute memory reference)
+            (Operand::Immediate(ImmediateValue::Integer(val)), Operand::Label(label)) => {
+                self.bytes.extend_from_slice(&[0x0F, 0xBA]);
+                // mod=00, rm=101 for disp32 (no base register)
+                self.bytes.push(self.modrm(0, ext, 5));
+                if let Some(plus_pos) = label.find('+') {
+                    let sym = &label[..plus_pos];
+                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
+                    self.add_relocation(sym, R_386_32, off);
+                } else {
+                    self.add_relocation(label, R_386_32, 0);
+                }
+                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                self.bytes.push(*val as u8);
+                Ok(())
+            }
+            // bt %reg, label (treat label as absolute memory reference)
+            (Operand::Register(src), Operand::Label(label)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                self.bytes.extend_from_slice(&[0x0F, opcode_rr]);
+                // mod=00, rm=101 for disp32 (no base register)
+                self.bytes.push(self.modrm(0, src_num, 5));
+                if let Some(plus_pos) = label.find('+') {
+                    let sym = &label[..plus_pos];
+                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
+                    self.add_relocation(sym, R_386_32, off);
+                } else {
+                    self.add_relocation(label, R_386_32, 0);
+                }
+                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                Ok(())
+            }
             _ => Err(format!("unsupported {} operands", mnemonic)),
         }
     }
@@ -2128,6 +2180,68 @@ impl InstructionEncoder {
                 }
             }
             _ => Err("unsupported jmp operand".to_string()),
+        }
+    }
+
+    /// Encode far jump (ljmpl/ljmp): direct or indirect
+    fn encode_ljmp(&mut self, ops: &[Operand]) -> Result<(), String> {
+        match ops.len() {
+            // ljmpl *mem - indirect far jump through memory (FF /5)
+            1 => {
+                match &ops[0] {
+                    Operand::Indirect(inner) => {
+                        match inner.as_ref() {
+                            Operand::Memory(mem) => {
+                                self.emit_segment_prefix(mem);
+                                self.bytes.push(0xFF);
+                                self.encode_modrm_mem(5, mem)
+                            }
+                            Operand::Label(label) => {
+                                // ljmpl *symbol - indirect far jump via label
+                                self.bytes.push(0xFF);
+                                self.bytes.push(self.modrm(0, 5, 5));
+                                if let Some(plus_pos) = label.find('+') {
+                                    let sym = &label[..plus_pos];
+                                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
+                                    self.add_relocation(sym, R_386_32, off);
+                                } else {
+                                    self.add_relocation(label, R_386_32, 0);
+                                }
+                                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                                Ok(())
+                            }
+                            _ => Err("ljmp indirect requires memory or label operand".to_string()),
+                        }
+                    }
+                    Operand::Memory(mem) => {
+                        // ljmp *mem (without explicit indirect prefix)
+                        self.emit_segment_prefix(mem);
+                        self.bytes.push(0xFF);
+                        self.encode_modrm_mem(5, mem)
+                    }
+                    _ => Err("ljmp requires indirect memory or segment:offset operands".to_string()),
+                }
+            }
+            // ljmpl $segment, $offset - direct far jump (opcode 0xEA)
+            2 => {
+                match (&ops[0], &ops[1]) {
+                    (Operand::Immediate(ImmediateValue::Integer(seg)), Operand::Immediate(ImmediateValue::Integer(off))) => {
+                        self.bytes.push(0xEA);
+                        self.bytes.extend_from_slice(&(*off as u32).to_le_bytes());
+                        self.bytes.extend_from_slice(&(*seg as u16).to_le_bytes());
+                        Ok(())
+                    }
+                    (Operand::Immediate(ImmediateValue::Integer(seg)), Operand::Immediate(ImmediateValue::Symbol(sym))) => {
+                        self.bytes.push(0xEA);
+                        self.add_relocation(sym, R_386_32, 0);
+                        self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                        self.bytes.extend_from_slice(&(*seg as u16).to_le_bytes());
+                        Ok(())
+                    }
+                    _ => Err("ljmp requires $segment, $offset operands".to_string()),
+                }
+            }
+            _ => Err("ljmp requires 1 or 2 operands".to_string()),
         }
     }
 
@@ -3125,6 +3239,21 @@ impl InstructionEncoder {
             Operand::Memory(mem) => {
                 self.bytes.extend_from_slice(&[0x0F, 0x01]);
                 self.encode_modrm_mem(reg_ext, mem)
+            }
+            // Label as absolute memory reference: lgdtl tr_gdt
+            Operand::Label(label) => {
+                self.bytes.extend_from_slice(&[0x0F, 0x01]);
+                // mod=00, rm=101 for disp32 (no base register)
+                self.bytes.push(self.modrm(0, reg_ext, 5));
+                if let Some(plus_pos) = label.find('+') {
+                    let sym = &label[..plus_pos];
+                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
+                    self.add_relocation(sym, R_386_32, off);
+                } else {
+                    self.add_relocation(label, R_386_32, 0);
+                }
+                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                Ok(())
             }
             _ => Err(format!("{} requires memory operand", mnemonic)),
         }
