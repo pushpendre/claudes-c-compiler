@@ -145,9 +145,10 @@ fn apply_one_reloc(
             (tpoff + addend) as u32
         }
         R_386_TLS_LE_32 | R_386_TLS_TPOFF32 => {
-            // Positive/negated offset
-            let ntpoff = ctx.tls_addr as i32 + ctx.tls_mem_size as i32 - sym_addr as i32;
-            (ntpoff + addend) as u32
+            // ccc emits `add` with TLS_TPOFF32, so compute negative offset
+            // (same as TLS_TPOFF/TLS_LE) to match the `add` instruction.
+            let tpoff = sym_addr as i32 - ctx.tls_addr as i32 - ctx.tls_mem_size as i32;
+            (tpoff + addend) as u32
         }
         R_386_TLS_IE => {
             resolve_tls_ie(sym, sym_addr, addend, ctx)
@@ -237,7 +238,7 @@ fn resolve_via_section_map(obj_idx: usize, sym: &InputSymbol, ctx: &RelocContext
 }
 
 /// Resolve R_386_GOT32 or R_386_GOT32X relocations.
-fn resolve_got_reloc(
+pub(super) fn resolve_got_reloc(
     sym: &InputSymbol,
     sym_addr: u32,
     addend: i32,
@@ -271,7 +272,7 @@ fn resolve_got_reloc(
 }
 
 /// Resolve R_386_TLS_IE relocation.
-fn resolve_tls_ie(sym: &InputSymbol, sym_addr: u32, addend: i32, ctx: &RelocContext) -> u32 {
+pub(super) fn resolve_tls_ie(sym: &InputSymbol, sym_addr: u32, addend: i32, ctx: &RelocContext) -> u32 {
     if let Some(gs) = ctx.global_symbols.get(&sym.name) {
         if gs.needs_got {
             let got_entry_addr = ctx.got_vaddr + (ctx.got_reserved as u32 + (gs.got_index - ctx.num_plt) as u32) * 4;
@@ -286,7 +287,7 @@ fn resolve_tls_ie(sym: &InputSymbol, sym_addr: u32, addend: i32, ctx: &RelocCont
 }
 
 /// Resolve R_386_TLS_GOTIE relocation.
-fn resolve_tls_gotie(sym: &InputSymbol, sym_addr: u32, addend: i32, ctx: &RelocContext) -> u32 {
+pub(super) fn resolve_tls_gotie(sym: &InputSymbol, sym_addr: u32, addend: i32, ctx: &RelocContext) -> u32 {
     if let Some(gs) = ctx.global_symbols.get(&sym.name) {
         if gs.needs_got {
             let got_entry_addr = ctx.got_vaddr + (ctx.got_reserved as u32 + (gs.got_index - ctx.num_plt) as u32) * 4;

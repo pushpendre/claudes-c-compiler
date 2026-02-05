@@ -708,6 +708,7 @@ fn link_builtin_native(
             }
             EM_AARCH64 => arm::linker::link_shared(object_files, output_path, user_args, &refs.lib_paths),
             EM_RISCV => riscv::linker::link_shared(object_files, output_path, user_args, &refs.lib_paths),
+            EM_386 => i686::linker::link_shared(object_files, output_path, user_args, &refs.lib_paths),
             _ => Err(format!("No shared library linker for {} (elf_machine={})", arch.arch_name, arch.elf_machine)),
         };
     }

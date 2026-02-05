@@ -240,6 +240,58 @@ fn resolve_linker_script_syms(
     }
 }
 
+/// Extract the SONAME from an ELF32 shared library's .dynamic section.
+///
+/// Returns the SONAME string if present, or None if not found.
+pub(super) fn parse_soname_elf32(path: &str) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 52 || data[0..4] != ELF_MAGIC || data[4] != ELFCLASS32 {
+        return None;
+    }
+    let e_type = read_u16(&data, 16);
+    if e_type != ET_DYN { return None; }
+
+    let e_shoff = read_u32(&data, 32) as usize;
+    let e_shentsize = read_u16(&data, 46) as usize;
+    let e_shnum = read_u16(&data, 48) as usize;
+
+    if e_shoff == 0 || e_shnum == 0 { return None; }
+
+    // Find .dynamic section
+    for i in 0..e_shnum {
+        let off = e_shoff + i * e_shentsize;
+        if off + 40 > data.len() { break; }
+        let sh_type = read_u32(&data, off + 4);
+        if sh_type == 6 { // SHT_DYNAMIC
+            let dyn_off = read_u32(&data, off + 16) as usize;
+            let dyn_size = read_u32(&data, off + 20) as usize;
+            let link = read_u32(&data, off + 24) as usize;
+
+            // Get linked string table
+            let str_sec_off = e_shoff + link * e_shentsize;
+            if str_sec_off + 40 > data.len() { return None; }
+            let str_off = read_u32(&data, str_sec_off + 16) as usize;
+            let str_size = read_u32(&data, str_sec_off + 20) as usize;
+            if str_off + str_size > data.len() { return None; }
+            let strtab = &data[str_off..str_off + str_size];
+
+            // Scan .dynamic entries for DT_SONAME (tag = 14)
+            let mut pos = dyn_off;
+            while pos + 8 <= dyn_off + dyn_size && pos + 8 <= data.len() {
+                let tag = read_i32(&data, pos);
+                let val = read_u32(&data, pos + 4) as usize;
+                if tag == 0 { break; } // DT_NULL
+                if tag == 14 { // DT_SONAME
+                    return Some(read_cstr(strtab, val));
+                }
+                pos += 8;
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// Resolve a path from a linker script entry.
 fn resolve_script_path(
     lib_path: &str,

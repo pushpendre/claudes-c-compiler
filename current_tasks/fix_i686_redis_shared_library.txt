@@ -1,1 +1,0 @@
-Implement i686 shared library linker (link_shared) to fix redis i686 build - the xxhash dependency needs -shared support to create libxxhash.so.
