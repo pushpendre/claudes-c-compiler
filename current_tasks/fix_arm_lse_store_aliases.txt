@@ -1,0 +1,13 @@
+Fix ARM assembler: add LSE atomic store aliases (stadd/stclr/stset/steor)
+
+The ARM assembler is missing the store-only aliases for LSE atomic operations:
+  stadd, staddl, stclr, stclrl, stset, stsetl, steor, steorl
+  (and byte/halfword variants: staddb, staddlb, staddh, staddlh, etc.)
+
+These are aliases for ldadd/ldclr/ldset/ldeor with Rt=XZR/WZR (discard result).
+They cause "unsupported instruction" errors when building ARM defconfig kernel.
+
+Fix: Add dispatch entries in encoder/mod.rs and translate them to the
+corresponding ldop encoding with Rt=31 (zero register).
+
+Started: 2026-02-05
