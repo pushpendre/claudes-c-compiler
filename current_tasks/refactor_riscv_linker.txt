@@ -1,0 +1,15 @@
+Refactor RISC-V linker (link.rs): remove dead code, extract submodules, deduplicate.
+
+The RISC-V linker at 4611 lines is the largest backend file. It has:
+- Two giant monolithic functions (link_builtin: 2464 lines, link_shared: 1497 lines)
+- ~800-1000 lines of internal duplication between the two functions
+- ~500 lines duplicated from linker_common.rs
+- 5+ dead/unused structs and functions
+- 80+ mutable variables in link_builtin scope
+
+Plan:
+1. Remove dead code (PendingReloc, DynSym, decode_uleb128, encode_uleb128_in_place, elf_hash_gnu)
+2. Extract relocation helpers into relocations.rs submodule
+3. Extract ELF emission helpers into emit.rs submodule
+4. Deduplicate shared logic between link_builtin and link_shared
+5. Use linker_common functions where possible instead of local reimplementations
