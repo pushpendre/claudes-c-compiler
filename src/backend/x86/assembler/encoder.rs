@@ -2544,14 +2544,10 @@ impl InstructionEncoder {
                 let rc = self.relocations.len();
                 self.bytes.push(0x81);
                 self.encode_modrm_mem(alu_op, mem)?;
-                // Emit 4-byte relocation for the symbol immediate
-                let offset = self.bytes.len() as u64 + self.offset;
-                self.relocations.push(Relocation {
-                    offset,
-                    symbol: sym.clone(),
-                    reloc_type: R_X86_64_32S,
-                    addend,
-                });
+                // Emit 4-byte relocation for the symbol immediate.
+                // Use bytes.len() (instruction-relative offset) since
+                // elf_writer_common adds the section base offset separately.
+                self.add_relocation(&sym, R_X86_64_32S, addend);
                 self.bytes.extend_from_slice(&[0; 4]);
                 self.adjust_rip_reloc_addend(rc, 4);
                 Ok(())
@@ -2564,13 +2560,8 @@ impl InstructionEncoder {
                 self.emit_rex_unary(size, &dst.name);
                 self.bytes.push(0x81);
                 self.bytes.push(self.modrm(3, alu_op, dst_num));
-                let offset = self.bytes.len() as u64 + self.offset;
-                self.relocations.push(Relocation {
-                    offset,
-                    symbol: sym.clone(),
-                    reloc_type: R_X86_64_32S,
-                    addend,
-                });
+                // Use instruction-relative offset; elf_writer_common adds section base.
+                self.add_relocation(&sym, R_X86_64_32S, addend);
                 self.bytes.extend_from_slice(&[0; 4]);
                 Ok(())
             }
