@@ -1,0 +1,10 @@
+Fixing: -pthread flag does not define _REENTRANT preprocessor macro
+
+Problem: When GCC/Clang are invoked with -pthread, they automatically define _REENTRANT=1.
+Our compiler accepts -pthread but silently ignores it (no macro defined).
+This breaks configure scripts that check for _REENTRANT (e.g., iperf3, and many others).
+
+Fix: Add a pthread field to Driver struct, set it when -pthread is parsed,
+and define _REENTRANT=1 in configure_preprocessor() when the flag is active.
+
+Affected project: iperf3 (fails on all 4 architectures because configure can't detect pthreads)
