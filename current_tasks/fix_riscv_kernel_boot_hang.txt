@@ -1,0 +1,5 @@
+Fix RISC-V kernel boot hang on QEMU
+
+Working on fixing the issue where CCC-compiled RISC-V kernel hangs during
+early init when booted on qemu-system-riscv64. Will debug using delta
+debugging and instruction comparison between GCC and CCC builds.

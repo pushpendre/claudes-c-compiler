@@ -635,7 +635,7 @@ impl Lowerer {
                 if matches!(expr, Expr::StringLiteral(_, _)) {
                     return !is_multidim_char_array;
                 }
-                if matches!(expr, Expr::LabelAddr(_, _)) || Self::expr_contains_label_addr(expr) {
+                if matches!(Self::strip_casts(expr), Expr::LabelAddr(_, _)) || Self::expr_contains_label_addr(expr) {
                     return true;
                 }
                 let is_const = self.eval_const_expr(expr).is_some();
@@ -1802,7 +1802,7 @@ impl Lowerer {
                 if let Expr::StringLiteral(s, _) = expr {
                     let label = self.intern_string_literal(s);
                     elements.push(GlobalInit::GlobalAddr(label));
-                } else if let Expr::LabelAddr(label_name, _) = expr {
+                } else if let Expr::LabelAddr(label_name, _) = Self::strip_casts(expr) {
                     let scoped_label = self.get_or_create_user_label(label_name);
                     if let Some(ref mut fs) = self.func_state {
                         fs.global_init_label_blocks.push(scoped_label);

@@ -309,6 +309,28 @@ impl Preprocessor {
                 continue;
             }
 
+            // Handle #line directives during multi-line accumulation.
+            // Generated code (e.g. gforth's prim.i) can have #line directives
+            // between every line of code, including in the middle of multi-line
+            // expressions. These must be consumed (updating line tracking state)
+            // without being appended to the pending accumulation buffer.
+            let is_line_directive = if is_directive && !is_conditional_directive {
+                let after_hash = trimmed[1..].trim_start();
+                after_hash.starts_with("line ")
+                    || after_hash.starts_with("line\t")
+                    || after_hash.chars().next().is_some_and(|c| c.is_ascii_digit())
+            } else {
+                false
+            };
+            if is_line_directive && !pending_line.is_empty() {
+                if self.conditionals.is_active() {
+                    let hash_col = line.find('#').map(|i| i + 2).unwrap_or(1);
+                    self.process_directive(trimmed, source_line_num + 1, hash_col);
+                }
+                pending_newlines += 1;
+                continue;
+            }
+
             let process_directive = is_directive
                 && (!is_include || pending_line.is_empty());
 

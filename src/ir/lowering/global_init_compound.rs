@@ -348,7 +348,8 @@ impl Lowerer {
     /// Handles string literals, global addresses, function pointers, etc.
     pub(super) fn resolve_ptr_field_init(&mut self, expr: &Expr) -> Option<GlobalInit> {
         // GCC &&label extension: label address in a pointer field
-        if let Expr::LabelAddr(label_name, _) = expr {
+        // Strip casts first since label addresses are often cast, e.g. (Label)&&I_noop
+        if let Expr::LabelAddr(label_name, _) = Self::strip_casts(expr) {
             let scoped_label = self.get_or_create_user_label(label_name);
             // Record this block ID so CFG simplify keeps it reachable
             if let Some(ref mut fs) = self.func_state {
