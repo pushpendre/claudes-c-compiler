@@ -88,10 +88,10 @@ compression would conflict with the linker's relaxation pass.
 | File            | Lines  | Role                                                    |
 |-----------------|--------|---------------------------------------------------------|
 | `mod.rs`        | ~100   | Public `assemble_with_args()` entry point; orchestrates parser → ELF writer pipeline, handles `-mabi=` flag for float ABI selection and `-march=` for RV32/RV64 and RVC detection |
-| `parser.rs`     | ~1025  | Line tokenizer and operand parser; splits assembly text into `AsmStatement` records, evaluates `.if/.else/.endif` conditionals |
+| `parser.rs`     | ~1060  | Line tokenizer and operand parser; splits assembly text into `AsmStatement` records, evaluates `.if/.else/.endif` conditionals |
 | `encoder/`      | ~2670  | Instruction encoder (split into focused submodules, see below) |
 | `compress.rs`   | ~850   | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents (currently disabled) |
-| `elf_writer.rs` | ~1210  | ELF object file builder; composes with `ElfWriterBase` (from shared `elf.rs`) for section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, numeric label handling, and ELF serialization |
+| `elf_writer.rs` | ~1410  | ELF object file builder; composes with `ElfWriterBase` (from shared `elf` module) for section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, numeric label handling, and ELF serialization |
 
 ### Encoder Submodules (`encoder/`)
 
@@ -112,8 +112,8 @@ The instruction encoder is organized as a directory of focused submodules:
 
 ### `ElfWriter` (elf_writer.rs)
 
-The ELF writer composes with `ElfWriterBase` (from shared `elf.rs`) for common
-infrastructure and adds RISC-V-specific logic.
+The ELF writer composes with `ElfWriterBase` (from the shared `elf` module) for
+common infrastructure and adds RISC-V-specific logic.
 
 ```
 ElfWriter {
@@ -128,14 +128,14 @@ ElfWriter {
 }
 ```
 
-The `ElfWriterBase` (defined in shared `elf.rs`) holds all shared state:
+The `ElfWriterBase` (defined in `elf/writer_base.rs`) holds all shared state:
 `current_section`, `sections` (as `HashMap<String, ObjSection>`),
 `section_order`, `labels`, `global_symbols`, `weak_symbols`, `symbol_types`,
 `symbol_sizes`, `symbol_visibility`, `aliases`, and section push/pop stacks.
 It provides shared methods for section management, directive processing, data
 emission, and ELF serialization. It is also used by the ARM assembler.
 
-### `ObjSection` (elf.rs)
+### `ObjSection` (elf/object_writer.rs)
 
 Represents a single ELF section being built (shared across ARM and RISC-V).
 
@@ -181,7 +181,7 @@ Operand::Csr(String)                                  // CSR register name or nu
 Operand::RoundingMode(String)                         // rne, rtz, rdn, rup, rmm, dyn
 ```
 
-### `EncodeResult` (encoder.rs)
+### `EncodeResult` (encoder/mod.rs)
 
 The encoder returns one of several result variants depending on the instruction
 class.
@@ -195,7 +195,7 @@ EncodeResult::WordsWithRelocs(Vec<(u32, Option<Reloc>)>)  // multi-word + relocs
 EncodeResult::Skip                                    // pseudo handled elsewhere (no output)
 ```
 
-### `Relocation` / `RelocType` (encoder.rs)
+### `Relocation` / `RelocType` (encoder/mod.rs)
 
 ```
 Relocation {
@@ -280,7 +280,7 @@ The ELF writer iterates over parsed statements and handles directives inline:
 | `.string` / `.asciz` / `.ascii` | Emit string data (with/without NUL)     |
 | `.align` / `.balign` / `.p2align` | Pad to alignment boundary              |
 | `.equ` / `.set`       | Define a symbol with a constant value              |
-| `.comm` / `.lcomm`    | Reserve common/local-common storage                |
+| `.comm`               | Reserve common storage                             |
 | `.pushsection` / `.popsection` / `.previous` | Push/pop section stack     |
 | `.option push/pop/rvc/norvc/norelax` | Control RVC compression and relaxation |
 | `.insn`               | Emit a raw instruction encoding                    |
@@ -509,7 +509,7 @@ This means:
 
 ### 6. Shared infrastructure
 
-The `ElfWriterBase` (in `elf.rs`) and `asm_preprocess` module are shared between
+The `ElfWriterBase` (in the `elf` module) and `asm_preprocess` module are shared between
 the RISC-V and ARM assembler backends. This avoids duplicating section management,
 symbol table construction, ELF serialization, macro expansion, and repetition
 block handling. Each backend composes with the shared base and adds
