@@ -272,22 +272,28 @@ fn clean_path(path: &Path) -> PathBuf {
     result
 }
 
-/// Normalize a computed include path by collapsing anti-paste spaces around '/'.
+/// Normalize a macro-expanded include path by removing spaces inserted during
+/// expansion.
 ///
-/// During macro expansion, the preprocessor inserts a space between adjacent '/'
-/// characters to prevent "//" from being lexed as a line comment start (see
-/// `would_paste_tokens` in macro_defs.rs). This is correct for general code but
-/// corrupts file paths in computed `#include` directives. For example:
+/// During macro expansion, the preprocessor may insert spaces between tokens for
+/// two reasons:
+/// 1. Anti-paste spaces to prevent "//" from being lexed as a comment start
+///    (see `would_paste_tokens` in macro_defs.rs).
+/// 2. Spaces preserved from the original macro body between token positions.
 ///
-///   #define PATH asm/
-///   #define INCLUDE(f) __stringify(PATH/f.h)
-///   #include INCLUDE(msr-trace)
+/// Both corrupt file paths in computed `#include` directives. For example:
 ///
-/// produces "asm/ /msr-trace.h" instead of "asm//msr-trace.h". Collapsing
-/// "/ /" back to "//" fixes the path (the filesystem treats "//" as "/").
+///   #define incdir tests/
+///   #define funnyname 42test.h
+///   #define incname < incdir funnyname >
+///   #include incname
+///
+/// produces "tests/ 42test.h" instead of "tests/42test.h". Removing all spaces
+/// fixes this. This should only be called for macro-expanded paths; direct
+/// include paths (e.g., `#include "path with spaces/foo.h"`) are not affected.
 fn normalize_include_path(path: String) -> String {
-    if path.contains("/ /") {
-        path.replace("/ /", "//")
+    if path.contains(' ') {
+        path.replace(' ', "")
     } else {
         path
     }
@@ -302,10 +308,10 @@ impl Preprocessor {
         let path = path.trim();
 
         // Expand macros in include path (for computed includes)
-        let path = if !path.starts_with('<') && !path.starts_with('"') {
-            self.macros.expand_line(path)
+        let (path, was_macro_expanded) = if !path.starts_with('<') && !path.starts_with('"') {
+            (self.macros.expand_line(path), true)
         } else {
-            path.to_string()
+            (path.to_string(), false)
         };
         let path = path.trim();
 
@@ -319,7 +325,14 @@ impl Preprocessor {
             (path.to_string(), false)
         };
 
-        let include_path = normalize_include_path(include_path);
+        // Only normalize paths that were produced by macro expansion, since
+        // those may have spurious spaces from token separation. Direct paths
+        // (e.g., #include "My Headers/foo.h") should be left as-is.
+        let include_path = if was_macro_expanded {
+            normalize_include_path(include_path)
+        } else {
+            include_path
+        };
 
         self.includes.push(include_path.clone());
 
@@ -439,28 +452,32 @@ impl Preprocessor {
         let path = path.trim();
 
         // Parse the include path
-        let (include_path, _is_system) = if path.starts_with('<') {
+        let (include_path, _is_system, was_macro_expanded) = if path.starts_with('<') {
             let end = path.find('>').unwrap_or(path.len());
-            (path[1..end].to_string(), true)
+            (path[1..end].to_string(), true, false)
         } else if let Some(rest) = path.strip_prefix('"') {
             let end = rest.find('"').unwrap_or(rest.len());
-            (rest[..end].to_string(), false)
+            (rest[..end].to_string(), false, false)
         } else {
             // Try macro expansion
             let expanded = self.macros.expand_line(path);
             let expanded = expanded.trim().to_string();
             if expanded.starts_with('<') {
                 let end = expanded.find('>').unwrap_or(expanded.len());
-                (expanded[1..end].to_string(), true)
+                (expanded[1..end].to_string(), true, true)
             } else if let Some(rest) = expanded.strip_prefix('"') {
                 let end = rest.find('"').unwrap_or(rest.len());
-                (rest[..end].to_string(), false)
+                (rest[..end].to_string(), false, true)
             } else {
-                (expanded, false)
+                (expanded, false, true)
             }
         };
 
-        let include_path = normalize_include_path(include_path);
+        let include_path = if was_macro_expanded {
+            normalize_include_path(include_path)
+        } else {
+            include_path
+        };
 
         if !self.resolve_includes {
             return None;

@@ -335,9 +335,11 @@ located in any search path.
 ### Computed Includes
 
 When the `#include` argument does not start with `"` or `<`, it is
-macro-expanded first. Anti-paste spaces around `/` characters (inserted by
-`would_paste_tokens` to prevent `//` comment formation) are collapsed back
-in `normalize_include_path`.
+macro-expanded first. All spaces in the resulting path are stripped by
+`normalize_include_path` to remove both anti-paste spaces (inserted by
+`would_paste_tokens` to prevent `//` comment formation) and inter-token
+spaces preserved from macro bodies. This normalization is only applied to
+macro-expanded paths; direct include paths are left unchanged.
 
 ### Recursive Inclusion Protection
 
