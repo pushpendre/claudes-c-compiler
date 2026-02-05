@@ -1,0 +1,2 @@
+Fixing Perl project for x86 architecture.
+Investigating compilation failures and fixing compiler bugs as needed.
