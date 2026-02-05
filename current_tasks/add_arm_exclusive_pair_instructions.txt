@@ -1,6 +1,0 @@
-Add LDXP/STXP/LDAXP/STLXP (exclusive pair) instructions to ARM assembler.
-
-These are needed for 128-bit atomic operations (cmpxchg128) used in the Linux kernel
-and other code that needs atomic 128-bit load/store pairs.
-
-Fixes the asm-multi-output-scratch-clobber-arm test case.

@@ -342,6 +342,10 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "stlrb" => encode_ldar_stlr(operands, false, Some(0b00)),
         "ldarh" => encode_ldar_stlr(operands, true, Some(0b01)),
         "stlrh" => encode_ldar_stlr(operands, false, Some(0b01)),
+        "ldxp" => encode_ldxp_stxp(operands, true, false),
+        "ldaxp" => encode_ldxp_stxp(operands, true, true),
+        "stxp" => encode_ldxp_stxp(operands, false, false),
+        "stlxp" => encode_ldxp_stxp(operands, false, true),
 
         // Address computation
         "adrp" => encode_adrp(operands),
@@ -2701,6 +2705,44 @@ fn encode_ldaxr_stlxr(operands: &[Operand], is_load: bool, forced_size: Option<u
         let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
         let word = (size << 30) | (0b001000000 << 21) | (ws << 16) | (1 << 15)
             | (0b11111 << 10) | (rn << 5) | rt;
+        Ok(EncodeResult::Word(word))
+    }
+}
+
+/// Encode LDXP/STXP/LDAXP/STLXP (exclusive pair) instructions.
+///
+/// LDXP  Xt1, Xt2, [Xn]  : sz 001000 0 1 1 11111 0 Rt2 Rn Rt
+/// LDAXP Xt1, Xt2, [Xn]  : sz 001000 0 1 1 11111 1 Rt2 Rn Rt
+/// STXP  Ws, Xt1, Xt2, [Xn] : sz 001000 0 0 1 Rs 0 Rt2 Rn Rt
+/// STLXP Ws, Xt1, Xt2, [Xn] : sz 001000 0 0 1 Rs 1 Rt2 Rn Rt
+fn encode_ldxp_stxp(operands: &[Operand], is_load: bool, acquire_release: bool) -> Result<EncodeResult, String> {
+    let o0 = if acquire_release { 1u32 } else { 0 };
+    if is_load {
+        // LDXP/LDAXP Rt, Rt2, [Rn]
+        let (rt, is_64) = get_reg(operands, 0)?;
+        let (rt2, _) = get_reg(operands, 1)?;
+        let rn = match operands.get(2) {
+            Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("ldxp needs memory operand")?,
+            _ => return Err("ldxp needs memory operand".to_string()),
+        };
+        let sz = if is_64 { 1u32 } else { 0 };
+        // 1 sz 001000 0 1 1 11111 o0 Rt2 Rn Rt
+        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24) | (0 << 23) | (1 << 22)
+            | (1 << 21) | (0b11111 << 16) | (o0 << 15) | (rt2 << 10) | (rn << 5) | rt;
+        Ok(EncodeResult::Word(word))
+    } else {
+        // STXP/STLXP Ws, Rt, Rt2, [Rn]
+        let (ws, _) = get_reg(operands, 0)?;  // status register (always W)
+        let (rt, is_64) = get_reg(operands, 1)?;
+        let (rt2, _) = get_reg(operands, 2)?;
+        let rn = match operands.get(3) {
+            Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("stxp needs memory operand")?,
+            _ => return Err("stxp needs memory operand".to_string()),
+        };
+        let sz = if is_64 { 1u32 } else { 0 };
+        // 1 sz 001000 0 0 1 Rs o0 Rt2 Rn Rt
+        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24) | (0 << 23) | (0 << 22)
+            | (1 << 21) | (ws << 16) | (o0 << 15) | (rt2 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     }
 }
