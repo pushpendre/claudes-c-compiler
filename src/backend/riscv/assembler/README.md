@@ -13,15 +13,16 @@ The assembler supports the full RV64I base integer ISA, the M (multiply/divide),
 A (atomics), F (single-precision float), D (double-precision float), and
 C (compressed 16-bit) standard extensions.  It handles all standard assembler
 directives, pseudo-instructions, relocation modifiers, numeric local labels,
-and optional RV64C instruction compression.
+macro expansion, and conditional assembly.
 
 ### Capabilities at a glance
 
 - Full RV64IMAFDC instruction encoding
 - 40+ pseudo-instructions (li, la, call, tail, mv, not, negw, seqz, ...)
 - All standard assembler directives (.text, .data, .globl, .align, .byte, ...)
+- Preprocessor: `.macro/.endm`, `.rept/.irp/.endr`, `.if/.else/.endif`
 - Relocation modifier parsing (%pcrel_hi, %pcrel_lo, %hi, %lo, %tprel_*, %got_pcrel_hi, ...)
-- Automatic RV64C compressed instruction selection (post-encoding pass)
+- RV64C compression pass (currently disabled; linker relaxation preferred)
 - Numeric local labels (1:, 1b, 1f) with forward/backward reference resolution
 - Correct ELF object file emission with .symtab, .strtab, .rela.* sections
 
@@ -31,87 +32,91 @@ and optional RV64C instruction compression.
                           Assembly source (text)
                                   |
                                   v
-                     +------------------------+
-                     |     Parser (parser.rs) |
-                     |  - Tokenize lines      |
-                     |  - Parse operands       |
-                     |  - Recognize directives |
-                     +------------------------+
-                                  |
-                         Vec<ParsedLine>
+                     +----------------------------+
+                     | Preprocessor               |
+                     |   (asm_preprocess.rs,       |
+                     |    shared across backends)  |
+                     |  - Strip C-style comments   |
+                     |  - Expand .macro/.endm      |
+                     |  - Expand .rept/.irp/.endr  |
+                     +----------------------------+
                                   |
                                   v
-                     +------------------------+
-                     |   Encoder (encoder.rs) |
-                     |  - Map mnemonic to ISA |
-                     |  - Encode R/I/S/B/U/J  |
-                     |  - Expand pseudos      |
-                     |  - Emit relocations    |
-                     +------------------------+
+                     +----------------------------+
+                     |     Parser (parser.rs)      |
+                     |  - Tokenize lines           |
+                     |  - Parse operands           |
+                     |  - Recognize directives     |
+                     |  - Evaluate .if/.else/.endif|
+                     +----------------------------+
+                                  |
+                         Vec<AsmStatement>
+                                  |
+                                  v
+                     +----------------------------+
+                     |   Encoder (encoder.rs)      |
+                     |  - Map mnemonic to ISA      |
+                     |  - Encode R/I/S/B/U/J       |
+                     |  - Expand pseudos            |
+                     |  - Emit relocations          |
+                     +----------------------------+
                                   |
                        EncodeResult + Relocation
                                   |
                                   v
-                     +---------------------------+
-                     | Assembler Core (mod.rs)   |
-                     |  - Section management     |
-                     |  - Label/symbol tracking   |
-                     |  - Directive execution     |
-                     |  - Branch reloc resolution |
-                     +---------------------------+
-                                  |
-                                  v
                      +----------------------------+
-                     | Compressor (compress.rs)   |
-                     |  - Scan 32-bit encodings   |
-                     |  - Replace with 16-bit RVC |
-                     |  - Adjust offsets/relocs   |
-                     +----------------------------+
-                                  |
-                                  v
-                     +----------------------------+
-                     | ELF Writer (elf_writer.rs) |
-                     |  - ELF64 header            |
-                     |  - Section headers         |
-                     |  - .symtab / .strtab       |
-                     |  - .rela.text / .rela.data |
+                     | ELF Writer (elf_writer.rs)  |
+                     |  - Section management       |
+                     |  - Label/symbol tracking     |
+                     |  - Directive execution       |
+                     |  - Branch reloc resolution   |
+                     |  - ELF64 serialization       |
                      +----------------------------+
                                   |
                                   v
                          Relocatable ELF .o file
 ```
 
+Note: A compression pass (`compress.rs`) exists and can rewrite eligible 32-bit
+instructions to 16-bit RVC equivalents, but it is currently disabled because
+the linker handles relaxation via `R_RISCV_RELAX` and running our own
+compression would conflict with the linker's relaxation pass.
+
 ## File Inventory
 
-| File            | Lines | Role                                                    |
-|-----------------|-------|---------------------------------------------------------|
-| `mod.rs`        | ~30   | Top-level `Assembler` struct; public `assemble()` entry point, delegates to parser/encoder/compressor/ELF writer |
-| `parser.rs`     | ~980  | Line tokenizer and operand parser; splits assembly text into structured `ParsedLine` records |
-| `encoder.rs`    | ~1900 | Instruction encoder; maps every mnemonic to its binary encoding, handles pseudo-instruction expansion, relocation modifier parsing |
-| `compress.rs`   | ~830  | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents |
-| `elf_writer.rs` | ~835  | ELF object file serializer; composes with `ElfWriterBase` (from `elf.rs`) for shared section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, and RVC compression dispatch |
+| File            | Lines  | Role                                                    |
+|-----------------|--------|---------------------------------------------------------|
+| `mod.rs`        | ~60    | Public `assemble()` / `assemble_with_args()` entry points; orchestrates parser → ELF writer pipeline, handles `-mabi=` flag for float ABI selection |
+| `parser.rs`     | ~980   | Line tokenizer and operand parser; splits assembly text into `AsmStatement` records, evaluates `.if/.else/.endif` conditionals |
+| `encoder.rs`    | ~2250  | Instruction encoder; maps every mnemonic to its binary encoding, handles pseudo-instruction expansion, relocation emission |
+| `compress.rs`   | ~850   | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents (currently disabled) |
+| `elf_writer.rs` | ~1210  | ELF object file builder; composes with `ElfWriterBase` (from shared `elf.rs`) for section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, numeric label handling, and ELF serialization |
 
 ## Key Data Structures
 
 ### `ElfWriter` (elf_writer.rs)
 
-The ELF writer composes with `ElfWriterBase` (from `elf.rs`) for shared
+The ELF writer composes with `ElfWriterBase` (from shared `elf.rs`) for common
 infrastructure and adds RISC-V-specific logic.
 
 ```
 ElfWriter {
     pub base:              ElfWriterBase,               // Shared: sections, labels, symbols, directives
     pending_branch_relocs: Vec<PendingReloc>,           // unresolved local branches
-    pcrel_hi_counter:      u32,                          // counter for synthetic .Lpcrel_hi labels
+    pcrel_hi_counter:      u32,                         // counter for synthetic .Lpcrel_hi labels
     numeric_labels:        HashMap<String, Vec<(String, u64)>>,  // "1" -> [(sec, off), ...]
+    deferred_exprs:        Vec<DeferredExpr>,            // forward label data expressions (.word sym - .)
+    elf_flags:             u32,                          // ELF e_flags (default: RVC | FLOAT_ABI_DOUBLE)
+    no_relax:              bool,                         // suppress R_RISCV_RELAX (via .option norelax)
 }
 ```
 
-The `ElfWriterBase` (defined in `elf.rs`) holds all shared state: `current_section`,
-`sections` (as `HashMap<String, ObjSection>`), `section_order`, `labels`,
-`global_symbols`, `weak_symbols`, `symbol_types`, `symbol_sizes`,
-`symbol_visibility`, and `aliases`. It provides shared methods for section
-management, directive processing, data emission, and ELF serialization.
+The `ElfWriterBase` (defined in shared `elf.rs`) holds all shared state:
+`current_section`, `sections` (as `HashMap<String, ObjSection>`),
+`section_order`, `labels`, `global_symbols`, `weak_symbols`, `symbol_types`,
+`symbol_sizes`, `symbol_visibility`, `aliases`, and section push/pop stacks.
+It provides shared methods for section management, directive processing, data
+emission, and ELF serialization. It is also used by the ARM assembler.
 
 ### `ObjSection` (elf.rs)
 
@@ -128,29 +133,35 @@ ObjSection {
 }
 ```
 
-### `ParsedLine` (parser.rs)
+### `AsmStatement` (parser.rs)
 
-The parser's output for a single source line.
+The parser's output. Each source line produces one `AsmStatement`.
 
 ```
-ParsedLine {
-    label:     Option<String>,     // label defined on this line, if any
-    mnemonic:  Option<String>,     // instruction or directive name
-    operands:  Vec<Operand>,       // parsed operand list
-}
+AsmStatement::Label(String)                           // label definition: "name:"
+AsmStatement::Directive(Directive)                    // typed assembler directive
+AsmStatement::Instruction { mnemonic, operands, raw_operands }  // RISC-V instruction
+AsmStatement::Empty                                   // blank line / comment-only
 ```
+
+The `Directive` enum has ~30 variants covering all recognized directives
+(section switches, data emission, symbol attributes, alignment, etc.).
 
 ### `Operand` (parser.rs)
 
 A tagged union covering every operand form the parser recognizes.
 
 ```
-Operand::Reg(String)                  // register name: "x5", "a0", "sp"
-Operand::Imm(i64)                     // immediate: 42, -7, 0xff
-Operand::Symbol(String)               // symbol name: "printf", ".LC0"
-Operand::Label(String)                // label reference (same as symbol)
-Operand::MemRef { base, offset }      // memory: 8(sp), 0(a0)
-Operand::Modifier { kind, symbol }    // %pcrel_hi(sym), %lo(sym), ...
+Operand::Reg(String)                                  // register: "x5", "a0", "sp", "fa3"
+Operand::Imm(i64)                                     // immediate: 42, -7, 0xff
+Operand::Symbol(String)                               // symbol reference: "printf", ".LC0"
+Operand::SymbolOffset(String, i64)                    // symbol + addend: "sym+8"
+Operand::Mem { base, offset }                         // memory: 8(sp), 0(a0)
+Operand::MemSymbol { base, symbol, modifier }         // memory with reloc: %lo(sym)(a0)
+Operand::Label(String)                                // branch target label
+Operand::FenceArg(String)                             // fence operand: "iorw"
+Operand::Csr(String)                                  // CSR register name or number
+Operand::RoundingMode(String)                         // rne, rtz, rdn, rup, rmm, dyn
 ```
 
 ### `EncodeResult` (encoder.rs)
@@ -159,11 +170,12 @@ The encoder returns one of several result variants depending on the instruction
 class.
 
 ```
-EncodeResult::Word(u32)                           // single 32-bit instruction
-EncodeResult::WordWithReloc { word, reloc }       // instruction + relocation
-EncodeResult::WordsWithRelocs(Vec<(u32, Option<Reloc>)>)  // multi-word sequence (e.g., call = auipc+jalr)
-EncodeResult::Compressed(u16)                     // already-compressed instruction
-EncodeResult::Raw(Vec<u8>)                        // raw bytes (e.g., .byte/.word)
+EncodeResult::Word(u32)                               // single 32-bit instruction
+EncodeResult::Half(u16)                               // 16-bit compressed instruction
+EncodeResult::Words(Vec<u32>)                         // multi-word sequence (e.g., li with large imm)
+EncodeResult::WordWithReloc { word, reloc }           // instruction + relocation
+EncodeResult::WordsWithRelocs(Vec<(u32, Option<Reloc>)>)  // multi-word + relocs (e.g., call = auipc+jalr)
+EncodeResult::Skip                                    // pseudo handled elsewhere (no output)
 ```
 
 ### `Relocation` / `RelocType` (encoder.rs)
@@ -175,9 +187,9 @@ Relocation {
     addend:     i64,           // constant addend
 }
 
-RelocType::Branch          -> R_RISCV_BRANCH     (B-type, 12-bit PC-rel)
-RelocType::Jal             -> R_RISCV_JAL        (J-type, 20-bit PC-rel)
-RelocType::CallPlt         -> R_RISCV_CALL_PLT   (AUIPC+JALR pair)
+RelocType::Branch          -> R_RISCV_BRANCH       (B-type, 12-bit PC-rel)
+RelocType::Jal             -> R_RISCV_JAL          (J-type, 20-bit PC-rel)
+RelocType::CallPlt         -> R_RISCV_CALL_PLT     (AUIPC+JALR pair)
 RelocType::PcrelHi20       -> R_RISCV_PCREL_HI20
 RelocType::PcrelLo12I      -> R_RISCV_PCREL_LO12_I
 RelocType::PcrelLo12S      -> R_RISCV_PCREL_LO12_S
@@ -188,22 +200,40 @@ RelocType::TprelHi20       -> R_RISCV_TPREL_HI20
 RelocType::TprelLo12I      -> R_RISCV_TPREL_LO12_I
 RelocType::TprelLo12S      -> R_RISCV_TPREL_LO12_S
 RelocType::TprelAdd        -> R_RISCV_TPREL_ADD
-RelocType::GotPcrelHi20   -> R_RISCV_GOT_HI20
+RelocType::GotHi20         -> R_RISCV_GOT_HI20
+RelocType::TlsGdHi20       -> R_RISCV_TLS_GD_HI20
+RelocType::TlsGotHi20      -> R_RISCV_TLS_GOT_HI20
 RelocType::Abs32           -> R_RISCV_32
 RelocType::Abs64           -> R_RISCV_64
+RelocType::Add32           -> R_RISCV_ADD32   (symbol difference expressions)
+RelocType::Sub32           -> R_RISCV_SUB32
+RelocType::Add64           -> R_RISCV_ADD64
+RelocType::Sub64           -> R_RISCV_SUB64
 ```
 
 ## Processing Algorithm Step by Step
 
-### Step 1: Parsing (`parser.rs`)
+### Step 1: Preprocessing (`asm_preprocess.rs`)
 
-The parser processes the assembly source line by line. For each line it:
+Before parsing, the shared `asm_preprocess` module runs several expansion passes
+over the raw assembly text:
 
-1. Strips comments (everything after `#` or `;`).
-2. Detects a leading label (any identifier followed by `:`). Numeric labels
+1. Strips C-style block comments (`/* ... */`) and line comments.
+2. Expands `.macro` / `.endm` definitions and invocations.
+3. Expands `.rept` / `.irp` / `.endr` repetition blocks.
+
+These passes are shared across all assembler backends (RISC-V, ARM, x86).
+
+### Step 2: Parsing (`parser.rs`)
+
+The parser processes the preprocessed source line by line. For each line it:
+
+1. Detects a leading label (any identifier followed by `:`). Numeric labels
    such as `1:` are recognized as re-definable local labels.
-3. Identifies the mnemonic -- either an instruction name (`add`, `ld`, `beq`)
+2. Identifies the mnemonic -- either an instruction name (`add`, `ld`, `beq`)
    or a directive (`.text`, `.globl`, `.quad`).
+3. Evaluates `.if` / `.else` / `.endif` conditional assembly blocks, skipping
+   lines inside false conditions.
 4. Parses the operand list, recognizing:
    - Integer and FP register names (x0-x31, a0-a7, s0-s11, t0-t6, f0-f31,
      fa0-fa7, fs0-fs11, ft0-ft11), including ABI aliases.
@@ -211,32 +241,36 @@ The parser processes the assembly source line by line. For each line it:
    - Memory references in the form `offset(base)`.
    - Relocation modifiers: `%pcrel_hi(sym)`, `%lo(sym)`, `%tprel_add(sym)`, etc.
    - Bare symbol references and label references (including numeric `1b`, `1f`).
+   - CSR names, fence arguments, and FP rounding modes.
 
-### Step 2: Directive Execution (`mod.rs`)
+### Step 3: Directive Execution (`elf_writer.rs`)
 
-The assembler core iterates over parsed lines and handles directives inline:
+The ELF writer iterates over parsed statements and handles directives inline:
 
 | Directive              | Effect                                           |
 |------------------------|--------------------------------------------------|
 | `.text` / `.data` / `.bss` / `.rodata` / `.section` | Switch or create a section |
 | `.globl` / `.global`  | Mark symbol as globally visible                   |
+| `.local`              | Mark symbol as local binding                       |
 | `.weak`               | Mark symbol as weak binding                        |
-| `.type`               | Set symbol type (function/object)                  |
+| `.hidden` / `.protected` / `.internal` | Set symbol visibility              |
+| `.type`               | Set symbol type (function/object/tls)              |
 | `.size`               | Set symbol size                                    |
-| `.byte` / `.half` / `.word` / `.quad` / `.8byte` | Emit literal data       |
-| `.zero` / `.space`    | Emit N zero bytes                                  |
+| `.byte` / `.short` / `.half` / `.word` / `.long` / `.quad` / `.8byte` | Emit literal data |
+| `.zero` / `.space`    | Emit N zero bytes (with optional fill value)       |
 | `.string` / `.asciz` / `.ascii` | Emit string data (with/without NUL)     |
 | `.align` / `.balign` / `.p2align` | Pad to alignment boundary              |
 | `.equ` / `.set`       | Define a symbol with a constant value              |
 | `.comm` / `.lcomm`    | Reserve common/local-common storage                |
-| `.pushsection` / `.popsection` / `.previous` | Push/pop section stack (save and restore active section) |
-| `.rept` / `.endr`           | Repeat enclosed lines N times (expanded during parsing) |
-| `.option push/pop/rvc/norvc` | Control RVC compression                    |
+| `.pushsection` / `.popsection` / `.previous` | Push/pop section stack     |
+| `.option push/pop/rvc/norvc/norelax` | Control RVC compression and relaxation |
+| `.insn`               | Emit a raw instruction encoding                    |
+| `.incbin`             | Include binary file contents                       |
 | `.attribute` / `.file` / `.ident` | Metadata / ignored                      |
 | `.cfi_*`              | Silently consumed (CFI info not emitted)           |
 | `.addrsig` / `.addrsig_sym` | Address-significance (silently consumed)    |
 
-### Step 3: Instruction Encoding (`encoder.rs`)
+### Step 4: Instruction Encoding (`encoder.rs`)
 
 For each instruction mnemonic, the encoder:
 
@@ -253,8 +287,10 @@ For each instruction mnemonic, the encoder:
    - **Atomics (A-extension)**: lr.w/d, sc.w/d, amo{swap,add,and,or,xor,min,max,minu,maxu}.w/d
    - **Floating-point (F/D)**: fadd/fsub/fmul/fdiv/fsqrt, fmin/fmax,
      fcvt (all int/float conversions), fmv.x.w/d, fmv.w.x/d.x,
-     fmadd/fmsub/fnmadd/fnmsub, feq/flt/fle, fclass, flw/fld/fsw/fsd.
-   - **System**: ecall, ebreak, fence, fence.i, csrr/csrw/csrs/csrc.
+     fmadd/fmsub/fnmadd/fnmsub, feq/flt/fle, fclass, flw/fld/fsw/fsd,
+     fsgnj/fsgnjn/fsgnjx.
+   - **System**: ecall, ebreak, fence, fence.i, csrr/csrw/csrs/csrc and
+     their immediate variants (csrwi, csrsi, csrci).
 
 2. Expands pseudo-instructions into their real instruction sequences:
 
@@ -302,13 +338,13 @@ U-type:  [          imm[31:12]           |  rd  | opcode]
 J-type:  [imm[20|10:1|11|19:12]         |  rd  | opcode]
 ```
 
-### Step 4: Section Data Accumulation (`mod.rs`)
+### Step 5: Section Data Accumulation (`elf_writer.rs`)
 
-As instructions are encoded, the assembler appends the resulting bytes to the
+As instructions are encoded, the ELF writer appends the resulting bytes to the
 current section's data buffer. For instructions with relocations:
 
 - **Intra-section branches** (same section, label already defined or to be
-  defined): recorded as `PendingBranchReloc` entries for later resolution.
+  defined): recorded as `PendingReloc` entries for later resolution.
 - **External symbol references**: recorded as `ObjReloc` entries in the
   section's relocation list, to be emitted as `.rela.*` sections.
 
@@ -316,14 +352,12 @@ For multi-word expansions (e.g., `call` emitting AUIPC+JALR), the assembler
 generates synthetic labels (`.Lpcrel_hiN`) so that `%pcrel_lo` relocations can
 reference the AUIPC's PC, as required by the RISC-V ABI.
 
-### Step 5: Local Branch Resolution (`mod.rs` -- `resolve_local_branches`)
+### Step 6: Local Branch Resolution (`elf_writer.rs` -- `resolve_local_branches`)
 
 Before ELF emission, the assembler resolves all pending intra-section branch
 relocations:
 
-1. For each `PendingBranchReloc`, it looks up the target label in the label
-   table (handling numeric label `Nb`/`Nf` references via
-   `resolve_numeric_label_ref`).
+1. For each `PendingReloc`, it looks up the target label in the label table.
 2. If the target is in the same section, it computes the PC-relative offset
    and patches the instruction word directly in the section data buffer,
    encoding the offset into the appropriate bit fields for the relocation type:
@@ -334,64 +368,6 @@ relocations:
    - **R_RISCV_PCREL_LO12_I/S**: patches load/store lower 12 bits
 3. If the target is in a different section or undefined, the relocation is
    promoted to an external ELF relocation for the linker to resolve.
-
-### Step 6: RV64C Compression (`compress.rs`)
-
-After all instructions are encoded as 32-bit words, a compression pass scans
-each `.text` section and replaces eligible instructions with their 16-bit RVC
-equivalents. This pass is optional (controlled by `.option rvc`/`.option norvc`
-directives; enabled by default).
-
-The compressor works in a single linear scan:
-
-1. Read each 32-bit instruction from the section data.
-2. Check if it matches any compression pattern (see table below).
-3. If compressible, emit 2 bytes instead of 4 and record the delta.
-4. Adjust all relocation offsets for instructions that shifted.
-
-The compression is done *after* local branch resolution but *before* ELF
-emission, so external relocations get their offsets adjusted correctly.
-
-#### Compression Patterns
-
-The following 32-bit instructions are compressed when their operands satisfy
-RVC constraints:
-
-| 32-bit Instruction     | RVC Equivalent | Constraints                                          |
-|------------------------|----------------|------------------------------------------------------|
-| `addi rd, x0, imm`    | `c.li rd, imm` | rd != x0, imm fits in 6-bit signed                   |
-| `addi rd, rd, imm`    | `c.addi rd, imm` | rd != x0, imm != 0, 6-bit signed                  |
-| `addi rd, sp, imm`    | `c.addi4spn rd, imm` | rd in x8-x15, imm > 0, imm multiple of 4, fits in 8 unsigned bits |
-| `addiw rd, rd, imm`   | `c.addiw rd, imm` | rd != x0, 6-bit signed                            |
-| `addi sp, sp, imm`    | `c.addi16sp imm` | imm != 0, multiple of 16, fits in range             |
-| `lui rd, imm`         | `c.lui rd, imm` | rd != x0, rd != x2, imm != 0, 6-bit range           |
-| `slli rd, rd, shamt`  | `c.slli rd, shamt` | rd != x0, shamt != 0, 6-bit                      |
-| `srli rd, rd, shamt`  | `c.srli rd, shamt` | rd in x8-x15, shamt != 0, 6-bit                  |
-| `srai rd, rd, shamt`  | `c.srai rd, shamt` | rd in x8-x15, shamt != 0, 6-bit                  |
-| `andi rd, rd, imm`    | `c.andi rd, imm` | rd in x8-x15, 6-bit signed                         |
-| `add rd, x0, rs2`     | `c.mv rd, rs2` | rd != x0, rs2 != x0                                  |
-| `add rd, rd, rs2`     | `c.add rd, rs2` | rd != x0, rs2 != x0                                 |
-| `and rd, rd, rs2`     | `c.and rd, rs2` | rd in x8-x15, rs2 in x8-x15                         |
-| `or rd, rd, rs2`      | `c.or rd, rs2` | rd in x8-x15, rs2 in x8-x15                          |
-| `xor rd, rd, rs2`     | `c.xor rd, rs2` | rd in x8-x15, rs2 in x8-x15                         |
-| `sub rd, rd, rs2`     | `c.sub rd, rs2` | rd in x8-x15, rs2 in x8-x15                         |
-| `addw rd, rd, rs2`    | `c.addw rd, rs2` | rd in x8-x15, rs2 in x8-x15                        |
-| `subw rd, rd, rs2`    | `c.subw rd, rs2` | rd in x8-x15, rs2 in x8-x15                        |
-| `ld rd, off(rs1)`     | `c.ld rd, off(rs1)` | rd, rs1 in x8-x15, off mult of 8, fits 5 bits   |
-| `lw rd, off(rs1)`     | `c.lw rd, off(rs1)` | rd, rs1 in x8-x15, off mult of 4, fits 5 bits   |
-| `sd rs2, off(rs1)`    | `c.sd rs2, off(rs1)` | rs2, rs1 in x8-x15, off mult of 8, fits 5 bits |
-| `sw rs2, off(rs1)`    | `c.sw rs2, off(rs1)` | rs2, rs1 in x8-x15, off mult of 4, fits 5 bits |
-| `ld rd, off(sp)`      | `c.ldsp rd, off` | rd != x0, off mult of 8, fits 6 bits                 |
-| `lw rd, off(sp)`      | `c.lwsp rd, off` | rd != x0, off mult of 4, fits 6 bits                 |
-| `sd rs2, off(sp)`     | `c.sdsp rs2, off` | off mult of 8, fits 6 bits                          |
-| `sw rs2, off(sp)`     | `c.swsp rs2, off` | off mult of 4, fits 6 bits                          |
-| `jal x0, off`         | `c.j off` | offset fits in 11-bit signed                              |
-| `jalr x1, 0(rs1)`     | `c.jalr rs1` | rs1 != x0                                             |
-| `jalr x0, 0(rs1)`     | `c.jr rs1` | rs1 != x0                                               |
-| `beq rs, x0, off`     | `c.beqz rs, off` | rs in x8-x15, offset fits in 8-bit signed           |
-| `bne rs, x0, off`     | `c.bnez rs, off` | rs in x8-x15, offset fits in 8-bit signed           |
-| `ebreak`              | `c.ebreak` | (always compressible)                                    |
-| `addi x0, x0, 0`      | `c.nop` | (canonical NOP)                                           |
 
 ### Step 7: ELF Object Emission (`elf_writer.rs`)
 
@@ -442,19 +418,20 @@ The writer performs several bookkeeping tasks:
   entry (offset, r_info = symbol_index << 32 | type, addend). A companion
   `R_RISCV_RELAX` relocation is emitted alongside `PCREL_HI20`, `CALL_PLT`,
   `TPREL_*`, and `GOT_HI20` relocations to allow the linker to perform
-  relaxation optimizations.
+  relaxation optimizations (unless suppressed by `.option norelax`).
 
-- **ELF flags**: `EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC` (0x05),
-  indicating the double-precision float ABI and the presence of compressed
-  instructions.
+- **ELF flags**: Default is `EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC` (0x05).
+  The float ABI can be overridden via the `-mabi=` flag passed to
+  `assemble_with_args()` (lp64/lp64f/lp64d/lp64q).
 
 ## Key Design Decisions and Trade-offs
 
 ### 1. Post-encoding compression vs. direct compressed emission
 
-The assembler first encodes all instructions as 32-bit words, then runs a
-separate compression pass. This two-phase approach is simpler than trying to
-emit compressed instructions inline during encoding, because:
+The assembler first encodes all instructions as 32-bit words. A separate
+compression pass (`compress.rs`) can then scan for eligible instructions and
+rewrite them as 16-bit RVC equivalents. This two-phase approach is simpler than
+trying to emit compressed instructions inline during encoding, because:
 
 - The compressor can examine each fully-formed 32-bit encoding and make a
   binary yes/no decision. The encoder does not need to be aware of RVC
@@ -464,9 +441,10 @@ emit compressed instructions inline during encoding, because:
 - The approach is trivially correct: removing the compression pass produces
   a valid (if larger) object file.
 
-The trade-off is a second scan over all `.text` section data and the need to
-rebuild the relocation offset map. In practice the overhead is negligible
-compared to parsing and encoding.
+**Current status:** The compression pass is disabled. The linker handles
+relaxation via `R_RISCV_RELAX` hints, and running assembler-side compression
+would change code layout in ways the linker's relaxation pass doesn't expect.
+The compressor code is retained for potential future use.
 
 ### 2. Eager local branch resolution
 
@@ -489,11 +467,9 @@ are referenced by a `.rela.*` entry.
 
 Numeric labels (`1:`, `2:`, etc.) can be redefined multiple times. Forward
 references (`1f`) resolve to the *next* definition; backward references (`1b`)
-resolve to the *most recent* definition. The assembler maintains a per-label
-list of `(section, offset)` definitions and performs linear search at resolution
-time. This is O(n) in the number of definitions of a particular numeric label,
-but numeric labels are rarely defined more than a handful of times, so this is
-not a practical concern.
+resolve to the *most recent* definition. During preprocessing, all numeric label
+references are rewritten to unique synthetic names (`.Lnum_N_I`) so that
+the rest of the pipeline can treat them as ordinary labels.
 
 ### 5. In-process execution
 
@@ -506,14 +482,14 @@ This means:
 - The compiler controls the exact assembly dialect and can rely on features
   without worrying about toolchain version skew.
 
-### 6. Directive subset
+### 6. Shared infrastructure
 
-The assembler implements the subset of GNU assembler directives that the
-compiler's code-generation backend actually emits, plus common directives found
-in CRT startup code. Rarely-used directives (`.macro`, `.irpc`, `.if/.endif`,
-conditional assembly) are not implemented. This keeps the assembler simple and
-focused. Directives that are not recognized are silently ignored to ensure
-compatibility with assembly code that includes GAS-specific annotations.
+The `ElfWriterBase` (in `elf.rs`) and `asm_preprocess` module are shared between
+the RISC-V and ARM assembler backends. This avoids duplicating section management,
+symbol table construction, ELF serialization, macro expansion, and repetition
+block handling. Each backend composes with the shared base and adds
+architecture-specific instruction encoding, branch resolution, and relocation
+logic.
 
 ### 7. No linker relaxation in the assembler
 
