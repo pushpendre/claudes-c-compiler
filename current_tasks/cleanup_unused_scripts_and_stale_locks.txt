@@ -1,0 +1,7 @@
+Cleanup: remove unused scripts and stale task lock files
+
+1. Remove scripts/compare_asm.py (no longer used)
+2. Remove scripts/setup_i686_cross.sh (no longer used)
+3. Remove scripts/ directory (empty after above)
+4. Remove 11 stale task lock files (completed tasks with forgotten cleanup)
+5. Update README.md to remove scripts/ directory reference
