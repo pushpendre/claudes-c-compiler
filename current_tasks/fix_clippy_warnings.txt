@@ -1,0 +1,10 @@
+Fix all clippy warnings across the codebase to achieve a clean compile.
+
+Warnings to fix:
+1. empty_line_after_doc_comments in asm_expr.rs
+2. redundant_field_names in x86/linker/mod.rs
+3. unnecessary_map_or in declarations.rs and assembler/parser.rs
+4. needless_return in declarators.rs
+5. clone_on_copy in expr_builtins_overflow.rs (8 instances)
+6. collapsible_if in push_pop.rs
+7. collapsible_else_if in x86/linker/mod.rs
