@@ -1,0 +1,11 @@
+Fix DESIGN_DOC.md: correct factual errors found during code review.
+
+Key issues to fix:
+- ~185 methods claim for ArchCodegen (actual ~155)
+- Optimization pipeline diagram missing div_by_const, second copy_prop, second cfg_simplify
+- iv_strength_reduce only runs on iteration 0 (not every iteration)
+- ARM linker listed as "Static" but actually supports dynamic linking
+- generate_assembly() function name is wrong (actual: generate_assembly_with_opts_and_debug)
+- 8-phase call sequence is actually 7 phases (0-6) + sub-phase 3.5
+- Source tree missing backend files: elf.rs, asm_preprocess.rs, asm_expr.rs, elf_writer_common.rs, linker_common.rs
+- "Relaxation markers" for RISC-V linker is vague; actual support is TLS GD→LE relaxation only
