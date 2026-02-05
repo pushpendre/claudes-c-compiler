@@ -1,0 +1,7 @@
+Fix libunistring compilation failure caused by preprocessor injecting
+typedef __builtin_va_list va_list / __gnuc_va_list text at include
+boundaries. The pending_injections get emitted in the middle of array
+initializers when stdarg.h is included from a nested header.
+
+Fix: remove the text injection of va_list/gnuc_va_list typedefs since
+the parser and IR lowerer already handle these types natively.
