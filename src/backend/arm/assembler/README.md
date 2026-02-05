@@ -41,8 +41,8 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        |         |  encode_instruction()
        v         |
   +------------------+
-  |   encoder.rs      |   Instruction Encoding Library
-  |   (~6,050 lines)  |   Mnemonic + Operands -> u32 words
+  |   encoder/        |   Instruction Encoding Library
+  |   (~6,190 lines)  |   Mnemonic + Operands -> u32 words
   +------------------+
        |
        v
@@ -176,7 +176,7 @@ parse_asm(text)
 
 ---
 
-## Stage 2: Instruction Encoder (`encoder.rs`)
+## Stage 2: Instruction Encoder (`encoder/`)
 
 ### Purpose
 
@@ -486,6 +486,21 @@ relaxation passes (unlike x86).  The only multi-word output is the
 |------|-------|---------|
 | `mod.rs` | ~220 | Public API: `assemble()` entry point, GNU numeric label resolution (`1f`/`1b`) |
 | `parser.rs` | ~2,340 | Preprocessor (macros, .rept, .irp, conditionals, aliases) and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | ~6,050 | Instruction encoder: ~400 base mnemonics + operands -> `u32` machine code |
+| `encoder/` | ~6,190 | Instruction encoder (split into focused submodules, see below) |
 | `elf_writer.rs` | ~570 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
-| **Total** | **~9,200** | |
+| **Total** | **~9,320** | |
+
+### Encoder Submodules (`encoder/`)
+
+The instruction encoder is organized as a directory of focused submodules:
+
+| File | Lines | Role |
+|------|-------|------|
+| `mod.rs` | ~973 | `EncodeResult`/`RelocType`/`Relocation` types, register parsing helpers (`parse_reg_num`, `encode_cond`, `get_reg`, `get_imm`, `sf_bit`), `encode_instruction()` dispatch |
+| `data_processing.rs` | ~1,067 | Data processing: MOV/MOVZ/MOVK/MOVN, ADD/SUB, logical (AND/ORR/EOR), multiply/divide, carry ops, shifts, extensions, ORN/EON/BICS/BIC |
+| `compare_branch.rs` | ~322 | Compare (CMP/CMN/TST), conditional select (CSEL/CSINC/CSINV/CSNEG), branches (B/BL/BR/BLR/RET/CBZ/CBNZ/TBZ/TBNZ), conditional aliases |
+| `load_store.rs` | ~884 | Load/store: LDR/STR variants (byte/half/word/double), exclusive/acquire/release, ADRP/ADR, prefetch, LSE atomic operations |
+| `fp_scalar.rs` | ~271 | Scalar floating-point: FADD/FSUB/FMUL/FDIV/FSQRT, FCMP, FMA, rounding, conversions (FCVT/SCVTF/UCVTF) |
+| `neon.rs` | ~1,854 | NEON/SIMD: three-same, two-misc, float vector, compare-zero, shifts, narrow/widen, by-element, reduce, permute, insert/move, load/store (LD1-LD4/ST1-ST4), crypto (AES/SHA) |
+| `system.rs` | ~577 | System instructions: NOP, WFE, WFI, SEV, BTI, DMB, DSB, ISB, DC, IC, TLBI, MRS, MSR, SVC, BRK, CLREX, HINT |
+| `bitfield.rs` | ~246 | Bit manipulation: UBFM/SBFM/UBFX/SBFX/UBFIZ/SBFIZ/BFM/BFI, CLZ/CLS, RBIT/REV/REV16/REV32, CRC32 |

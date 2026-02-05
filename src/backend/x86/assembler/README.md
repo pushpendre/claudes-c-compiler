@@ -66,7 +66,7 @@ Defined in `mod.rs`.  Called when the built-in assembler is selected
                         |                   |
                         v                   v
           +--------------------+   +------------------------+
-          |    encoder.rs      |   | ElfWriterCore (cont.)  |
+          |    encoder/        |   | ElfWriterCore (cont.)  |
           | - Suffix inference |   |  (Second Pass)         |
           | - REX/VEX/EVEX    |   |  1. relax_jumps()      |
           | - ModR/M + SIB    |   |  2. resolve_deferred   |
@@ -93,7 +93,7 @@ Defined in `mod.rs`.  Called when the built-in assembler is selected
 | Pass | Module | Purpose |
 |------|--------|---------|
 | 1a   | `parser.rs` | Tokenize and parse all lines into `Vec<AsmItem>` (including `.rept` expansion and GAS macro processing) |
-| 1b   | `elf_writer_common.rs` + `encoder.rs` | Walk items sequentially: switch sections, record labels, encode instructions, emit data, collect relocations |
+| 1b   | `elf_writer_common.rs` + `encoder/` | Walk items sequentially: switch sections, record labels, encode instructions, emit data, collect relocations |
 | 2a   | `elf_writer_common.rs` | Relax long jumps to short form (iterative until convergence) |
 | 2b   | `elf_writer_common.rs` | Resolve deferred `.skip` expressions (insert bytes, shift labels/relocations) |
 | 2c   | `elf_writer_common.rs` | Resolve deferred byte-sized symbol diffs |
@@ -109,8 +109,23 @@ Defined in `mod.rs`.  Called when the built-in assembler is selected
 |------|-------|------|
 | `mod.rs` | ~30 | Public `assemble()` entry point; module wiring |
 | `parser.rs` | ~1900 | AT&T syntax parser with `.rept` expansion, GAS macro processing, expression evaluation; produces `Vec<AsmItem>` |
-| `encoder.rs` | ~6200 | x86-64 instruction encoder with 800+ match arms; REX, VEX, and EVEX prefix support; suffix inference for hand-written assembly |
+| `encoder/` | ~6260 | x86-64 instruction encoder (split into focused submodules, see below) |
 | `elf_writer.rs` | ~90 | Thin x86-64 adapter: implements `X86Arch` trait for `ElfWriterCore<X86_64Arch>`, wiring architecture constants and instruction encoding |
+
+### Encoder Submodules (`encoder/`)
+
+The instruction encoder is organized as a directory of focused submodules:
+
+| File | Lines | Role |
+|------|-------|------|
+| `mod.rs` | ~1544 | `InstructionEncoder` struct, `encode()` entry point, `encode_mnemonic()` dispatch match (~800 arms), `Relocation` type, ELF relocation constants |
+| `registers.rs` | ~296 | Register number mapping (`reg_num`), register classification (`is_reg64/32/16/8`), REX extension detection, suffix inference (`infer_suffix`), condition code parsing |
+| `core.rs` | ~269 | Low-level encoding primitives: REX prefix emission (`rex`, `emit_rex_*`), ModR/M + SIB byte construction, memory operand encoding (`encode_modrm_mem`), relocation helpers |
+| `gp_integer.rs` | ~1145 | General-purpose integer instructions: MOV variants, ALU ops (ADD/SUB/AND/OR/XOR/CMP/TEST), shifts, IMUL, PUSH/POP, LEA, XCHG, CMPXCHG, conditional moves/sets, JMP/CALL/RET |
+| `sse.rs` | ~653 | SSE/SSE2/SSE3/SSSE3/SSE4.1 instructions: scalar and packed float ops, integer SIMD, shuffles, conversions, non-temporal stores, AES-NI, CRC32 |
+| `avx.rs` | ~1456 | VEX/EVEX-encoded instructions: AVX, AVX2, initial AVX-512, BMI2; VEX prefix emission (`emit_vex`), EVEX prefix emission (`emit_evex`) |
+| `system.rs` | ~513 | System and privileged instructions: I/O port ops (IN/OUT), control register moves, system table loads (LGDT/LIDT), CLFLUSH, WBINVD, RDMSR/WRMSR, segment register moves |
+| `x87_misc.rs` | ~385 | x87 FPU instructions (FLD/FSTP/FADD/etc.), bit test operations (BT/BTS/BTR/BTC), segment register loads, miscellaneous suffixless encodings |
 
 The bulk of the ELF building logic (section management, jump relaxation,
 deferred evaluation, ELF serialization) lives in the shared
@@ -184,7 +199,7 @@ AsmItem
 - **`MemoryOperand`** -- Optional segment override (fs/gs), displacement,
   base register, index register, scale (1/2/4/8).
 
-### Encoder types -- encoder.rs
+### Encoder types -- encoder/
 
 - **`InstructionEncoder`** -- Stateful encoder that accumulates machine code
   bytes and relocations for one instruction at a time.
@@ -331,10 +346,12 @@ to unique names via a shared utility, then calls `process_item()` for each
 - **Ignored items** -- `Cfi`, `File`, `Loc`, `OptionDirective`, and `Empty`
   are silently skipped.
 
-### Step 3: Instruction Encoding (encoder.rs)
+### Step 3: Instruction Encoding (encoder/)
 
 The encoder translates one `Instruction` into machine code bytes.  Its main
-dispatch is a large `match` on the mnemonic string (800+ arms).
+dispatch is a large `match` on the mnemonic string (800+ arms) in
+`encoder/mod.rs`, with encoding logic organized into focused submodules
+by instruction category.
 
 **Suffix inference** -- The `infer_suffix()` function infers AT&T size
 suffixes from register operands for unsuffixed mnemonics.  This enables

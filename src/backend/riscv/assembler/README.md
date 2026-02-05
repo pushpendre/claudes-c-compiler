@@ -55,7 +55,7 @@ and conditional assembly.
                                   |
                                   v
                      +----------------------------+
-                     |   Encoder (encoder.rs)      |
+                     |   Encoder (encoder/)        |
                      |  - Map mnemonic to ISA      |
                      |  - Encode R/I/S/B/U/J       |
                      |  - Expand pseudos            |
@@ -89,9 +89,24 @@ compression would conflict with the linker's relaxation pass.
 |-----------------|--------|---------------------------------------------------------|
 | `mod.rs`        | ~100   | Public `assemble_with_args()` entry point; orchestrates parser → ELF writer pipeline, handles `-mabi=` flag for float ABI selection and `-march=` for RV32/RV64 and RVC detection |
 | `parser.rs`     | ~1025  | Line tokenizer and operand parser; splits assembly text into `AsmStatement` records, evaluates `.if/.else/.endif` conditionals |
-| `encoder.rs`    | ~2630  | Instruction encoder; maps every mnemonic to its binary encoding (including RVV vector + Zvk* crypto), handles pseudo-instruction expansion, relocation emission |
+| `encoder/`      | ~2670  | Instruction encoder (split into focused submodules, see below) |
 | `compress.rs`   | ~850   | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents (currently disabled) |
 | `elf_writer.rs` | ~1210  | ELF object file builder; composes with `ElfWriterBase` (from shared `elf.rs`) for section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, numeric label handling, and ELF serialization |
+
+### Encoder Submodules (`encoder/`)
+
+The instruction encoder is organized as a directory of focused submodules:
+
+| File | Lines | Role |
+|------|-------|------|
+| `mod.rs` | ~926 | `EncodeResult`/`RelocType`/`Relocation` types, register encoding (`encode_reg`), format encoders (`encode_r/i/s/b/u/j`), opcode constants, `encode_instruction()` dispatch |
+| `base.rs` | ~320 | RV64I base integer instructions (R/I/S/B/U/J-type) plus Zbb bit-manipulation extension |
+| `atomics.rs` | ~106 | A-extension: LR/SC (load-reserved/store-conditional), AMO (atomic memory operations) |
+| `system.rs` | ~115 | System instructions: ECALL, EBREAK, FENCE, FENCE.I, CSR read/write/set/clear |
+| `float.rs` | ~191 | F/D floating-point extensions: arithmetic, comparisons, conversions, FMA, sign injection, classify, load/store |
+| `pseudo.rs` | ~608 | Pseudo-instruction expansion: LI (large immediates), LA/LLA, CALL/TAIL, branch aliases, CSR shorthands, FP move/abs/neg, relocation modifier parsing |
+| `compressed.rs` | ~196 | RVC compressed 16-bit instructions and `.insn` raw instruction directive |
+| `vector.rs` | ~210 | RVV vector extension and Zvksh/Zvksed vector crypto instructions |
 
 ## Key Data Structures
 
@@ -274,7 +289,7 @@ The ELF writer iterates over parsed statements and handles directives inline:
 | `.cfi_*`              | Silently consumed (CFI info not emitted)           |
 | `.addrsig` / `.addrsig_sym` | Address-significance (silently consumed)    |
 
-### Step 4: Instruction Encoding (`encoder.rs`)
+### Step 4: Instruction Encoding (`encoder/`)
 
 For each instruction mnemonic, the encoder:
 

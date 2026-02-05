@@ -21,7 +21,7 @@ The assembler is structured as a three-stage pipeline:
         v
   +------------------+
   |   Encoder         |  i686-specific: no REX, 32-bit default operand size
-  |   encoder.rs      |  Produces machine-code bytes + Relocation entries
+  |   encoder/        |  Produces machine-code bytes + Relocation entries
   +------------------+
         |
         v
@@ -86,7 +86,7 @@ Everything else is i686-specific:
 | `SizeExpr`          | Constant, `.-sym`, or `end-start` for `.size` directive |
 | `SymbolKind`        | Function, Object, TlsObject, NoType                    |
 
-### Encoder types (`encoder.rs`)
+### Encoder types (`encoder/`)
 
 | Type                   | Role                                                       |
 |------------------------|------------------------------------------------------------|
@@ -419,8 +419,22 @@ format).
 | File                        | Lines  | Role                                            |
 |-----------------------------|--------|-------------------------------------------------|
 | `mod.rs`                    | ~30    | Module root; `assemble()` entry point           |
-| `encoder.rs`                | ~3420  | i686 instruction encoder; ModR/M/SIB; relocs    |
+| `encoder/`                  | ~3520  | i686 instruction encoder (split into focused submodules, see below) |
 | `elf_writer.rs`             | ~95    | `I686Arch` adapter for `ElfWriterCore`           |
 | *(shared with x86-64)*      |        |                                                 |
 | `x86/assembler/parser.rs`   | ~1875  | AT&T syntax parser; data types; directives       |
 | `elf_writer_common.rs`      | ~1605  | Section/symbol/jump relax/ELF32 serialization    |
+
+### Encoder Submodules (`encoder/`)
+
+The instruction encoder is organized as a directory of focused submodules:
+
+| File | Lines | Role |
+|------|-------|------|
+| `mod.rs` | ~770 | `InstructionEncoder` struct, `encode()` entry point, `encode_mnemonic()` dispatch match, `Relocation` type, relocation constants, `split_label_offset()` helper |
+| `registers.rs` | ~138 | Register number mapping (`reg_num`), segment register mapping (`seg_reg_num`), XMM detection, suffix inference, x87 ST parsing, condition code parsing |
+| `core.rs` | ~180 | Low-level encoding primitives: ModR/M + SIB byte construction, segment prefix emission, memory operand encoding (`encode_modrm_mem`), relocation helpers |
+| `gp_integer.rs` | ~1390 | General-purpose integer instructions: MOV, ALU ops, shifts, IMUL, PUSH/POP, LEA, XCHG, CMPXCHG, conditional moves/sets, JMP/CALL/RET, string ops |
+| `sse.rs` | ~385 | SSE/SSE2/SSE3/SSSE3/SSE4.1 and MMX instructions: scalar/packed float, integer SIMD, shuffles, conversions, AES-NI |
+| `x87.rs` | ~279 | x87 FPU instructions: FLD/FSTP, arithmetic (FADD/FSUB/FMUL/FDIV), transcendentals, control word, FCOMIP |
+| `system.rs` | ~379 | System and privileged instructions: INT, CPUID, RDTSC, SYSENTER, HLT, MFENCE, RDMSR/WRMSR, BSWAP, I/O, segment/control register moves |
