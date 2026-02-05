@@ -83,8 +83,13 @@ pub(super) fn parse_elf32(data: &[u8], filename: &str) -> Result<InputObject, St
             let st_info = data[off + 12];
             let st_other = data[off + 13];
             let st_shndx = read_u16(data, off + 14);
+            let mut sym_name = read_cstr(strtab_data, st_name as usize);
+            // Defense-in-depth: strip @PLT suffix from symbol names.
+            if sym_name.ends_with("@PLT") {
+                sym_name.truncate(sym_name.len() - 4);
+            }
             symbols.push(InputSymbol {
-                name: read_cstr(strtab_data, st_name as usize),
+                name: sym_name,
                 value: st_value,
                 size: st_size,
                 binding: st_info >> 4,

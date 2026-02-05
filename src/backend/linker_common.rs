@@ -246,9 +246,17 @@ pub fn parse_elf64_object(data: &[u8], source_name: &str, expected_machine: u16)
                     break;
                 }
                 let name_idx = read_u32(sym_data, off);
+                let mut name = read_cstr(strtab_data, name_idx as usize);
+                // Strip @PLT suffix from symbol names. Some assemblers (including
+                // our own in older versions) embed the @PLT modifier in the symbol
+                // name instead of using R_X86_64_PLT32 relocation type. The linker
+                // should resolve these against the base symbol name.
+                if let Some(base) = name.strip_suffix("@PLT") {
+                    name = base.to_string();
+                }
                 symbols.push(Elf64Symbol {
                     name_idx,
-                    name: read_cstr(strtab_data, name_idx as usize),
+                    name,
                     info: sym_data[off + 4],
                     other: sym_data[off + 5],
                     shndx: read_u16(sym_data, off + 6),

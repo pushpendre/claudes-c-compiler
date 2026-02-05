@@ -833,7 +833,11 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
 
     // Split lines on ';' (GAS statement separator) before macro expansion,
     // so macro invocations after ';' on the same line get expanded correctly.
+    // Strip // and @ line comments BEFORE splitting on semicolons, so that
+    // semicolons inside comments (e.g. "// struct {int a;} *p;") don't cause
+    // spurious splits.
     let presplit: Vec<String> = text.lines().flat_map(|line| {
+        let line = strip_comment(line);
         split_on_semicolons(line).into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
     }).collect();
     let presplit_refs: Vec<&str> = presplit.iter().map(|s| s.as_str()).collect();
