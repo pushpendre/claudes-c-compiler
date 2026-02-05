@@ -25,12 +25,12 @@ pub fn load_file(
 
     // Regular archive
     if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-        return linker_common::load_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra);
+        return linker_common::load_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra, false);
     }
 
     // Thin archive
     if is_thin_archive(&data) {
-        return linker_common::load_thin_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra);
+        return linker_common::load_thin_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra, false);
     }
 
     // Not ELF? Try linker script (handles both GROUP and INPUT directives)

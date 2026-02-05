@@ -275,3 +275,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | criterion | PASS | TODO | TODO | TODO | Fixed: (1) x86 linker missing ld-linux-x86-64.so.2 in default lib search (for _r_debug), (2) shared lib linker exported LOCAL TLS symbols to .dynsym as GLOBAL UNDEFINED (GOT loop missing is_local filter), (3) assembler .fill directive silently ignored (emitted 0 bytes, broke boxfort trampoline addr slot) |
 | radare2_portions | PASS | TODO | TODO | TODO | Passes x86 out of the box |
 | libvorbis_libogg | PASS | TODO | TODO | TODO | Passes x86 out of the box |
+| squashfuse | PASS | TODO | TODO | TODO | Fixed: implemented --whole-archive / --no-whole-archive in x86 shared library linker; archive members now unconditionally included when flag is active (libtool creates .so from .a convenience archives) |

@@ -13,6 +13,7 @@ use super::types::{GlobalSymbol, x86_should_replace_extra};
 pub(super) fn load_file(
     path: &str, objects: &mut Vec<ElfObject>, globals: &mut HashMap<String, GlobalSymbol>,
     needed_sonames: &mut Vec<String>, lib_paths: &[String],
+    whole_archive: bool,
 ) -> Result<(), String> {
     if std::env::var("LINKER_DEBUG").is_ok() {
         eprintln!("load_file: {}", path);
@@ -22,12 +23,12 @@ pub(super) fn load_file(
 
     // Regular archive
     if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-        return linker_common::load_archive_elf64(&data, path, objects, globals, EM_X86_64, x86_should_replace_extra);
+        return linker_common::load_archive_elf64(&data, path, objects, globals, EM_X86_64, x86_should_replace_extra, whole_archive);
     }
 
     // Thin archive
     if is_thin_archive(&data) {
-        return linker_common::load_thin_archive_elf64(&data, path, objects, globals, EM_X86_64, x86_should_replace_extra);
+        return linker_common::load_thin_archive_elf64(&data, path, objects, globals, EM_X86_64, x86_should_replace_extra, whole_archive);
     }
 
     // Not ELF? Try linker script (handles GROUP and INPUT directives)
@@ -39,17 +40,17 @@ pub(super) fn load_file(
                     match entry {
                         LinkerScriptEntry::Path(lib_path) => {
                             if Path::new(lib_path).exists() {
-                                load_file(lib_path, objects, globals, needed_sonames, lib_paths)?;
+                                load_file(lib_path, objects, globals, needed_sonames, lib_paths, whole_archive)?;
                             } else if let Some(ref dir) = script_dir {
                                 let resolved = format!("{}/{}", dir, lib_path);
                                 if Path::new(&resolved).exists() {
-                                    load_file(&resolved, objects, globals, needed_sonames, lib_paths)?;
+                                    load_file(&resolved, objects, globals, needed_sonames, lib_paths, whole_archive)?;
                                 }
                             }
                         }
                         LinkerScriptEntry::Lib(lib_name) => {
                             if let Some(resolved_path) = linker_common::resolve_lib(lib_name, lib_paths, false) {
-                                load_file(&resolved_path, objects, globals, needed_sonames, lib_paths)?;
+                                load_file(&resolved_path, objects, globals, needed_sonames, lib_paths, whole_archive)?;
                             }
                         }
                     }

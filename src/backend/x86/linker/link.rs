@@ -33,13 +33,13 @@ pub fn link_builtin(
     // Load CRT objects before user objects
     for path in crt_objects_before {
         if Path::new(path).exists() {
-            load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+            load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings, false)?;
         }
     }
 
     // Load user object files
     for path in object_files {
-        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings, false)?;
     }
 
     // Parse user args using shared infrastructure
@@ -56,7 +56,7 @@ pub fn link_builtin(
     // Load extra object/archive files from user args (these come from
     // linker_ordered_items when the driver passes pre-existing .o/.a files)
     for path in &extra_object_files {
-        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings, false)?;
     }
 
     let mut all_lib_paths: Vec<String> = extra_lib_paths;
@@ -65,7 +65,7 @@ pub fn link_builtin(
     // Load CRT objects after
     for path in crt_objects_after {
         if Path::new(path).exists() {
-            load_file(path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+            load_file(path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, false)?;
         }
     }
 
@@ -91,7 +91,7 @@ pub fn link_builtin(
             changed = false;
             let prev_count = objects.len();
             for lib_path in &lib_paths_resolved {
-                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, false)?;
             }
             if objects.len() != prev_count {
                 changed = true;
@@ -194,15 +194,21 @@ pub fn link_shared(
     let mut needed_sonames: Vec<String> = Vec::new();
     let lib_path_strings: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
 
-    // Parse user args for -L, -l, -Wl,-soname=, bare .o/.a files
+    // Parse user args for -L, -l, -Wl,-soname=, bare .o/.a files.
+    // --whole-archive / --no-whole-archive are positional flags that affect
+    // archives appearing after them, so we collect ordered items with their state.
     let mut extra_lib_paths: Vec<String> = Vec::new();
-    let mut libs_to_load: Vec<String> = Vec::new();
-    let mut extra_object_files: Vec<String> = Vec::new();
     let mut soname: Option<String> = None;
     let mut rpath_entries: Vec<String> = Vec::new();
     let mut use_runpath = false; // --enable-new-dtags -> DT_RUNPATH instead of DT_RPATH
     let mut pending_rpath = false; // for -Wl,-rpath -Wl,/path two-arg form
     let mut pending_soname = false; // for -Wl,-soname -Wl,name two-arg form
+    let mut whole_archive = false;
+
+    // Ordered list of items to load: (path_or_lib, is_lib, whole_archive_state)
+    // is_lib=true means resolve via -l; is_lib=false means bare file path
+    let mut ordered_items: Vec<(String, bool, bool)> = Vec::new();
+
     let mut i = 0;
     let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
     while i < args.len() {
@@ -212,7 +218,7 @@ pub fn link_shared(
             extra_lib_paths.push(p.to_string());
         } else if let Some(lib) = arg.strip_prefix("-l") {
             let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
-            libs_to_load.push(l.to_string());
+            ordered_items.push((l.to_string(), true, whole_archive));
         } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
             let parts: Vec<&str> = wl_arg.split(',').collect();
             // Handle -Wl,-rpath -Wl,/path and -Wl,-soname -Wl,name two-arg forms
@@ -251,47 +257,65 @@ pub fn link_shared(
                 } else if let Some(lpath) = part.strip_prefix("-L") {
                     extra_lib_paths.push(lpath.to_string());
                 } else if let Some(lib) = part.strip_prefix("-l") {
-                    libs_to_load.push(lib.to_string());
+                    ordered_items.push((lib.to_string(), true, whole_archive));
+                } else if part == "--whole-archive" {
+                    whole_archive = true;
+                } else if part == "--no-whole-archive" {
+                    whole_archive = false;
                 }
                 j += 1;
             }
         } else if arg == "-shared" || arg == "-nostdlib" || arg == "-o" {
             if arg == "-o" { i += 1; } // skip output path
         } else if !arg.starts_with('-') && Path::new(arg).exists() {
-            extra_object_files.push(arg.to_string());
+            ordered_items.push((arg.to_string(), false, whole_archive));
         }
         i += 1;
     }
 
-    // Load user object files
+    // Load user object files (from the compiler driver, before user_args)
     for path in object_files {
-        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
-    }
-
-    // Load extra object/archive files from user args
-    for path in &extra_object_files {
-        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings, false)?;
     }
 
     let mut all_lib_paths: Vec<String> = extra_lib_paths;
     all_lib_paths.extend(lib_path_strings.iter().cloned());
 
+    // Load ordered items (bare files and -l libraries) preserving --whole-archive state
+    let mut libs_to_load_later: Vec<(String, bool)> = Vec::new();
+    for (item, is_lib, wa) in &ordered_items {
+        if *is_lib {
+            libs_to_load_later.push((item.clone(), *wa));
+        } else {
+            load_file(item, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, *wa)?;
+        }
+    }
+
     // Resolve -l libraries
-    if !libs_to_load.is_empty() {
-        let mut lib_paths_resolved: Vec<String> = Vec::new();
-        for lib_name in &libs_to_load {
+    if !libs_to_load_later.is_empty() {
+        let mut lib_paths_resolved: Vec<(String, bool)> = Vec::new();
+        for (lib_name, wa) in &libs_to_load_later {
             if let Some(lib_path) = linker_common::resolve_lib(lib_name, &all_lib_paths, false) {
-                if !lib_paths_resolved.contains(&lib_path) {
-                    lib_paths_resolved.push(lib_path);
+                if !lib_paths_resolved.iter().any(|(p, _)| p == &lib_path) {
+                    lib_paths_resolved.push((lib_path, *wa));
                 }
             }
         }
+        // Track which whole-archive libraries have been fully loaded to avoid
+        // re-adding all members on subsequent iterations of the group loop.
+        let mut whole_archive_loaded: HashSet<String> = HashSet::new();
         let mut changed = true;
         while changed {
             changed = false;
             let prev_count = objects.len();
-            for lib_path in &lib_paths_resolved {
-                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+            for (lib_path, wa) in &lib_paths_resolved {
+                if *wa && whole_archive_loaded.contains(lib_path) {
+                    continue; // Already loaded all members
+                }
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, *wa)?;
+                if *wa {
+                    whole_archive_loaded.insert(lib_path.clone());
+                }
             }
             if objects.len() != prev_count { changed = true; }
         }
@@ -313,7 +337,7 @@ pub fn link_shared(
             changed = false;
             let prev_count = objects.len();
             for lib_path in &implicit_paths {
-                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths, false)?;
             }
             if objects.len() != prev_count { changed = true; }
         }

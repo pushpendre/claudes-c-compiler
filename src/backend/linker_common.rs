@@ -1412,10 +1412,15 @@ fn resolve_archive_members<G: GlobalSymbolOps>(
 
 /// Load a regular archive (.a), parsing members and pulling in those that
 /// resolve undefined symbols.
+///
+/// When `whole_archive` is true, all members are unconditionally included
+/// (equivalent to GNU ld's `--whole-archive` flag). This is essential for
+/// shared library creation from convenience archives (e.g., libtool).
 pub fn load_archive_elf64<G: GlobalSymbolOps>(
     data: &[u8], archive_path: &str,
     objects: &mut Vec<Elf64Object>, globals: &mut HashMap<String, G>,
     expected_machine: u16, should_replace_extra: fn(&G) -> bool,
+    whole_archive: bool,
 ) -> Result<(), String> {
     let members = parse_archive_members(data)?;
     let mut member_objects: Vec<Elf64Object> = Vec::new();
@@ -1431,16 +1436,28 @@ pub fn load_archive_elf64<G: GlobalSymbolOps>(
             member_objects.push(obj);
         }
     }
-    resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    if whole_archive {
+        // --whole-archive: include ALL members unconditionally
+        for obj in member_objects.drain(..) {
+            let obj_idx = objects.len();
+            register_symbols_elf64(obj_idx, &obj, globals, should_replace_extra);
+            objects.push(obj);
+        }
+    } else {
+        resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    }
     Ok(())
 }
 
 /// Load a GNU thin archive. Members are external files referenced by name
 /// relative to the archive's directory.
+///
+/// When `whole_archive` is true, all members are unconditionally included.
 pub fn load_thin_archive_elf64<G: GlobalSymbolOps>(
     data: &[u8], archive_path: &str,
     objects: &mut Vec<Elf64Object>, globals: &mut HashMap<String, G>,
     expected_machine: u16, should_replace_extra: fn(&G) -> bool,
+    whole_archive: bool,
 ) -> Result<(), String> {
     let member_names = parse_thin_archive_members(data)?;
     let archive_dir = Path::new(archive_path)
@@ -1460,7 +1477,15 @@ pub fn load_thin_archive_elf64<G: GlobalSymbolOps>(
             member_objects.push(obj);
         }
     }
-    resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    if whole_archive {
+        for obj in member_objects.drain(..) {
+            let obj_idx = objects.len();
+            register_symbols_elf64(obj_idx, &obj, globals, should_replace_extra);
+            objects.push(obj);
+        }
+    } else {
+        resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    }
     Ok(())
 }
 
@@ -1492,12 +1517,12 @@ pub fn load_file_elf64<G: GlobalSymbolOps>(
 
     // Regular archive
     if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-        return load_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra);
+        return load_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra, false);
     }
 
     // Thin archive
     if is_thin_archive(&data) {
-        return load_thin_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra);
+        return load_thin_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra, false);
     }
 
     // Not ELF? Try linker script (handles GROUP and INPUT directives)
@@ -1750,6 +1775,9 @@ pub fn parse_linker_args(user_args: &[String]) -> LinkerArgs {
                 } else if part == "-static" {
                     result.is_static = true;
                 }
+                // TODO: --whole-archive / --no-whole-archive are positional flags
+                // that need per-file tracking; currently handled in link_shared's
+                // custom parser (x86). Add here when link_builtin needs it.
                 j += 1;
             }
         } else if !arg.starts_with('-') && Path::new(arg).exists() {
