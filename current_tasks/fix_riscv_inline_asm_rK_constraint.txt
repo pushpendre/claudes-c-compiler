@@ -1,0 +1,19 @@
+Fix RISC-V inline assembly "rK" constraint handling for CSR instructions.
+
+Bug: When inline asm uses the "rK" constraint (register or CSR immediate),
+CCC incorrectly interprets the constant value as a register number instead of
+allocating a register and loading the value, or using the immediate form.
+
+Example: `asm("csrc sstatus, %0" : : "rK" (2) : "memory")`
+- GCC correctly generates: csrci sstatus, 2  (immediate form)
+- CCC incorrectly generates: csrc sstatus, sp  (treating 2 as register x2)
+
+This causes the Linux kernel's local_irq_disable() to corrupt sstatus by
+clearing ALL bits matching the sp register value, instead of just clearing
+the SIE bit (bit 1). This leads to deadlocks in the scheduler because
+interrupts are never properly disabled before acquiring spinlocks.
+
+Root cause is in the inline asm operand handling in the RISC-V backend,
+likely in stack_layout or codegen where operand constraints are processed.
+
+Started: 2026-02-05
