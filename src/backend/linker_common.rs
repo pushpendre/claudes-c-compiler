@@ -20,7 +20,7 @@
 //! - ELF header emission (different e_machine, base addresses)
 //! - Dynamic linking specifics (version tables, etc.)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::backend::elf::{
@@ -900,6 +900,19 @@ pub fn merge_sections_elf64(
     objects: &[Elf64Object], output_sections: &mut Vec<OutputSection>,
     section_map: &mut HashMap<(usize, usize), (usize, u64)>,
 ) {
+    let no_dead = HashSet::new();
+    merge_sections_elf64_gc(objects, output_sections, section_map, &no_dead);
+}
+
+/// Merge input sections into output sections, optionally skipping dead sections.
+///
+/// When `dead_sections` is non-empty (from --gc-sections), sections in the set
+/// are excluded from the output, effectively garbage-collecting unreferenced code.
+pub fn merge_sections_elf64_gc(
+    objects: &[Elf64Object], output_sections: &mut Vec<OutputSection>,
+    section_map: &mut HashMap<(usize, usize), (usize, u64)>,
+    dead_sections: &HashSet<(usize, usize)>,
+) {
     let mut output_map: HashMap<String, usize> = HashMap::new();
 
     for obj_idx in 0..objects.len() {
@@ -908,6 +921,7 @@ pub fn merge_sections_elf64(
             if sec.flags & SHF_ALLOC == 0 { continue; }
             if matches!(sec.sh_type, SHT_NULL | SHT_STRTAB | SHT_SYMTAB | SHT_RELA | SHT_REL | SHT_GROUP) { continue; }
             if sec.flags & SHF_EXCLUDE != 0 { continue; }
+            if !dead_sections.is_empty() && dead_sections.contains(&(obj_idx, sec_idx)) { continue; }
 
             let output_name = map_section_name(&sec.name).to_string();
             let alignment = sec.addralign.max(1);

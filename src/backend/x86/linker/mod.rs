@@ -7,7 +7,7 @@
 #[allow(dead_code)]
 pub mod elf;
 
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet, VecDeque};
 use std::path::Path;
 
 use elf::*;
@@ -125,6 +125,7 @@ pub fn link_builtin(
     let mut rpath_entries: Vec<String> = Vec::new();
     let mut use_runpath = false;
     let mut defsym_defs: Vec<(String, String)> = Vec::new();
+    let mut gc_sections = false;
     let mut i = 0;
     let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
     while i < args.len() {
@@ -170,6 +171,10 @@ pub fn link_builtin(
                     if let Some(eq_pos) = defsym_arg.find('=') {
                         defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                     }
+                } else if part == "--gc-sections" {
+                    gc_sections = true;
+                } else if part == "--no-gc-sections" {
+                    gc_sections = false;
                 }
                 j += 1;
             }
@@ -236,6 +241,42 @@ pub fn link_builtin(
         }
     }
 
+    // Garbage-collect unreferenced sections when --gc-sections is active.
+    // This removes sections not reachable from entry points, which may also
+    // eliminate undefined symbol references from dead code.
+    let dead_sections: HashSet<(usize, usize)> = if gc_sections {
+        gc_collect_sections(&objects)
+    } else {
+        HashSet::new()
+    };
+
+    // When gc-sections is active, remove globals that only exist in dead sections
+    // and also remove references from dead sections
+    if gc_sections {
+        // Build set of symbols referenced only from dead sections
+        let mut referenced_from_live: HashSet<String> = HashSet::new();
+        for (obj_idx, obj) in objects.iter().enumerate() {
+            for (sec_idx, relas) in obj.relocations.iter().enumerate() {
+                if dead_sections.contains(&(obj_idx, sec_idx)) { continue; }
+                for rela in relas {
+                    if (rela.sym_idx as usize) < obj.symbols.len() {
+                        let sym = &obj.symbols[rela.sym_idx as usize];
+                        if !sym.name.is_empty() {
+                            referenced_from_live.insert(sym.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // Remove undefined globals that are only referenced from dead sections
+        globals.retain(|name, sym| {
+            // Keep defined symbols, dynamic symbols, weak symbols, and those referenced from live code
+            sym.defined_in.is_some() || sym.is_dynamic
+                || (sym.info >> 4) == STB_WEAK
+                || referenced_from_live.contains(name)
+        });
+    }
+
     // Check for truly undefined (non-weak, non-dynamic, non-linker-defined) symbols
     {
         let linker_defined = [
@@ -264,10 +305,10 @@ pub fn link_builtin(
         }
     }
 
-    // Merge sections
+    // Merge sections (skip dead sections when gc-sections is active)
     let mut output_sections: Vec<OutputSection> = Vec::new();
     let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
-    linker_common::merge_sections_elf64(&objects, &mut output_sections, &mut section_map);
+    linker_common::merge_sections_elf64_gc(&objects, &mut output_sections, &mut section_map, &dead_sections);
 
     // Allocate COMMON symbols
     linker_common::allocate_common_symbols_elf64(&mut globals, &mut output_sections);
@@ -414,7 +455,7 @@ pub fn link_shared(
     // resolved at static link time which works for simple libraries but won't
     // support cross-library function calls at runtime.
 
-    // Merge sections
+    // Merge sections (no gc-sections for shared libraries)
     let mut output_sections: Vec<OutputSection> = Vec::new();
     let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
     linker_common::merge_sections_elf64(&objects, &mut output_sections, &mut section_map);
@@ -1583,6 +1624,107 @@ fn resolve_dynamic_symbols(
         if lib_needed && !needed_sonames.contains(&soname) { needed_sonames.push(soname); }
     }
     Ok(())
+}
+
+/// Perform --gc-sections: compute the set of dead (unreachable) sections.
+///
+/// Starting from entry-point sections (_start, main) and any init/fini arrays,
+/// follow relocations transitively to find all reachable sections. Returns the
+/// set of (object_idx, section_idx) pairs that are NOT reachable and should be
+/// discarded.
+fn gc_collect_sections(
+    objects: &[ElfObject],
+) -> HashSet<(usize, usize)> {
+    // Build the set of all allocatable input sections
+    let mut all_sections: HashSet<(usize, usize)> = HashSet::new();
+    for (obj_idx, obj) in objects.iter().enumerate() {
+        for (sec_idx, sec) in obj.sections.iter().enumerate() {
+            if sec.flags & SHF_ALLOC == 0 { continue; }
+            if matches!(sec.sh_type, SHT_NULL | SHT_STRTAB | SHT_SYMTAB | SHT_RELA | SHT_REL | SHT_GROUP) { continue; }
+            if sec.flags & SHF_EXCLUDE != 0 { continue; }
+            all_sections.insert((obj_idx, sec_idx));
+        }
+    }
+
+    // Build a map from symbol name -> (obj_idx, sec_idx) for defined symbols
+    let mut sym_to_section: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (obj_idx, obj) in objects.iter().enumerate() {
+        for sym in &obj.symbols {
+            if sym.shndx == SHN_UNDEF || sym.shndx == SHN_ABS || sym.shndx == SHN_COMMON { continue; }
+            let binding = sym.info >> 4;
+            if binding != STB_GLOBAL && binding != STB_WEAK { continue; }
+            if sym.name.is_empty() { continue; }
+            let sec_idx = sym.shndx as usize;
+            if sec_idx < obj.sections.len() {
+                sym_to_section.entry(sym.name.as_str()).or_insert((obj_idx, sec_idx));
+            }
+        }
+    }
+
+    // Seed the worklist with entry-point sections and sections that must be kept
+    let mut live: HashSet<(usize, usize)> = HashSet::new();
+    let mut worklist: VecDeque<(usize, usize)> = VecDeque::new();
+
+    let mark_live = |key: (usize, usize), live: &mut HashSet<(usize, usize)>, wl: &mut VecDeque<(usize, usize)>| {
+        if all_sections.contains(&key) && live.insert(key) {
+            wl.push_back(key);
+        }
+    };
+
+    // Mark sections containing entry-point symbols as live
+    let entry_symbols = ["_start", "main", "__libc_csu_init", "__libc_csu_fini"];
+    for &entry_name in &entry_symbols {
+        if let Some(&key) = sym_to_section.get(entry_name) {
+            mark_live(key, &mut live, &mut worklist);
+        }
+    }
+
+    // Mark init/fini array sections as live (these are called by the runtime)
+    for (obj_idx, obj) in objects.iter().enumerate() {
+        for (sec_idx, sec) in obj.sections.iter().enumerate() {
+            if sec.flags & SHF_ALLOC == 0 { continue; }
+            let name = &sec.name;
+            // Keep init/fini arrays and .ctors/.dtors (runtime calls these)
+            if name == ".init_array" || name.starts_with(".init_array.")
+                || name == ".fini_array" || name.starts_with(".fini_array.")
+                || name == ".ctors" || name.starts_with(".ctors.")
+                || name == ".dtors" || name.starts_with(".dtors.")
+                || name == ".preinit_array" || name.starts_with(".preinit_array.")
+                || name == ".init" || name == ".fini"
+                || name == ".note.GNU-stack"
+                || name == ".note.gnu.build-id"
+            {
+                mark_live((obj_idx, sec_idx), &mut live, &mut worklist);
+            }
+        }
+    }
+
+    // BFS: follow relocations from live sections to discover more live sections
+    while let Some((obj_idx, sec_idx)) = worklist.pop_front() {
+        let obj = &objects[obj_idx];
+        // Follow relocations from this section
+        if sec_idx < obj.relocations.len() {
+            for rela in &obj.relocations[sec_idx] {
+                let sym_idx = rela.sym_idx as usize;
+                if sym_idx >= obj.symbols.len() { continue; }
+                let sym = &obj.symbols[sym_idx];
+
+                if sym.shndx != SHN_UNDEF && sym.shndx != SHN_ABS && sym.shndx != SHN_COMMON {
+                    // Symbol is defined in this object file
+                    let target = (obj_idx, sym.shndx as usize);
+                    mark_live(target, &mut live, &mut worklist);
+                } else if !sym.name.is_empty() {
+                    // Symbol is undefined here; look up in global symbol table
+                    if let Some(&target) = sym_to_section.get(sym.name.as_str()) {
+                        mark_live(target, &mut live, &mut worklist);
+                    }
+                }
+            }
+        }
+    }
+
+    // Return the dead sections (all sections minus live ones)
+    all_sections.difference(&live).copied().collect()
 }
 
 fn create_plt_got(
