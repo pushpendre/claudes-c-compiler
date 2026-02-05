@@ -1,0 +1,15 @@
+Fix ARM assembler: split_on_semicolons doesn't respect // comments
+
+Problem: When assembling .s files with // comments that contain semicolons
+(e.g., musl's src/ldso/aarch64/tlsdesc.s), the split_on_semicolons function
+splits on ; inside // comments, creating garbage fragments that fail to parse.
+
+Example:
+  // struct {size_t modidx,off;} *p = (void*)a[1];
+Gets split into:
+  1. "// struct {size_t modidx,off"  (treated as comment - OK)
+  2. "} *p = (void*)a[1]"  (parsed as instruction - FAILS)
+
+Fix: Make split_on_semicolons stop splitting when it encounters // (outside strings).
+
+This also affects the shared asm_preprocess.rs split_on_semicolons used by other backends.
