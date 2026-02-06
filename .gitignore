@@ -6,3 +6,5 @@ Cargo.lock
 a.out
 dump.rdb
 core
+__pycache__/
+.DS_Store
